@@ -1,0 +1,7 @@
+/target
+/out
+# Derived from copyrighted game data - never commit.
+/samples
+*.png
+*.jpg
+.DS_Store
