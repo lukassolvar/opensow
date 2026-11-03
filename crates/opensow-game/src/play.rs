@@ -2,15 +2,16 @@
 
 use crate::assets::Assets;
 use crate::menu::Settings;
-use crate::sim::{self, Outcome, World, BLAST_TICKS, CELL};
+use crate::sim::{self, Outcome, World, CELL};
 use crate::ui::{self, Rect};
+use opensow_formats::effects::{bullet_draw, extra_at, Blit, Frame as FrameRule};
 use opensow_formats::level::{ObjectKind, Owner};
 use opensow_formats::recoil::FLASH_SETS;
 use opensow_formats::rings::Rings;
 use opensow_formats::sprite::Frame;
 use opensow_formats::units::unit_art;
 use opensow_viewer::art::Source;
-use opensow_viewer::render::{blit, pack, rect, render, Overlays, View};
+use opensow_viewer::render::{blit, blit_blend, pack, rect, render, Overlays, View};
 use opensow_viewer::scene::Scene;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -48,6 +49,8 @@ pub struct Play {
     pub placing: Option<u32>,
     /// Air force waiting for a click on the map (keys B / F / C / Y / M).
     pub strike: Option<opensow_formats::air::AirForce>,
+    /// Interface sounds raised by clicks (effect ids), drained by the game.
+    pub ui_sounds: Vec<u8>,
     /// The language strings (messages are shown for a few seconds in the HUD).
     lang: Option<opensow_formats::lang::LangFile>,
 }
@@ -85,6 +88,7 @@ impl Play {
             paused: false,
             fit: true,
             placing: None,
+            ui_sounds: Vec::new(),
             strike: None,
             lang: assets.game.resolve("Data\\Language\\langEN.txt").and_then(|p| std::fs::read(p).ok()).and_then(|d| opensow_formats::lang::LangFile::parse(&d).ok()),
         };
@@ -136,6 +140,9 @@ impl Play {
         if (x - sx).abs() > 6 || (y - sy).abs() > 6 {
             let (a, b) = (self.to_map(sx, sy), self.to_map(x, y));
             self.world.select_rect(a.0, a.1, b.0, b.1, additive);
+            if self.world.units.iter().any(|u| u.selected) {
+                self.ui_sounds.push(60); // unit-select
+            }
         } else {
             let p = self.to_map(x, y);
             if let Some(force) = self.strike.take() {
@@ -158,15 +165,29 @@ impl Play {
                 }
             }
             self.world.select_at(p.0, p.1, 22.0, additive);
+            if self.world.units.iter().any(|u| u.selected) {
+                self.ui_sounds.push(60);
+            }
         }
     }
 
     pub fn right_click(&mut self, x: i32, y: i32) {
         let (mx, my) = self.to_map(x, y);
         // right-click on an enemy attacks it, anywhere else moves
+        let any = self.world.units.iter().any(|u| u.selected);
         match self.world.enemy_at(mx, my) {
-            Some(t) => self.world.order_attack_selected(t),
-            None => self.world.order_move_selected(mx, my),
+            Some(t) => {
+                self.world.order_attack_selected(t);
+                if any {
+                    self.ui_sounds.push(59); // unit-attack
+                }
+            }
+            None => {
+                self.world.order_move_selected(mx, my);
+                if any {
+                    self.ui_sounds.push(55); // tt-dest, the order acknowledgement
+                }
+            }
         }
     }
 
@@ -260,12 +281,17 @@ impl Play {
         }
         let overlays = Overlays { blocked: false, grid: false, objects: false, markers: false, sprites: true, muzzles: false, walk: None, fire: None };
         render(&self.scene, &self.view, overlays, buf, w, h);
+        for d in &self.world.decals {
+            if let Some((set, i)) = Self::extra_frame(assets, opensow_formats::effects::DECAL_ARRAY, d.frame as usize) {
+                blit_blend(buf, w, h, &self.view, &set[i], d.x, d.y, Blit::Darken);
+            }
+        }
 
         if settings.show_range {
             self.draw_ranges(buf, w, h);
         }
         self.draw_units(assets, settings, buf, w, h);
-        self.draw_bullets(buf, w, h);
+        self.draw_bullets(assets, buf, w, h);
         self.draw_hud(assets, buf, w, h, ui_scale);
 
         if let Some((sx, sy)) = self.drag {
@@ -391,7 +417,15 @@ impl Play {
         }
     }
 
-    fn draw_bullets(&self, buf: &mut [u32], w: usize, h: usize) {
+    /// Frame `index` of the effect sprite array at exe address `array` (an element of one of `effects::EXTRAS`).
+    fn extra_frame(assets: &mut Assets, array: u32, index: usize) -> Option<(Set, usize)> {
+        let (extra, offset) = extra_at(array)?;
+        let set = assets.art.load(&format!("{}.ps6", extra.name))?;
+        let i = offset + index;
+        (i < set.len()).then_some((set, i))
+    }
+
+    fn draw_bullets(&self, assets: &mut Assets, buf: &mut [u32], w: usize, h: usize) {
         // air forces: a shadow on the ground and a body at the flight altitude (placeholder shapes; the art is not wired yet)
         for a in &self.world.aircraft {
             let (gx, gy) = self.view.to_screen(a.x as f32, a.y as f32);
@@ -403,17 +437,33 @@ impl Play {
         }
         for b in &self.world.bullets {
             let (x, y) = b.position();
-            let (sx, sy) = self.view.to_screen(x as f32, y as f32);
-            let r = ((2.5 * self.view.zoom) as i32).max(1);
-            rect(buf, w, h, sx - r, sy - r, sx + r + 1, sy + r + 1, (255, 235, 120), 255);
+            let mut drawn = false;
+            for layer in bullet_draw(b.bullet_type) {
+                let anim = b.anim.map_or(0, |a| a.frame.max(0) as usize);
+                let index = match layer.frame {
+                    FrameRule::Fixed(n) => n as usize,
+                    FrameRule::Anim(o) => anim + o as usize,
+                    FrameRule::Facing => b.facing as usize,
+                    FrameRule::Variant268c(_) | FrameRule::Variant2680(_) => anim,
+                };
+                if let Some((set, i)) = Self::extra_frame(assets, layer.array, index) {
+                    blit_blend(buf, w, h, &self.view, &set[i], x, y, Blit::of_routine(layer.routine));
+                    drawn = true;
+                }
+            }
+            // a dot where the type has art that is not loaded here (the unit boom pieces) or no draw case at all (not the types that draw nothing in the exe)
+            let draws_nothing = bullet_draw(b.bullet_type).is_empty() && matches!(b.bullet_type, 6..=10 | 12 | 14 | 20 | 27 | 31);
+            if !drawn && !draws_nothing {
+                let (sx, sy) = self.view.to_screen(x as f32, y as f32);
+                let r = ((2.5 * self.view.zoom) as i32).max(1);
+                rect(buf, w, h, sx - r, sy - r, sx + r + 1, sy + r + 1, (255, 235, 120), 255);
+            }
         }
-        for b in &self.world.blasts {
-            let (sx, sy) = self.view.to_screen(b.x as f32, b.y as f32);
-            let t = b.age as f32 / BLAST_TICKS as f32;
-            let r = ((6.0 + 22.0 * t) * self.view.zoom) as i32;
-            rect(buf, w, h, sx - r, sy - r, sx + r, sy + r, (255, (190.0 - 120.0 * t) as u8, 40), ((1.0 - t) * 170.0) as u32);
-            let r2 = r / 2;
-            rect(buf, w, h, sx - r2, sy - r2, sx + r2, sy + r2, (255, 245, 190), ((1.0 - t) * 220.0) as u32);
+        for e in &self.world.effects {
+            let Some(frame) = e.spec.frame_at(e.age) else { continue };
+            if let Some((set, i)) = Self::extra_frame(assets, e.spec.array, frame) {
+                blit_blend(buf, w, h, &self.view, &set[i], e.x, e.y, Blit::Additive);
+            }
         }
     }
 

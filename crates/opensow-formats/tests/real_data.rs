@@ -760,3 +760,416 @@ fn sfx_table_files_exist_and_match_the_exes_loader() {
     let calls = (0..code.len() - 4).filter(|&i| code[i] == 0xE8 && (0x406dc0 + i as u32 + 5).wrapping_add(i32::from_le_bytes(code[i + 1..i + 5].try_into().unwrap()) as u32) == 0x407470).count();
     assert_eq!(calls, SFX.len(), "one load call per table entry");
 }
+
+impl Exe {
+    /// Virtual address of the NUL-terminated string `s` in the image.
+    fn string_va(&self, s: &str) -> u32 {
+        let mut needle = s.as_bytes().to_vec();
+        needle.push(0);
+        for &(va, size, raw) in &self.sections {
+            let hay = &self.data[raw as usize..(raw + size) as usize];
+            if let Some(i) = hay.windows(needle.len()).position(|w| w == &needle[..]) {
+                return self.image_base + va + i as u32;
+            }
+        }
+        panic!("string {s:?} not in the image");
+    }
+
+    /// Sprite arrays and blit calls of a bullet-draw case: `push [abs]` (FF 35) and `push [reg*4+abs]` (FF 34 xx) give the
+    /// arrays, `call rel32` the routines; unconditional jumps are followed; stops at `ret 8`.
+    fn draw_case(&self, mut va: u32) -> (Vec<u32>, Vec<u32>) {
+        let (mut arrays, mut calls) = (Vec::new(), Vec::new());
+        let mut jumps = 0;
+        let mut i = 0usize;
+        loop {
+            let code = self.at(va + i as u32, 8);
+            match code[0] {
+                0xC2 => return (arrays, calls),
+                0xFF if code[1] == 0x35 => {
+                    arrays.push(u32::from_le_bytes(code[2..6].try_into().unwrap()));
+                    i += 6;
+                }
+                0xFF if code[1] == 0x34 && code[2] == 0x85 => {
+                    arrays.push(u32::from_le_bytes(code[3..7].try_into().unwrap()));
+                    i += 7;
+                }
+                0xE8 => {
+                    let rel = i32::from_le_bytes(code[1..5].try_into().unwrap());
+                    calls.push((va + i as u32 + 5).wrapping_add(rel as u32));
+                    i += 5;
+                }
+                0xE9 | 0xEB => {
+                    let (rel, len) = if code[0] == 0xE9 { (i32::from_le_bytes(code[1..5].try_into().unwrap()), 5) } else { (code[1] as i8 as i32, 2) };
+                    va = (va + i as u32 + len).wrapping_add(rel as u32);
+                    i = 0;
+                    jumps += 1;
+                    assert!(jumps < 4, "too many jumps");
+                }
+                _ => i += 1, // bytes of instructions this scan does not need (they never contain the three patterns above in this code)
+            }
+            assert!(i < 400, "no ret found");
+        }
+    }
+}
+
+#[test]
+fn extras_table_matches_the_exes_loader() {
+    use opensow_formats::effects::EXTRAS;
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    // every load is `push cap; push dest; push ecx; mov ecx, esp; push name` (cap as 6A imm8 or 68 imm32)
+    let code = exe.at(0x424700, 0xf00);
+    for e in EXTRAS {
+        let name = exe.string_va(e.name);
+        let mut pat = if e.slots < 0x80 { vec![0x6A, e.slots as u8] } else { [&[0x68][..], &(e.slots as u32).to_le_bytes()].concat() };
+        pat.push(0x68);
+        pat.extend(e.addr.to_le_bytes());
+        pat.extend([0x51, 0x8B, 0xCC]);
+        assert!(code.windows(pat.len()).any(|w| w == &pat[..]), "{} not loaded as {} slots at {:#x}", e.name, e.slots, e.addr);
+        // the name follows (a branch on the low-detail flag may sit between for the two explosion sprites)
+        let mut push_name = vec![0x68];
+        push_name.extend(name.to_le_bytes());
+        assert!(code.windows(5).any(|w| w == &push_name[..]), "{} name push", e.name);
+        let file = game.resolve(&format!("Data\\sprites.data"));
+        assert!(file.is_some());
+    }
+}
+
+#[test]
+fn bullet_draw_table_matches_the_exes_draw_function() {
+    use opensow_formats::effects::bullet_draw;
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    let jt: Vec<u32> = exe.at(0x410e7c, 34 * 4).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+    for ty in 1..=34u8 {
+        let (arrays, calls) = exe.draw_case(jt[ty as usize - 1]);
+        let layers = bullet_draw(ty);
+        // the particle types loop over their fragments but have one array and one call in the code
+        assert_eq!(arrays.len(), layers.len(), "type {ty} arrays");
+        assert_eq!(calls.len(), layers.len(), "type {ty} calls");
+        for (i, l) in layers.iter().enumerate() {
+            assert_eq!((arrays[i], calls[i]), (l.array, l.routine), "type {ty} layer {i}");
+        }
+    }
+}
+
+#[test]
+fn impact_sounds_match_the_exes_impact_function() {
+    use opensow_formats::effects::impact_sound;
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    let map = exe.at(0x410a14, 26).to_vec();
+    let jt: Vec<u32> = exe.at(0x4109f0, 9 * 4).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+    for ty in 1..=26u8 {
+        let target = jt[map[ty as usize - 1] as usize];
+        let want = if target == 0x40f66a {
+            None
+        } else {
+            // the case pushes the sound id (6A imm8) last before it jumps to the shared call at 0x40f660
+            let code = exe.at(target, 48);
+            let (mut i, mut id) = (0, None);
+            loop {
+                match code[i] {
+                    0x6A => { id = Some(code[i + 1]); i += 2; }
+                    0xE8 => i += 5,
+                    0x0F => i += 6,
+                    0xFF => i += 3,
+                    0xEB | 0xE9 | 0xB9 => break, // the jump to the shared call, or (type 24 and 25) the call setup itself
+                    _ => i += 1,
+                }
+            }
+            id
+        };
+        if ty == 22 {
+            continue; // type 22 is excluded before the table (cmp edx, 0x16; je)
+        }
+        assert_eq!(impact_sound(ty), want, "type {ty}");
+    }
+}
+
+#[test]
+fn animation_spawn_sites_match_the_exes_calls() {
+    use opensow_formats::effects::SPAWNS;
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    for s in SPAWNS {
+        // push flag; push repeat; push to; push from; push array; push period; (push y; push x ...) call
+        let window = exe.at(s.site - 64, 64);
+        let imm = |v: u32| if v < 0x80 { vec![0x6A, v as u8] } else { [&[0x68][..], &v.to_le_bytes()].concat() };
+        let tokens = [imm(s.spec.repeat as u32), imm(s.spec.to as u32), imm(s.spec.from as u32), [&[0x68][..], &s.spec.array.to_le_bytes()].concat(), imm(s.spec.period as u32)];
+        // the argument pushes appear in this order, possibly with other instructions between them
+        let mut at = 0;
+        for t in &tokens {
+            let p = window[at..].windows(t.len()).position(|w| w == &t[..]).unwrap_or_else(|| panic!("site {:#x} ({}): token {t:02x?} missing", s.site, s.what));
+            at += p + t.len();
+        }
+        assert_eq!(exe.at(s.site, 1)[0], 0xE8, "site {:#x} is a call", s.site);
+    }
+}
+
+#[test]
+fn effect_frame_ranges_fit_the_sprite_files() {
+    use opensow_formats::effects::{blast, extra_at, AnimSpec, SPAWNS};
+    use opensow_formats::{megafile::MegaFile, sprite};
+    let Some(game) = GameDir::locate() else { return };
+    let mega = MegaFile::open(&game.data().join("sprites.info"), &game.data().join("sprites.data")).unwrap();
+    let frames = |spec: &AnimSpec| -> Option<usize> {
+        let (e, offset) = extra_at(spec.array)?;
+        let entry = mega.find(&format!("{}.ps6", e.name)).unwrap_or_else(|| panic!("{} missing", e.name));
+        Some(sprite::parse(&mega.read(entry).unwrap(), sprite::Kind::Color).unwrap().len() - offset)
+    };
+    for s in SPAWNS {
+        if let Some(n) = frames(&s.spec) {
+            assert!(s.spec.to as usize <= n, "site {:#x} ({}): frames {}..{} of {n}", s.site, s.what, s.spec.from, s.spec.to);
+        }
+    }
+    for size in 0..7u8 {
+        let spec = blast(size);
+        // the file holds exactly the frames played, except blast2_defrag (size 4): 28 frames, the exe plays 23
+        let n = frames(&spec).unwrap();
+        assert!(if size == 4 { n == 28 } else { n == spec.to as usize }, "blast size {size}: {n} frames");
+    }
+}
+
+#[test]
+fn smoke_puff_constants_match_the_exes_constructor() {
+    use opensow_formats::effects::{smoke_puff, DECAL_ARRAY};
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    let code = exe.at(0x405340, 0x160).to_vec();
+    let has = |pat: &[u8]| code.windows(pat.len()).any(|w| w == pat);
+    let spec = smoke_puff(0, 0);
+    assert!(has(&[0xC7, 0x47, 0x0C, spec.period, 0, 0, 0]), "period [+0xc]");
+    assert!(has(&[0xC7, 0x47, 0x10, spec.period, 0, 0, 0]), "period [+0x10]");
+    assert!(has(&[0xC7, 0x47, 0x34, 8, 0, 0, 0]), "draw mode 8");
+    assert!(has(&[0xC6, 0x47, 0x1C, 0]), "flag 0");
+    assert!(has(&[0x6A, 0x02]) && has(&[0x6A, 0x0D]) && has(&[0x83, 0xC0, 0x04]), "random(2), random(13) + 4");
+    assert!(has(&[0x83, 0xFA, spec.to as u8]), "9 frames per pass");
+    assert!(has(&spec.array.to_le_bytes()), "fire_sm array");
+    // the decal draw (0x41a160) reads the 0x5e6960 array through the darkening blit
+    let draw = exe.at(0x41a160, 0x60);
+    assert!(draw.windows(4).any(|w| w == DECAL_ARRAY.to_le_bytes()));
+    assert!(draw.windows(5).any(|w| w == [0xE8, 0x7B, 0xE7, 0x03, 0x00]) || draw.iter().any(|&b| b == 0xE8), "calls the blit");
+    // fire_sm1/2 and pustkrat exist with the frames the puff and decal use
+    use opensow_formats::{megafile::MegaFile, sprite};
+    let mega = MegaFile::open(&game.data().join("sprites.info"), &game.data().join("sprites.data")).unwrap();
+    let frames = |name: &str| sprite::parse(&mega.read(mega.find(name).unwrap_or_else(|| panic!("{name}"))).unwrap(), sprite::Kind::Color).unwrap().len();
+    assert!(frames("extras\\fire_sm1.ps6") >= 9 && frames("extras\\fire_sm2.ps6") >= 9);
+    assert!(frames("__extras\\pustkrat.ps6") >= 5);
+}
+
+#[test]
+fn savegame_constants_match_the_exes_save_code() {
+    use opensow_formats::save::{INFO_VERSION, STATE_VERSION, TAGS, THUMB_H, THUMB_W};
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    // section tags and their order in the string table
+    for tag in TAGS {
+        exe.string_va(tag);
+    }
+    let has = |va: u32, len: usize, pat: &[u8]| exe.at(va, len).windows(pat.len()).any(|w| w == pat);
+    // state serializer 0x42a400: [ebp-0x4c] = 1, push 0x5a10, call the header writer 0x403e10
+    assert!(has(0x42a400, 0x60, &[0xC7, 0x45, 0xB4, STATE_VERSION.0 as u8, 0, 0, 0]));
+    assert!(has(0x42a400, 0x60, &[0x68, STATE_VERSION.1 as u8, (STATE_VERSION.1 >> 8) as u8, 0, 0]));
+    // info writer 0x42be20: 2 and 0x1e5
+    assert!(has(0x42be20, 0x60, &[0xC7, 0x85, 0xA0, 0xFE, 0xFF, 0xFF, INFO_VERSION.0 as u8, 0, 0, 0]));
+    assert!(has(0x42be20, 0x60, &[0x68, INFO_VERSION.1 as u8, (INFO_VERSION.1 >> 8) as u8, 0, 0]));
+    // the thumbnail is the u16 range 0x71065c..0x719c5c of the exe's memory
+    assert_eq!((0x719c5cu32 - 0x71065c) as usize, THUMB_W * THUMB_H * 2);
+    assert!(has(0x42be20, 0x400, &0x71065cu32.to_le_bytes()) && has(0x42be20, 0x400, &0x719c5cu32.to_le_bytes()));
+}
+
+#[test]
+fn muzzle_sounds_match_the_exes_volley_spawner() {
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    let index = exe.at(0x47d28c, 0x71).to_vec();
+    let cases = *index.iter().max().unwrap() as usize + 1;
+    let targets: Vec<u32> = exe.at(0x47d244, cases * 4).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+    let mut checked = 0;
+    for kind in 1..=0x71u32 {
+        let target = targets[index[kind as usize - 1] as usize];
+        let expected = if target == 0x47d226 {
+            None
+        } else {
+            // push 0; push <jitter>; push ecx; push ebx; push <id>  (6A 00 6A j 51 53 6A id)
+            let c = exe.at(target, 9);
+            assert_eq!((c[0], c[2], c[4], c[5], c[6]), (0x6A, 0x6A, 0x51, 0x53, 0x6A), "case of kind {kind}: {c:02x?}");
+            Some((c[7], c[3] == 1))
+        };
+        assert_eq!(opensow_formats::sfx::muzzle(kind as u8), expected, "kind {kind}");
+        checked += 1;
+    }
+    assert_eq!(checked, 0x71);
+    // the exe leaves everything above the table's range silent, like `muzzle`
+    assert_eq!(opensow_formats::sfx::muzzle(0x72), None);
+}
+
+#[test]
+fn unit_death_matches_the_exes_destruction_code() {
+    use opensow_formats::effects::{debris, DEBRIS_DELAY, UNIT_DEATH_CLOUDS, UNIT_DEATH_SOUND};
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    // the clouds: 8 initialisers of the e_unit2 array (0x5e9888, frames 0..0x1d, period 3) and one wreck (0x5e92e8)
+    let code = exe.at(0x46a560, 0x700).to_vec();
+    let count = |pat: &[u8]| code.windows(pat.len()).filter(|w| *w == pat).count();
+    let mut cloud = vec![0x6A, 0x01, 0x6A, 0x01, 0x6A, 0x1D, 0x6A, 0x00, 0x68];
+    cloud.extend(0x5e9888u32.to_le_bytes());
+    assert_eq!(count(&cloud), 2 * UNIT_DEATH_CLOUDS as usize, "four clouds in each of the two branches");
+    let mut wreck = vec![0x6A, 0x00, 0x6A, 0x01, 0x6A, 0x14, 0x6A, 0x00, 0x68];
+    wreck.extend(0x5e92e8u32.to_le_bytes());
+    assert_eq!(count(&wreck), 1);
+    // sound 27 (0x1b) through 0x4077e0, once, for every kind
+    assert!(exe.at(0x46aba1, 8).starts_with(&[0xFF, 0x77, 0x18, 0xFF, 0x77, 0x14, 0x6A, UNIT_DEATH_SOUND]));
+    // debris classes: byte table 0x46b110 over kinds 1..=45, cases at 0x46b100 push the spreads 0x1e, 0x28, 0x3c
+    let index = exe.at(0x46b110, 0x2d).to_vec();
+    let cases: Vec<u32> = exe.at(0x46b100, 16).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+    for kind in 1..=45i32 {
+        let case = cases[index[kind as usize - 1] as usize];
+        match debris(kind) {
+            None => assert_eq!(case, 0x46acf2, "kind {kind}"),
+            Some(d) => {
+                let c = exe.at(case, 0x20);
+                // push 2; call rand; ...; push spread
+                assert!(c.windows(2).any(|w| w == [0x6A, d.spread as u8]), "kind {kind} spread {}", d.spread);
+                assert!(exe.at(case, 0x80).windows(7).any(|w| w == [0xC7, 0x45, 0xE8, d.bullet_param as u8, 0, 0, 0]), "kind {kind} bullet param");
+                assert!(exe.at(case, 0x80).windows(7).any(|w| w == [0xC7, 0x45, 0xE4, d.wreck_param as u8, 0, 0, 0]), "kind {kind} wreck param");
+            }
+        }
+    }
+    // the bullet: 0x411dc0(type 15 + (team != 0), 0x28, ...)
+    assert_eq!(DEBRIS_DELAY, 0x28);
+    assert!(exe.at(0x46ae02, 12).windows(2).any(|w| w == [0x6A, 0x28]));
+}
+
+#[test]
+fn intro_videos_are_plain_media_files() {
+    use opensow_formats::video::{parse, Video};
+    let Some(game) = GameDir::locate() else { return };
+    let open = |n: &str| std::fs::read(game.resolve(&format!("data\\levels\\{n}.sgv")).unwrap()).unwrap();
+    let Video::Mpeg(m) = parse(&open("M01")).unwrap() else { panic!("M01 is MPEG-1") };
+    assert_eq!((m.width, m.height, m.frame_rate()), (320, 208, 25.0));
+    // every picture is one frame at 25 fps, so the pack clock must agree with the picture count
+    let frames: u32 = m.pictures.iter().sum();
+    assert!((frames as f64 / 25.0 - m.duration).abs() < 0.5, "{frames} frames vs {}s", m.duration);
+    let Video::Avi(a) = parse(&open("mA")).unwrap() else { panic!("mA is AVI") };
+    assert_eq!((a.width, a.height, a.frames), (640, 480, 104));
+    assert_eq!(&a.streams[0].handler, b"IV50");
+    let Video::Avi(b) = parse(&open("mB")).unwrap() else { panic!("mB is AVI") };
+    assert_eq!(&b.streams[0].handler, b"CRAM");
+}
+
+#[test]
+fn mpeg1_decoder_matches_an_independent_decoder() {
+    use opensow_formats::{mpeg1, video};
+    let Some(game) = GameDir::locate() else { return };
+    let data = std::fs::read(game.resolve("data\\levels\\M01.sgv").unwrap()).unwrap();
+    let frames = mpeg1::decode(&video::video_stream(&data).unwrap()).unwrap();
+    assert_eq!(frames.len(), 323);
+    // mean luma and one pixel of frames 0, 150 and the last (black) one, as decoded by FFmpeg;
+    // the integer-vs-float IDCT differs by at most a couple of levels
+    for (i, mean, px) in [(0, 84.495, 90i32), (150, 74.535, 100), (322, 16.0, 16)] {
+        let f = &frames[i];
+        let m = f.y[..208 * 320].iter().map(|&v| v as f64).sum::<f64>() / (208.0 * 320.0);
+        assert!((m - mean).abs() < 0.3, "frame {i}: mean {m} vs {mean}");
+        assert!((f.y[100 * 320 + 160] as i32 - px).abs() <= 3, "frame {i} pixel");
+    }
+}
+
+#[test]
+fn mp2_decoder_matches_an_independent_decoder() {
+    use opensow_formats::{mp2, video};
+    let Some(game) = GameDir::locate() else { return };
+    let data = std::fs::read(game.resolve("data\\levels\\M01.sgv").unwrap()).unwrap();
+    let audio = mp2::decode(&video::audio_stream(&data).unwrap()).unwrap();
+    assert_eq!((audio.sample_rate, audio.channels, audio.pcm.len() / 2), (44100, 2, 569088));
+    // samples 380..390 of the left channel as decoded by FFmpeg (we may differ by one from rounding)
+    let want = [203, 211, 193, 146, 47, -42, -80, -133, -206, -245];
+    for (i, w) in want.iter().enumerate() {
+        let got = audio.pcm[(380 + i) * 2] as i32;
+        assert!((got - w).abs() <= 1, "sample {}: {got} vs {w}", 380 + i);
+    }
+    // the 160 kbit/s intro uses the other allocation table
+    let intro = std::fs::read(game.resolve("data\\levels\\mI.sgv").unwrap()).unwrap();
+    let a = mp2::decode(&video::audio_stream(&intro).unwrap()).unwrap();
+    assert_eq!(a.pcm.len() / 2, 8210304);
+}
+
+#[test]
+fn ms_video_1_matches_an_independent_decoder_exactly() {
+    use opensow_formats::{msvideo1, video};
+    let Some(game) = GameDir::locate() else { return };
+    let data = std::fs::read(game.resolve("data\\levels\\mB.sgv").unwrap()).unwrap();
+    let video::Video::Avi(avi) = video::parse(&data).unwrap() else { panic!("mB is an AVI") };
+    let s = &avi.streams[0];
+    let mut dec = msvideo1::Decoder::new(s.format[0] as usize, s.format[1] as usize, msvideo1::Decoder::palette_from_strf(&s.strf));
+    let chunks = video::avi_chunks(&data, 0).unwrap();
+    assert_eq!(chunks.len(), 100);
+    // RGB byte sums and the centre pixel of frames 0, 50 and 99 as decoded by FFmpeg (bit exact)
+    let want = [(0, 990095u64, [11u8, 67, 3]), (50, 1023822, [11, 75, 3]), (99, 993693, [11, 75, 3])];
+    for (i, c) in chunks.iter().enumerate() {
+        dec.decode(c).unwrap();
+        if let Some((_, sum, px)) = want.iter().find(|w| w.0 == i) {
+            let rgb = dec.to_rgb();
+            assert_eq!(rgb.iter().map(|&v| v as u64).sum::<u64>(), *sum, "frame {i}");
+            assert_eq!(&rgb[(56 * 128 + 64) * 3..][..3], px);
+        }
+    }
+}
+
+#[test]
+fn indeo5_decodes_the_whole_ma_video_like_the_reference_decoder() {
+    use opensow_formats::{indeo5, video};
+    let Some(game) = GameDir::locate() else { return };
+    let data = std::fs::read(game.resolve("data\\levels\\mA.sgv").unwrap()).unwrap();
+    let chunks = video::avi_chunks(&data, 0).unwrap();
+    assert_eq!(chunks.len(), 104);
+    // plane sums and centre pixels from FFmpeg's output (bit exact): (frame, sum Y, sum U, sum V, Y, U, V)
+    let want: [(usize, u64, u64, u64, u8, u8, u8); 4] = [
+        (0, 4935393, 2456992, 2456905, 80, 108, 101),
+        (12, 6745909, 2403372, 2395270, 120, 92, 85),
+        (50, 6924667, 2396019, 2385593, 68, 110, 106),
+        (103, 16137607, 2120171, 2067167, 113, 97, 93),
+    ];
+    for (n, chunk) in chunks.iter().enumerate() {
+        let f = indeo5::decode(chunk).unwrap_or_else(|e| panic!("frame {n}: {e}"));
+        assert_eq!((f.width, f.height, f.chroma_width, f.chroma_height), (640, 480, 160, 120));
+        if let Some(&(_, y, u, v, py, pu, pv)) = want.iter().find(|w| w.0 == n) {
+            let sum = |p: &[u8]| p.iter().map(|&b| b as u64).sum::<u64>();
+            assert_eq!((sum(&f.y), sum(&f.u), sum(&f.v)), (y, u, v), "frame {n}");
+            assert_eq!((f.y[240 * 640 + 320], f.u[60 * 160 + 80], f.v[60 * 160 + 80]), (py, pu, pv), "frame {n}");
+        }
+    }
+}
+
+#[test]
+fn campaign_progress_rules_match_the_exes_pass_function() {
+    use opensow_formats::config::{PassedLevels, UNLOCK_ORDER};
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    // `0x4565a0` CPassedLevels::Pass: every `cmp byte ptr [ecx+disp8], 0` (80 79 disp 00) names the next land to open, in order
+    let code = exe.at(0x4565a0, 0x170);
+    let order: Vec<usize> = code.windows(4).filter(|w| w[0] == 0x80 && w[1] == 0x79 && w[3] == 0).map(|w| w[2] as usize - 4).collect();
+    assert_eq!(order, UNLOCK_ORDER);
+    // the finale opens land 22 (`mov byte ptr [ecx+0x1a], 2`) and level 22 itself goes to state 2 (`push 2` at 0x4565ab)
+    assert!(code.windows(4).any(|w| w == [0xc6, 0x41, 0x1a, 0x02]));
+    assert_eq!(exe.at(0x4565a6, 7), [0x83, 0xf8, 0x16, 0x75, 0x10, 0x6a, 0x02]);
+    // the state of a new campaign (`0x456a86`: word [esi+5] = 0x202, byte [esi+0xd] = 2)
+    let init = exe.at(0x456a86, 11);
+    assert_eq!(init, [0x66, 0xc7, 0x46, 0x05, 0x02, 0x02, 0xc6, 0x46, 0x0d, 0x02, 0xe8]);
+    let p = PassedLevels::initial();
+    assert_eq!([p.states[1], p.states[2], p.states[9]], [2, 2, 2]);
+}
+
+#[test]
+fn every_music_track_is_plain_pcm() {
+    let Some(game) = GameDir::locate() else { return };
+    let mut total = 0.0;
+    for name in ["Menu", "Brief", "Brief2", "Statistic", "uvod", "Level01", "Level02", "Level03", "Level04", "Level05", "Level06", "Level07", "Level08", "Level09", "Level10", "Level11", "Level12", "Level13"] {
+        let path = game.resolve(&format!("Data\\Sounds\\Music\\{name}.wav")).unwrap_or_else(|| panic!("{name}.wav missing"));
+        let w = opensow_formats::wav::parse(&std::fs::read(path).unwrap()).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(w.sample_rate == 22050 && (1..=2).contains(&w.channels), "{name}: {} Hz {} ch", w.sample_rate, w.channels);
+        total += w.seconds();
+    }
+    assert!(total > 1000.0, "{total} s of music");
+}

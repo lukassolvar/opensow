@@ -11,14 +11,16 @@ use opensow_formats::buildings::{blocked_cells, can_place, footprint};
 use opensow_formats::air::{AirForce, HEADER_ORDER};
 use opensow_formats::aircraft::{launch_counter, squad, Aircraft, Event as AirEvent};
 use opensow_formats::anim::{walk_params, ChassisAnim, HOVER_ALTITUDE, HOVER_PERIOD, HOVER_PHASES, HOVER_TABLE};
+use opensow_formats::effects::{blast, impact_anims, impact_leaves_decal, impact_smoke, smoke_puff, UNIT_DEATH_PUFFS, AnimSpec, BulletAnim, AIR_DESTROYED, BUILDING_DESTROYED, TURRET_DESTROYED, UNIT_CLOUD, UNIT_WRECK, debris, DEBRIS_DELAY, UNIT_DEATH_CLOUDS};
 use opensow_formats::facing::{facing, heading_degrees, turn_step};
 use opensow_formats::messages as msg;
 use opensow_formats::level::{Level, ObjectKind, Owner, UnitKind};
 use opensow_formats::production::{factory_exit, income_per_tick, next_tier, rate_row, slot_target, slot_unlock_cost, turret_price, Slots, CREDITS_CAP, RESEARCH_CAP};
 use opensow_formats::projectile::{TRIPLER_BLAST_STRENGTH, TRIPLER_RING, TRIPLER_RING_USED, build_path, bullet_type, splash_victims, steps_at, weapon_shot, Path, UnitRef};
 use opensow_formats::rings::Rings;
+use opensow_formats::wave::{approach, Wave};
 use opensow_formats::rng::GameRng;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::HashMap;
 
 pub const CELL: i32 = 32;
 /// Game ticks per second: the exe's frame accumulator (0x42e890) emits one tick per 1666 hundredths of a millisecond = 16.66 ms.
@@ -212,23 +214,52 @@ pub struct Bullet {
     pub owner: i32,
     pub path: Path,
     pub index: usize,
+    /// Sprite frame state (`effects::BulletAnim`), for the types with a timer animation or progress-driven frame.
+    pub anim: Option<BulletAnim>,
+    /// Facing of the flight direction in 32 steps (the missile sprite).
+    pub facing: u8,
 }
 
 impl Bullet {
+    pub fn new(bullet_type: u8, strength: i32, owner: i32, path: Path) -> Bullet {
+        let index = path.first_step;
+        let anim = crate::sim::bullet_type(bullet_type).and_then(|t| t.anim).map(BulletAnim::new);
+        let (a, b) = (path.points[0], *path.points.last().unwrap());
+        let facing = facing(a.0, a.1, b.0, b.1, 32) as u8;
+        Bullet { bullet_type, strength, owner, path, index, anim, facing }
+    }
+
     pub fn position(&self) -> (i32, i32) {
         self.path.points[self.index.min(self.path.points.len() - 1)]
     }
 }
 
-/// A short-lived explosion marker for the renderer.
+/// A scorch mark on the ground (`effects::impact_leaves_decal`): frame 0-4 of the decal sprite, one per cell.
 #[derive(Debug, Clone, Copy)]
-pub struct Blast {
+pub struct Decal {
     pub x: i32,
     pub y: i32,
+    pub cell: (i32, i32),
+    pub frame: u8,
+}
+
+/// An animation sprite playing at a map position (explosions, smoke, wrecks; `effects::AnimSpec`).
+#[derive(Debug, Clone, Copy)]
+pub struct Effect {
+    pub x: i32,
+    pub y: i32,
+    pub spec: AnimSpec,
     pub age: u32,
 }
 
-pub const BLAST_TICKS: u32 = 14;
+/// The grids of the exe's local avoidance search (docs/walking.md).
+pub struct Occupancy {
+    ground: Wave,
+    walker: Wave,
+    stat: Vec<u32>,
+    /// `[0x49a360]`, the base of the static grid.
+    stat_base: u32,
+}
 
 pub struct World {
     pub cells: (i32, i32),
@@ -236,7 +267,14 @@ pub struct World {
     pub units: Vec<Unit>,
     pub structures: Vec<Structure>,
     pub bullets: Vec<Bullet>,
-    pub blasts: Vec<Blast>,
+    pub effects: Vec<Effect>,
+    /// Sound effects raised this tick (effect id, map x, map y, pitch jitter); the game drains them (`sfx.rs`).
+    pub sounds: Vec<(u8, i32, i32, bool)>,
+    pub decals: Vec<Decal>,
+    /// The exe's visual generator (`0x437cd0`), kept apart from the lockstep one.
+    fx_rng: u32,
+    /// Built lazily once per tick.
+    occ: Option<Occupancy>,
     pub tick: u64,
     pub outcome: Option<Outcome>,
     next_id: u32,
@@ -299,7 +337,11 @@ impl World {
             units: Vec::new(),
             structures: Vec::new(),
             bullets: Vec::new(),
-            blasts: Vec::new(),
+            effects: Vec::new(),
+            sounds: Vec::new(),
+            decals: Vec::new(),
+            fx_rng: 0x9E3779B9,
+            occ: None,
             tick: 0,
             outcome: None,
             next_id: 1,
@@ -422,6 +464,48 @@ impl World {
         self.game_rng = Some(rng);
     }
 
+    fn fx_random(&mut self, n: u32) -> u32 {
+        self.fx_rng ^= self.fx_rng << 13;
+        self.fx_rng ^= self.fx_rng >> 17;
+        self.fx_rng ^= self.fx_rng << 5;
+        self.fx_rng % n.max(1)
+    }
+
+    /// Scorch decal and smoke puffs of a landing bullet (the generic tail of the impact function, docs/effects.md).
+    fn impact_ground_effects(&mut self, x: i32, y: i32, bt: u8) {
+        let cell = (x.div_euclid(CELL), y.div_euclid(CELL));
+        let inside = cell.0 > 0 && cell.0 < self.cells.0 && cell.1 > 0 && cell.1 < self.cells.1;
+        let free = inside && !self.is_blocked(cell.0, cell.1);
+        if matches!(bt, 17 | 18) {
+            if free {
+                for _ in 0..impact_smoke(bt, 0) {
+                    let (dx, dy) = (self.fx_random(20) as i32 - 10, self.fx_random(20) as i32 - 10);
+                    self.puff(x + dx, y + dy);
+                }
+            }
+            return;
+        }
+        if !impact_leaves_decal(bt) || !inside {
+            return;
+        }
+        if free && !self.decals.iter().any(|d| d.cell == cell) {
+            let frame = (self.fx_random(9) / 2) as u8;
+            self.decals.push(Decal { x, y, cell, frame });
+        }
+        let roll = self.random(3);
+        if free {
+            for _ in 0..impact_smoke(bt, roll) {
+                let (dx, dy) = (self.fx_random(20) as i32 - 10, self.fx_random(20) as i32 - 10);
+                self.puff(x + dx, y + dy);
+            }
+        }
+    }
+
+    fn puff(&mut self, x: i32, y: i32) {
+        let (variant, extra) = (self.fx_random(2) as u8, self.fx_random(13) as u8);
+        self.effects.push(Effect { x, y, spec: smoke_puff(variant, extra), age: 0 });
+    }
+
     fn random(&mut self, n: u32) -> u32 {
         if let Some(r) = self.game_rng.as_mut() {
             return r.next(n.min(u16::MAX as u32) as u16) as u32;
@@ -506,60 +590,133 @@ impl World {
         }
     }
 
-    /// A* over the cell grid (8 neighbours, no corner cutting). Returns the cell centres from the cell after `start` to `goal`.
+    /// The exe's wave search (`opensow_formats::wave`, exact vs `0x4753a0`) over the cell grid. Returns the cell centres from
+    /// the cell after `start` to `goal`. A blocked goal is replaced by the nearest free cell (the exe reaches into the
+    /// blocked cell and relies on the walking code to stop short).
     pub fn find_path(&self, start: (i32, i32), goal: (i32, i32)) -> Option<Vec<(f32, f32)>> {
         let goal = if self.is_blocked(goal.0, goal.1) { self.nearest_free(goal)? } else { goal };
         if start == goal {
             return Some(vec![centre(goal)]);
         }
-        let w = self.cells.0;
-        let idx = |c: (i32, i32)| (c.1 * w + c.0) as usize;
-        let n = (self.cells.0 * self.cells.1) as usize;
-        let mut g = vec![u32::MAX; n];
-        let mut from = vec![usize::MAX; n];
-        let mut open = BinaryHeap::new();
-        let h = |c: (i32, i32)| {
-            let (dx, dy) = ((c.0 - goal.0).unsigned_abs(), (c.1 - goal.1).unsigned_abs());
-            10 * dx.max(dy) + 4 * dx.min(dy)
+        let mut wave = Wave::new(|x, y| self.is_blocked(x, y));
+        // the exe searches from the destination to the unit (`[unit+0x5c]` is the destination, the target argument the
+        // unit's own position), so the route comes back unit first
+        let mut route = wave.find(goal, start, 0)?;
+        route.remove(0);
+        Some(route.into_iter().map(centre).collect())
+    }
+
+    /// Weapon range in cells a chasing unit tries to get within (`[chassis+0x154]`, set at `0x46c0ac`): the middle of the
+    /// weapon's minimum and maximum range, 5 for anti-air weapons, 1 without a weapon.
+    fn chase_range(&self, i: usize) -> i32 {
+        let u = &self.units[i];
+        let Some(p) = u.aim.as_ref().map(|a| &a.params) else { return 1 };
+        if matches!(u.kind, 1 | 2 | 3 | 42) {
+            return 5;
+        }
+        (((p.min_range + p.max_range) / 2) as i32).max(1)
+    }
+
+    /// `0x46eb40`: a unit with a chase target walks until it is within its range of the target (cell distance below
+    /// `range`); farther away it takes the cell `range` steps before the target on the way there (`0x477630`).
+    fn chase_step(&mut self, i: usize, t: Target, tcell: (i32, i32)) {
+        if self.units[i].kind == 46 {
+            // a Rogon bomb has to touch its target (0x46df40), so it walks onto the target's cell
+            let id = self.units[i].id;
+            self.order_move(id, tcell, None);
+            return;
+        }
+        let range = self.chase_range(i);
+        let at = self.units[i].cell();
+        let dist = (((at.0 - tcell.0).pow(2) + (at.1 - tcell.1).pow(2)) as f64).sqrt() as i32;
+        if dist <= range - 1 {
+            return;
+        }
+        let (handle, tcell) = match t {
+            Target::Unit(_) => (0, tcell),
+            Target::Structure(k) => (0x2000000 + k as u32, self.structures[k].center_cell()),
         };
-        g[idx(start)] = 0;
-        open.push((std::cmp::Reverse(h(start)), start));
-        let mut expanded = 0;
-        while let Some((_, c)) = open.pop() {
-            if c == goal {
-                break;
-            }
-            expanded += 1;
-            if expanded > 40_000 {
-                return None;
-            }
-            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, 1), (1, -1), (-1, -1)] {
-                let nc = (c.0 + dx, c.1 + dy);
-                if self.is_blocked(nc.0, nc.1) {
-                    continue;
-                }
-                if dx != 0 && dy != 0 && (self.is_blocked(c.0 + dx, c.1) || self.is_blocked(c.0, c.1 + dy)) {
-                    continue;
-                }
-                let cost = g[idx(c)] + if dx != 0 && dy != 0 { 14 } else { 10 };
-                if cost < g[idx(nc)] {
-                    g[idx(nc)] = cost;
-                    from[idx(nc)] = idx(c);
-                    open.push((std::cmp::Reverse(cost + h(nc)), nc));
+        let dims = self.cells;
+        let id = self.units[i].id;
+        let dest = self.occupancy().and_then(|o| approach(&mut o.stat, &mut o.stat_base, dims, at, tcell, handle, range));
+        match dest {
+            Some(cell) if cell != at => self.order_move(id, cell, None),
+            Some(_) => {}
+            None => self.units[i].path.clear(),
+        }
+    }
+
+    /// Unit-avoidance grids for this tick (`0x61ac38` / `0x62ac38`, static `0x5eac38`): built on first use.
+    fn occupancy(&mut self) -> Option<&mut Occupancy> {
+        if self.occ.is_none() && self.cells.0 <= 128 && self.cells.1 <= 128 {
+            let mut stat = vec![0u32; 16384];
+            for x in 0..128 {
+                for y in 0..128 {
+                    if self.is_blocked(x, y) {
+                        stat[(x * 128 + y) as usize] = 0xFFFFFD;
+                    }
                 }
             }
+            for (k, s) in self.structures.iter().enumerate().filter(|(_, s)| s.alive()) {
+                for (x, y) in s.blocked_cells() {
+                    if (0..128).contains(&x) && (0..128).contains(&y) {
+                        stat[(x * 128 + y) as usize] = 0x2000000 + k as u32;
+                    }
+                }
+            }
+            let mut ground = Wave::new(|_, _| false);
+            let mut walker = Wave::new(|_, _| false);
+            ground.cells = stat.clone();
+            walker.cells = stat.clone();
+            for u in self.units.iter().filter(|u| u.hp > 0 && u.kind != 40) {
+                let (x, y) = u.cell();
+                if (0..128).contains(&x) && (0..128).contains(&y) {
+                    let grid = if (41..=45).contains(&u.kind) { &mut walker } else { &mut ground };
+                    grid.cells[(x * 128 + y) as usize] = 0x3000000 + u.id;
+                }
+            }
+            self.occ = Some(Occupancy { ground, walker, stat, stat_base: 1 });
         }
-        if from[idx(goal)] == usize::MAX {
-            return None;
+        self.occ.as_mut()
+    }
+
+    /// Re-plans the first stretch of unit `i`'s route around other units and buildings (`0x473190` -> `0x476870`): the cells
+    /// up to six ahead are replaced by the route of a local wave over the occupancy grid.
+    /// Returns `true` when no way around the units in front was found: the unit waits where it is.
+    fn avoid(&mut self, i: usize) -> bool {
+        let (at, own, walker, cells) = {
+            let u = &self.units[i];
+            let cells: Vec<(i32, i32)> = u.path.iter().map(|&(x, y)| ((x.floor() as i32).div_euclid(CELL), (y.floor() as i32).div_euclid(CELL))).collect();
+            (u.cell(), 0x3000000 + u.id, (41..=45).contains(&u.kind), cells)
+        };
+        let mut route = vec![at];
+        route.extend(&cells);
+        let k = cells.len().min(6);
+        let Some(occ) = self.occupancy() else { return false };
+        let Occupancy { ground, walker: wgrid, stat, stat_base } = occ;
+        let r = if walker { wgrid } else { ground }.local_step(stat, *stat_base, own, &route, at);
+        let u = &mut self.units[i];
+        if r.stop {
+            u.path.clear();
+        } else if let Some(next) = r.next {
+            if r.path.is_empty() {
+                // the look-ahead cell is next to the unit: step straight there
+                u.path.drain(..k.saturating_sub(1));
+            } else {
+                let last = u.path.get(k - 1).copied().filter(|_| k == u.path.len());
+                let mut local: Vec<(f32, f32)> = r.path.iter().map(|&c| centre(c)).collect();
+                if let (Some(exact), Some(end)) = (last, local.last_mut()) {
+                    *end = exact;
+                }
+                u.path.splice(..k, local);
+            }
+            let _ = next;
+        } else {
+            // no local route (0x476870 failed): the exe then looks for a free cell near the destination (0x4774c0) and keeps
+            // its previous step cell; here the unit waits and tries again on the next tick
+            return route.len() > 1 && route[k] != at;
         }
-        let mut cells = vec![goal];
-        let mut cur = idx(goal);
-        while from[cur] != usize::MAX && from[cur] != idx(start) {
-            cur = from[cur];
-            cells.push(((cur as i32) % w, (cur as i32) / w));
-        }
-        cells.reverse();
-        Some(cells.into_iter().map(centre).collect())
+        false
     }
 
     /// Adds a unit on the free cell nearest to the pixel position (used for the starter squad).
@@ -627,6 +784,7 @@ impl World {
             return;
         }
         self.tick += 1;
+        self.occ = None;
         if self.enemy_at_start.is_none() {
             self.enemy_at_start = Some(self.units.iter().any(|u| u.player != 0) || self.structures.iter().any(|s| s.owner == Owner::Enemy));
         }
@@ -651,8 +809,12 @@ impl World {
         self.step_actions();
         self.step_satellites();
         self.step_bullets();
-        self.blasts.iter_mut().for_each(|b| b.age += 1);
-        self.blasts.retain(|b| b.age < BLAST_TICKS);
+        if self.tick % 30 == 0 && !self.decals.is_empty() {
+            let blocked: Vec<(i32, i32)> = self.decals.iter().map(|d| d.cell).filter(|c| self.is_blocked(c.0, c.1)).collect();
+            self.decals.retain(|d| !blocked.contains(&d.cell));
+        }
+        self.effects.iter_mut().for_each(|e| e.age += 1);
+        self.effects.retain(|e| e.spec.frame_at(e.age).is_some());
         let dead_adv: Vec<usize> = self.units.iter().filter(|u| u.hp <= 0 && u.kind == 40).map(|u| if u.player == 0 { 0 } else { 1 }).collect();
         for side in dead_adv {
             self.say(side, msg::ADVANCER_DESTROYED);
@@ -660,6 +822,36 @@ impl World {
         for u in self.units.iter().filter(|u| u.hp <= 0 && u.kind == 46) {
             let (x, y) = u.px();
             self.nukes.push(Nuke { x, y, owner: u.player.min(1), counter: NUKE_START_COUNTER, k: 0 });
+        }
+        let dying: Vec<(i32, i32, i32, i32)> = self.units.iter().filter(|u| u.hp <= 0).map(|u| (u.px().0, u.px().1, u.kind, u.player)).collect();
+        for (x, y, kind, player) in dying {
+            // 0x4077e0(-1): a random unit explosion (23, 24, 26 or 27)
+            self.sound([23, 24, 26, 27][(x + y + self.tick as i32).rem_euclid(4) as usize], x, y, false);
+            // the destruction code 0x46a600..0x46b0f0 (docs/effects.md): four clouds at (x - 15 + rand(30), y - 15 + rand(30)) with
+            // the first draw for y, the wreck after the second one (not for the Advancer), the flying pieces and three puffs
+            for n in 0..UNIT_DEATH_CLOUDS {
+                let (dy, dx) = (self.random(30) as i32 - 15, self.random(30) as i32 - 15);
+                self.effects.push(Effect { x: x + dx, y: y + dy, spec: UNIT_CLOUD, age: 0 });
+                if n == 1 && kind != 40 {
+                    self.effects.push(Effect { x, y: y + 7, spec: UNIT_WRECK, age: 0 });
+                }
+            }
+            if let Some(d) = debris(kind) {
+                let off = |w: &mut World| (2 * w.random(2) as i32 - 1) * (w.random(d.spread as u32) as i32 + d.spread);
+                let (sx, sy) = (off(self), off(self));
+                let bt = if player == 0 { 15 } else { 16 };
+                if let Some(path) = build_path(bt, x, y, x + sx, y + sy, DEBRIS_DELAY as u32) {
+                    if !path.points.is_empty() {
+                        self.bullets.push(Bullet::new(bt, 0, player.min(1), path));
+                    }
+                }
+            }
+            if kind != 40 {
+                for _ in 0..UNIT_DEATH_PUFFS {
+                    let (dx, dy) = (self.random(20) as i32 - 10, self.random(20) as i32 - 10);
+                    self.puff(x + dx, y + dy);
+                }
+            }
         }
         self.units.retain(|u| u.hp > 0);
         self.step_nukes();
@@ -836,8 +1028,7 @@ impl World {
                     if self.units[i].target.is_some() {
                         self.units[i].path.clear();
                     } else if self.units[i].path.is_empty() || self.tick % 7 == (i as u64 % 7) {
-                        let id = self.units[i].id;
-                        self.order_move(id, (tx.div_euclid(CELL), ty.div_euclid(CELL)), None);
+                        self.chase_step(i, t, (tx.div_euclid(CELL), ty.div_euclid(CELL)));
                     }
                 }
                 _ => self.units[i].chase = None,
@@ -845,6 +1036,7 @@ impl World {
         }
         // walking: `steps_at(speed, tick % 60)` single-pixel moves per tick (0x46f550 + table 0x436df0); the unit only
         // starts once its chassis is within 4 turn steps of the wanted facing
+        let hold = self.units[i].kind != 40 && self.units[i].line.is_none() && !self.units[i].path.is_empty() && self.avoid(i);
         let tick = self.tick;
         let u = &mut self.units[i];
         let (ox, oy) = (u.x, u.y);
@@ -860,7 +1052,7 @@ impl World {
                 c.target = c.facing;
             }
         }
-        if let Some(&(wx, wy)) = u.path.first() {
+        if let Some(&(wx, wy)) = u.path.first().filter(|_| !hold) {
             let params = walk_params(u.kind);
             let steps = params.map_or(32, |p| p.steps);
             let want = facing(u.x.round() as i32, u.y.round() as i32, wx.round() as i32, wy.round() as i32, steps);
@@ -969,6 +1161,9 @@ impl World {
             for _ in 0..shots.max(1) as u32 * burst(weapon) {
                 self.fire(weapon, owner_player, (sx, sy), to);
             }
+            if let Some((id, jitter)) = opensow_formats::sfx::muzzle(weapon as u8) {
+                self.sound(id, sx, sy, jitter);
+            }
         }
     }
 
@@ -978,8 +1173,7 @@ impl World {
         if path.points.is_empty() {
             return;
         }
-        let index = path.first_step;
-        self.bullets.push(Bullet { bullet_type: bt, strength: strength as i32, owner, path, index });
+        self.bullets.push(Bullet::new(bt, strength as i32, owner, path));
     }
 
     fn step_bullets(&mut self) {
@@ -988,6 +1182,11 @@ impl World {
         self.bullets.retain_mut(|b| {
             let speed = bullet_type(b.bullet_type).and_then(|t| t.speed).unwrap_or(60);
             b.index += steps_at(speed, t) as usize;
+            if let Some(a) = &mut b.anim {
+                if !a.step(b.bullet_type, 2 * b.index as i32) {
+                    return false; // a one-shot animation (types 22, 23) has played out
+                }
+            }
             if b.index >= b.path.points.len() {
                 let (x, y) = *b.path.points.last().unwrap();
                 landed.push((x, y, b.bullet_type, b.strength, b.owner));
@@ -997,7 +1196,10 @@ impl World {
             }
         });
         for (x, y, bt, strength, owner) in landed {
-            self.blasts.push(Blast { x, y, age: 0 });
+            for spec in impact_anims(bt) {
+                self.effects.push(Effect { x, y, spec, age: 0 });
+            }
+            self.impact_ground_effects(x, y, bt);
             self.explode(x, y, bt, strength, owner);
             if bt == 17 {
                 // a Tripler pod: 34 blasts of 100 on an ellipse around the impact, each jittered by -5..4 px (0x40fd40..0x40ff44)
@@ -1043,6 +1245,10 @@ impl World {
         let owner = side(s.owner);
         let winner = if removed_when_destroyed(s.kind_id) { None } else { capture_winner(s.tally, owner) };
         let turret = matches!(self.structures[i].kind, ObjectKind::Turret(_));
+        let (cx, cy) = self.structures[i].center();
+        let spec = if turret { TURRET_DESTROYED } else { BUILDING_DESTROYED };
+        self.effects.push(Effect { x: cx as i32, y: cy as i32, spec, age: 0 });
+        self.sound(if turret { 28 } else { 24 }, cx as i32, cy as i32, false);
         self.say(owner, if turret { msg::TURRET_DESTROYED } else { msg::BUILDING_LOST });
         if let Some(p) = winner {
             self.say(p, msg::BUILDING_CAPTURED);
@@ -1211,6 +1417,7 @@ impl World {
         let aim = TopAim::new(weapon, 0);
         let max_hp = building_max_hp(24 + tier as i32);
         let owner = if side == 0 { Owner::Player } else { Owner::Enemy };
+        self.sound(72, cell.0 * CELL + CELL / 2, cell.1 * CELL + CELL / 2, false);
         self.add_structure(Structure { object: usize::MAX, kind: ObjectKind::Turret(tier as u8), owner, cell, hp: 1, max_hp, aim, weapon, target: None, slots: Vec::new(), active: 0, kind_id: 24 + tier as i32, tally: [0; 3], heal: max_hp - 1, upgrade: 0, protected: false, attacked: false, sat_cd: 0, advancer: None });
         true
     }
@@ -1399,6 +1606,13 @@ impl World {
             .map(|(i, _)| i)
     }
 
+    /// Queue a sound effect at a map position (dropped when nobody listens, so headless runs stay small).
+    fn sound(&mut self, id: u8, x: i32, y: i32, jitter: bool) {
+        if self.sounds.len() < 64 {
+            self.sounds.push((id, x, y, jitter));
+        }
+    }
+
     /// A message for `side`; only the local player (side 0) hears it (`0x402ec0` runs on the audio object of that player).
     fn say(&mut self, side: usize, id: u8) {
         if side == 0 {
@@ -1437,6 +1651,10 @@ impl World {
             }
             self.rng = r;
         }
+        for a in aircraft.iter().filter(|a| !a.alive()) {
+            self.effects.push(Effect { x: a.x as i32, y: (a.y - a.altitude) as i32, spec: AIR_DESTROYED, age: 0 });
+            self.sound(23, a.x as i32, (a.y - a.altitude) as i32, false);
+        }
         aircraft.retain(|a| a.alive());
         self.aircraft = aircraft;
         for (side, e) in events {
@@ -1444,8 +1662,7 @@ impl World {
                 AirEvent::Shot { bullet_type, strength, from, to } => {
                     if let Some(path) = build_path(bullet_type, from.0, from.1, to.0, to.1, 0) {
                         if !path.points.is_empty() {
-                            let index = path.first_step;
-                            self.bullets.push(Bullet { bullet_type, strength, owner: side, path, index });
+                            self.bullets.push(Bullet::new(bullet_type, strength, side, path));
                         }
                     }
                 }
@@ -1481,7 +1698,7 @@ impl World {
             true
         });
         for (x, y, strength, owner) in blasts {
-            self.blasts.push(Blast { x, y, age: BLAST_TICKS / 2 });
+            self.effects.push(Effect { x, y, spec: blast(2), age: 0 });
             self.explode(x, y, 35, strength, owner);
         }
     }
@@ -1795,6 +2012,58 @@ mod tests {
         }
         let u = w.unit(id).unwrap();
         assert_eq!(u.cell(), (10, 2));
+    }
+
+    #[test]
+    fn a_destroyed_unit_makes_four_clouds_a_wreck_and_flying_pieces() {
+        use opensow_formats::effects::{UNIT_CLOUD, UNIT_WRECK};
+        let mut w = open_world(14, 9);
+        let id = w.add_unit(7, 0, 5 * CELL + 16, 4 * CELL + 16);
+        w.units.iter_mut().find(|u| u.id == id).unwrap().hp = 0;
+        w.step();
+        let clouds = |w: &World| w.effects.iter().filter(|e| e.spec == UNIT_CLOUD).count();
+        assert_eq!(clouds(&w), 4);
+        assert_eq!(w.effects.iter().filter(|e| e.spec == UNIT_WRECK).count(), 1);
+        assert!(w.bullets.iter().any(|b| b.bullet_type == 15), "a cannon unit throws type 15 pieces");
+        // the Advancer: clouds only
+        let mut w = open_world(14, 9);
+        let id = w.add_unit(40, 0, 5 * CELL + 16, 4 * CELL + 16);
+        w.units.iter_mut().find(|u| u.id == id).unwrap().hp = 0;
+        w.step();
+        assert_eq!(clouds(&w), 4);
+        assert_eq!(w.effects.iter().filter(|e| e.spec == UNIT_WRECK).count(), 0);
+        assert!(w.bullets.is_empty());
+    }
+
+    #[test]
+    fn units_do_not_walk_through_each_other() {
+        // a one-cell-wide corridor with a unit standing in it: the walker behind it cannot pass, but in the open it goes around
+        let mut w = open_world(14, 9);
+        let blocker = w.add_unit(7, 0, 7 * CELL + 16, 4 * CELL + 16);
+        let walker = w.add_unit(7, 0, 2 * CELL + 16, 4 * CELL + 16);
+        w.order_move(walker, (12, 4), None);
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..3000 {
+            w.step();
+            seen.insert(w.unit(walker).unwrap().cell());
+            assert_ne!(w.unit(walker).unwrap().cell(), w.unit(blocker).unwrap().cell(), "walked into the other unit");
+        }
+        assert_eq!(w.unit(walker).unwrap().cell(), (12, 4), "goes around in the open");
+        assert!(seen.iter().any(|c| c.1 != 4), "left the straight line to avoid the unit");
+        // in a corridor it stops (the exe resets the goal to the unit's own position)
+        let mut w = open_world(14, 9);
+        for x in 0..14 {
+            for y in [3, 5] {
+                w.blocked[(y * 14 + x) as usize] = true;
+            }
+        }
+        w.add_unit(7, 0, 7 * CELL + 16, 4 * CELL + 16);
+        let walker = w.add_unit(7, 0, 2 * CELL + 16, 4 * CELL + 16);
+        w.order_move(walker, (12, 4), None);
+        for _ in 0..3000 {
+            w.step();
+        }
+        assert!(w.unit(walker).unwrap().cell().0 < 7, "cannot pass the unit in the corridor");
     }
 
     #[test]

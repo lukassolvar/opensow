@@ -16,6 +16,10 @@ impl<'a> Reader<'a> {
         Reader { data, pos }
     }
 
+    pub fn data(&self) -> &'a [u8] {
+        self.data
+    }
+
     pub fn pos(&self) -> usize {
         self.pos
     }

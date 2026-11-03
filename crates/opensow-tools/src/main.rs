@@ -62,6 +62,131 @@ fn run(args: &[String]) -> Res<()> {
         ["text", name, text, dst, fg, outline] => render_text(&game()?, name, text, Path::new(dst), fg, outline)?,
         ["lang", code] => print_lang(&game()?, code, None)?,
         ["lang", code, index] => print_lang(&game()?, code, Some(index.parse()?))?,
+        ["save", path] => {
+            // savegame_N.info prints the header; savegame_N.data is decompressed and its scalar head printed
+            let bytes = std::fs::read(path)?;
+            if path.to_ascii_lowercase().ends_with(".info") {
+                let i = opensow_formats::save::SaveInfo::parse(&bytes)?;
+                println!("{:?} {} {} {} stamp {} extra {}", i.name, i.time, i.date, i.weekday, i.stamp, i.extra);
+            } else {
+                let state = opensow_formats::save::huff_decode(&bytes)?;
+                println!("{} bytes; {:?}", state.len(), opensow_formats::save::StateHead::parse(&state)?);
+            }
+        }
+        ["savelayout"] => {
+            use opensow_formats::saveobj::Class;
+            for c in [Class::Unit, Class::Top, Class::Chassis, Class::Order, Class::Weapon, Class::Building, Class::BuildingPart, Class::Bullet, Class::Aircraft, Class::Decal, Class::Cloud, Class::PlayerState, Class::Stock, Class::Params, Class::Speech, Class::SpeechItem, Class::MapItem] {
+                let (v, m) = c.header();
+                let f: Vec<String> = c.scalars().iter().map(|&(o, b)| format!("{}{:#x}", if b { "b" } else { "u" }, o)).collect();
+                println!("{c:?} {v} {m:#x} {}", f.join(" "));
+            }
+        }
+        ["netpkg", hex, bits] => {
+            // decode an input package given as hex bytes and a bit count
+            let bytes: Vec<u8> = (0..hex.len() / 2).map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16)).collect::<Result<_, _>>()?;
+            let p = opensow_formats::net::InputPackage::parse(&bytes, bits.parse()?)?;
+            let keys: Vec<String> = p.keys.iter().map(|k| format!("{}:{}", k.code, k.down as u8)).collect();
+            match p.mouse {
+                Some(m) => println!("keys {} mouse {} {} {} {}", keys.join(","), m.x, m.y, m.a as u8, m.b as u8),
+                None => println!("keys {} mouse none", keys.join(",")),
+            }
+        }
+        ["blend", mode, rest @ ..] => {
+            // blend <mode> <dst> <src> [<dst> <src> ...] (RGB565 words in hex): the exe's blit arithmetic
+            use opensow_formats::effects::Blit;
+            let mode = match &mode[..] {
+                "plain" => Blit::Plain,
+                "add" => Blit::Additive,
+                "addhalf" => Blit::AddHalf,
+                "average" => Blit::Average,
+                "smoke" => Blit::Smoke,
+                "darken" => Blit::Darken,
+                "shade" => Blit::Shade,
+                "lens" => Blit::Lens,
+                _ => return Err("blend modes: plain add addhalf average smoke darken shade lens".into()),
+            };
+            let out: Vec<String> = rest
+                .chunks(2)
+                .map(|c| Ok(format!("{:04x}", mode.apply565(u16::from_str_radix(&c[0], 16)?, u16::from_str_radix(c.get(1).map_or("0", |s| &s[..]), 16)?))))
+                .collect::<Result<_, std::num::ParseIntError>>()?;
+            println!("{}", out.join(" "));
+        }
+        ["cfg", path] => {
+            // State of War_1.cfg (options) or savegame/player.cfg (progress)
+            let bytes = std::fs::read(path)?;
+            if bytes.len() > 100 {
+                let p = opensow_formats::config::PassedLevels::parse(&bytes)?;
+                println!("level states {:?}", p.states);
+            } else {
+                println!("{:?}", opensow_formats::config::Options::parse(&bytes)?);
+            }
+        }
+        ["sgv", path] => println!("{:#?}", opensow_formats::video::parse(&std::fs::read(path)?)?),
+        ["sgvyuv", path, out] => {
+            // decode an MPEG-1 .sgv to raw yuv420p frames (for comparing with other decoders)
+            let es = opensow_formats::video::video_stream(&std::fs::read(path)?)?;
+            let frames = opensow_formats::mpeg1::decode(&es)?;
+            let mut f = std::io::BufWriter::new(std::fs::File::create(out)?);
+            for fr in &frames {
+                std::io::Write::write_all(&mut f, &fr.to_yuv420())?;
+            }
+            println!("{} frames of {}x{}", frames.len(), frames[0].width, frames[0].height);
+        }
+        ["sgvframe", path, n, out] => {
+            let es = opensow_formats::video::video_stream(&std::fs::read(path)?)?;
+            let frames = opensow_formats::mpeg1::decode(&es)?;
+            let f = frames.get(n.parse::<usize>()?).ok_or("frame out of range")?;
+            let mut enc = png::Encoder::new(std::io::BufWriter::new(std::fs::File::create(out)?), f.width as u32, f.height as u32);
+            enc.set_color(png::ColorType::Rgb);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.write_header()?.write_image_data(&f.to_rgb())?;
+        }
+        ["sgvwav", path, out] => {
+            let es = opensow_formats::video::audio_stream(&std::fs::read(path)?)?;
+            let audio = opensow_formats::mp2::decode(&es)?;
+            std::fs::write(out, audio.to_wav())?;
+            println!("{:.2} s, {} Hz, {} channels", audio.seconds(), audio.sample_rate, audio.channels);
+        }
+        ["sgvavi", path, n, out] => {
+            // one frame of an AVI .sgv (mB: MS Video 1) as a PNG
+            use opensow_formats::{msvideo1, video};
+            let data = std::fs::read(path)?;
+            let video::Video::Avi(avi) = video::parse(&data)? else { return Err("not an AVI".into()) };
+            let s = &avi.streams[0];
+            if &s.handler == b"IV50" || &s.handler == b"iv50" {
+                // mA: Indeo 5, every frame is intra so the wanted one decodes alone
+                let chunks = video::avi_chunks(&data, 0)?;
+                let f = opensow_formats::indeo5::decode(chunks.get(n.parse::<usize>()?).ok_or("no such frame")?)?;
+                let mut enc = png::Encoder::new(std::io::BufWriter::new(std::fs::File::create(out)?), f.width as u32, f.height as u32);
+                enc.set_color(png::ColorType::Rgb);
+                enc.set_depth(png::BitDepth::Eight);
+                enc.write_header()?.write_image_data(&f.to_rgb())?;
+                return Ok(());
+            }
+            let mut dec = msvideo1::Decoder::new(s.format[0] as usize, s.format[1] as usize, msvideo1::Decoder::palette_from_strf(&s.strf));
+            let chunks = video::avi_chunks(&data, 0)?;
+            for c in chunks.iter().take(n.parse::<usize>()? + 1) {
+                dec.decode(c)?;
+            }
+            let mut enc = png::Encoder::new(std::io::BufWriter::new(std::fs::File::create(out)?), dec.width as u32, dec.height as u32);
+            enc.set_color(png::ColorType::Rgb);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.write_header()?.write_image_data(&dec.to_rgb())?;
+        }
+        ["sgvaviyuv", path, out] => {
+            // all frames of mB as raw RGB for comparing with other decoders
+            use opensow_formats::{msvideo1, video};
+            let data = std::fs::read(path)?;
+            let video::Video::Avi(avi) = video::parse(&data)? else { return Err("not an AVI".into()) };
+            let s = &avi.streams[0];
+            let mut dec = msvideo1::Decoder::new(s.format[0] as usize, s.format[1] as usize, msvideo1::Decoder::palette_from_strf(&s.strf));
+            let mut f = std::io::BufWriter::new(std::fs::File::create(out)?);
+            for c in video::avi_chunks(&data, 0)? {
+                dec.decode(c)?;
+                std::io::Write::write_all(&mut f, &dec.to_rgb())?;
+            }
+        }
+        ["cfglayout"] => println!("Options 1 0x1d6c u0xc u0x14 u0x18 u0x1c u0x20 b0x8 b0x9 b0x10 b0x11 u0x24"),
         ["weapons"] => print_weapons(),
         ["hover"] => println!("{}", opensow_formats::anim::HOVER_TABLE.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" ")),
         ["speedrow", v] => {
@@ -92,6 +217,45 @@ fn run(args: &[String]) -> Res<()> {
             println!("{}", words[..64].iter().map(|w| w.to_string()).collect::<Vec<_>>().join(" "));
             let n = words[63] / 2;
             println!("{}", r.offsets[..n].iter().map(|(a, b)| format!("{a} {b}")).collect::<Vec<_>>().join(" "));
+        }
+        ["wave", grid, sx, sy, tx, ty, drop, base] => {
+            // grid: 128 lines of 128 characters, '1' = blocked; prints `ok|fail <new base> <route cells...>`
+            let text = std::fs::read_to_string(grid)?;
+            let rows: Vec<&[u8]> = text.lines().map(|l| l.as_bytes()).collect();
+            let mut w = opensow_formats::wave::Wave::new(|x, y| rows.get(x as usize).and_then(|r| r.get(y as usize)) == Some(&b'1'));
+            w.base = base.parse()?;
+            let r = w.find((sx.parse()?, sy.parse()?), (tx.parse()?, ty.parse()?), drop.parse()?);
+            let cells = r.as_ref().map(|r| r.iter().map(|(x, y)| format!("{x} {y}")).collect::<Vec<_>>().join(" ")).unwrap_or_default();
+            println!("{} {} {}", if r.is_some() { "ok" } else { "fail" }, w.base, cells);
+        }
+        ["local", file, ubase, sbase, own, ax, ay, route @ ..] => {
+            // file: 16384 little-endian u32 unit grid, then 16384 static grid; route: x y pairs (the unit's cell first)
+            let bytes = std::fs::read(file)?;
+            let words: Vec<u32> = bytes.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+            let mut w = opensow_formats::wave::Wave::new(|_, _| false);
+            w.cells = words[..16384].to_vec();
+            w.base = ubase.parse()?;
+            let nums: Vec<i32> = route.iter().map(|s| s.parse()).collect::<Result<_, _>>()?;
+            let route: Vec<(i32, i32)> = nums.chunks(2).map(|c| (c[0], c[1])).collect();
+            let r = w.local_step(&words[16384..], sbase.parse()?, own.parse()?, &route, (ax.parse()?, ay.parse()?));
+            let next = r.next.map_or("none".to_string(), |(x, y)| format!("{x} {y}"));
+            let path = r.path.iter().map(|(x, y)| format!("{x} {y}")).collect::<Vec<_>>().join(" ");
+            println!("{} {} | {} | {}", u8::from(r.stop), w.base, next, path);
+        }
+        ["approach", file, base, w, h, ux, uy, tx, ty, handle, range] => {
+            // file: 16384 little-endian u32 (the static grid); prints `ok <x> <y> <new base>` or `fail <new base>`
+            let bytes = std::fs::read(file)?;
+            let mut cells: Vec<u32> = bytes.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+            let mut b: u32 = base.parse()?;
+            let r = opensow_formats::wave::approach(&mut cells, &mut b, (w.parse()?, h.parse()?), (ux.parse()?, uy.parse()?), (tx.parse()?, ty.parse()?), handle.parse()?, range.parse()?);
+            match r {
+                Some((x, y)) => println!("ok {x} {y} {b}"),
+                None => println!("fail {b}"),
+            }
+        }
+        ["line", x0, y0, x1, y1] => {
+            let l = opensow_formats::walk::pixel_line(x0.parse()?, y0.parse()?, x1.parse()?, y1.parse()?);
+            println!("{}", l.iter().map(|(x, y)| format!("{x} {y}")).collect::<Vec<_>>().join(" "));
         }
         ["turn", c, t, n] => println!("{}", opensow_formats::facing::turn_step(c.parse()?, t.parse()?, n.parse()?)),
         ["path", t, x1, y1, x2, y2, delay] => print_path(t.parse()?, x1.parse()?, y1.parse()?, x2.parse()?, y2.parse()?, delay.parse()?)?,
@@ -152,6 +316,7 @@ fn check(game: &GameDir) -> Res<()> {
             "edt" | "net" => report(name, std::fs::read(p).map_err(Into::into).and_then(|d| level::Level::parse(&d)).map(drop)),
             "tmi" => report(name, std::fs::read(p).map_err(Into::into).and_then(|d| map::TileMap::parse(&d)).map(drop)),
             "til" => report(name, std::fs::read(p).map_err(Into::into).and_then(|d| sprite::parse(&d, sprite::Kind::Shadow)).map(drop)),
+            "sgv" => report(name, std::fs::read(p).map_err(Into::into).and_then(|d| opensow_formats::video::parse(&d)).map(drop)),
             "srf" | "srfa" => report(name, std::fs::read(p).map_err(Into::into).and_then(|d| srf::to_jpeg(&d)).map(drop)),
             _ => {}
         }

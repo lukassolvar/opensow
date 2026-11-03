@@ -13,6 +13,10 @@ The exe is only read, never modified or copied. Checks (random inputs, exact com
   * 0x467ee0  aircraft launch (fields)     vs `opensow launch`    (all five air forces, random targets)
   * 0x468960  carryall squad unload        vs `opensow squad`     (indices 0..17; unit-creation call recorded)
   * 0x46bc70  Advancer hover table       vs `opensow hover`     (42 phases)
+  * 0x4753a0  wave pathfinder              vs `opensow wave`      (random grids, 300 searches incl. failures)
+  * 0x46ee80  walking pixel line           vs `opensow line`      (300 random segments)
+  * 0x476870  local avoidance search       vs `opensow local`     (300 random grids with units and buildings)
+  * 0x477630  chase cell search            vs `opensow approach` (300 random grids, unit targets)
   * 0x436230  range ring list builder      vs `opensow rings`     (64-entry index table + 14017 offsets)
 `atan` (an import) is emulated by a hook; nothing else outside the image is needed.
 """
@@ -255,5 +259,241 @@ for idx in range(18):
     exe = "\n".join(f"{x - 10} {y - 20} {k}" for x, y, k in calls)
     bad += exe != sh("squad", idx)
 report("carryall squads (0x468960)", 18, bad)
+
+# 8. wave pathfinder: CArray growth/removal and the free call are hooked; the grid, the base and the unit object are set up in memory
+import tempfile, os
+
+HEAP, GRID, BASEADDR, UNIT = 0x61000000, 0x5FAC38, 0x49A364, STACK + 0xB0000
+mu.mem_map(HEAP, 0x400000)
+heap_top = [HEAP]
+
+
+def carray_set_size(uc, addr, size, ud):
+    sp = uc.reg_read(UC_X86_REG_SP if False else UC_X86_REG_ESP)
+    (ret,) = struct.unpack("<I", uc.mem_read(sp, 4))
+    n, _grow = struct.unpack("<ii", uc.mem_read(sp + 4, 8))
+    arr = uc.reg_read(UC_X86_REG_ECX)
+    ptr, cur, cap = struct.unpack("<III", uc.mem_read(arr + 4, 12))
+    if n > cap:
+        new = max(n * 2, 16)
+        newptr = heap_top[0]
+        heap_top[0] += new * 8
+        if cur:
+            uc.mem_write(newptr, bytes(uc.mem_read(ptr, cur * 8)))
+        ptr, cap = newptr, new
+    uc.mem_write(arr + 4, struct.pack("<III", ptr, n, cap))
+    uc.reg_write(UC_X86_REG_ESP, sp + 4 + 8)
+    uc.reg_write(UC_X86_REG_EIP, ret)
+
+
+def carray_remove_at(uc, addr, size, ud):
+    sp = uc.reg_read(UC_X86_REG_ESP)
+    (ret,) = struct.unpack("<I", uc.mem_read(sp, 4))
+    idx, count = struct.unpack("<ii", uc.mem_read(sp + 4, 8))
+    arr = uc.reg_read(UC_X86_REG_ECX)
+    ptr, cur, cap = struct.unpack("<III", uc.mem_read(arr + 4, 12))
+    tail = bytes(uc.mem_read(ptr + (idx + count) * 8, (cur - idx - count) * 8))
+    uc.mem_write(ptr + idx * 8, tail)
+    uc.mem_write(arr + 8, struct.pack("<I", cur - count))
+    uc.reg_write(UC_X86_REG_ESP, sp + 4 + 8)
+    uc.reg_write(UC_X86_REG_EIP, ret)
+
+
+mu.hook_add(UC_HOOK_CODE, carray_set_size, begin=0x45ADF0, end=0x45ADF0)
+mu.hook_add(UC_HOOK_CODE, carray_remove_at, begin=0x459770, end=0x459770)
+mu.hook_add(UC_HOOK_CODE, cdecl_stub, begin=0x47D321, end=0x47D321)
+
+
+def exe_wave(grid, base, start, target, drop):
+    mu.mem_write(GRID, struct.pack("<16384I", *[0xFFFFFD if c else 0 for c in grid]))
+    mu.mem_write(BASEADDR, struct.pack("<I", base))
+    mu.mem_write(UNIT, b"\0" * 0x200)
+    mu.mem_write(UNIT + 0x5C, struct.pack("<ii", start[0] * 32 + 16, start[1] * 32 + 16))
+    heap_top[0] = HEAP
+    ok = call(0x4753A0, [target[0] * 32 + 16, target[1] * 32 + 16, drop, 0], ecx=UNIT) & 0xFF
+    (newbase,) = struct.unpack("<I", mu.mem_read(BASEADDR, 4))
+    ptr, size = struct.unpack("<II", mu.mem_read(UNIT + 0x88, 8))
+    cells = struct.unpack(f"<{size * 2}i", mu.mem_read(ptr, size * 8)) if ok and size else ()
+    return f"{'ok' if ok else 'fail'} {newbase} " + " ".join(map(str, cells))
+
+
+bad = 0
+oks = longest = 0
+SEARCHES = 300
+for n in range(SEARCHES):
+    density = random.choice([0.0, 0.1, 0.25, 0.35])
+    grid = [0] * 16384
+    for x in range(128):
+        for y in range(128):
+            edge = x < 2 or y < 2 or x > 125 or y > 125  # the exe does no bounds checks: keep the wave off the array edges
+            grid[x * 128 + y] = 1 if edge or random.random() < density else 0
+    free = [(x, y) for x in range(3, 125) for y in range(3, 125)]
+    start, target = random.choice(free), random.choice(free)
+    if random.random() < 0.3:  # nearby targets
+        target = (min(124, max(3, start[0] + random.randint(-6, 6))), min(124, max(3, start[1] + random.randint(-6, 6))))
+    base = random.choice([1, 1, 500, 70000])
+    drop = random.choice([0, 0, 1, 2])
+    exe = exe_wave(grid, base, start, target, drop)
+    with tempfile.NamedTemporaryFile("w", delete=False) as f:
+        f.write("\n".join("".join(map(str, grid[x * 128 : x * 128 + 128])) for x in range(128)))
+    rust = sh("wave", f.name, *start, *target, drop, base)
+    os.unlink(f.name)
+    oks += exe.startswith("ok")
+    longest = max(longest, len(exe.split()) // 2 - 1)
+    if exe.split() != rust.split():
+        bad += 1
+        if bad <= 3:
+            print("  wave mismatch", start, target, base, drop, "\n   exe ", exe[:160], "\n   rust", rust[:160])
+print(f"  ({oks} routes found, {SEARCHES - oks} failures, longest route {longest} cells)")
+report("wave pathfinder (0x4753a0)", SEARCHES, bad)
+
+# 9. walking pixel line (0x46ee80): the route array lives at this+0x98 (same CArray hooks as the wave)
+bad = 0
+for _ in range(300):
+    x0, y0 = random.randint(0, 4000), random.randint(0, 4000)
+    x1, y1 = x0 + random.randint(-300, 300), y0 + random.randint(-300, 300)
+    if random.random() < 0.15:
+        x1 = x0 + random.choice([0, 5, -5])
+        y1 = y0 + random.choice([0, 5, -5])
+    mu.mem_write(UNIT, b"\0" * 0x200)
+    heap_top[0] = HEAP
+    call(0x46EE80, [x0, y0, x1, y1], ecx=UNIT)
+    ptr, size = struct.unpack("<II", mu.mem_read(UNIT + 0x9C, 8))
+    exe = " ".join(map(str, struct.unpack(f"<{size * 2}i", mu.mem_read(ptr, size * 8))))
+    bad += exe.split() != sh("line", x0, y0, x1, y1).split()
+report("walking pixel line (0x46ee80)", 300, bad)
+
+# 10. local avoidance (0x476870): unit grid 0x61ac38 (base [0x49a36c]), static grid 0x5eac38 (base [0x49a360])
+UGRID, SGRID, UBASE, SBASE = 0x61AC38, 0x5EAC38, 0x49A36C, 0x49A360
+POS, ROUTE = STACK + 0xB8000, STACK + 0xBC000
+bad = 0
+stats = {"step": 0, "stop": 0, "none": 0}
+for n in range(300):
+    ugrid = [0] * 16384
+    sgrid = [0] * 16384
+    for x in range(128):
+        for y in range(128):
+            if x < 2 or y < 2 or x > 125 or y > 125 or random.random() < random.choice([0.0, 0.05, 0.15]):
+                ugrid[x * 128 + y] = sgrid[x * 128 + y] = 0xFFFFFD
+    for b in range(random.randint(0, 8)):  # buildings: one handle over a rectangle, in both grids
+        bx, by, bw, bh = random.randint(5, 110), random.randint(5, 110), random.randint(1, 5), random.randint(1, 4)
+        for x in range(bx, bx + bw):
+            for y in range(by, by + bh):
+                ugrid[x * 128 + y] = sgrid[x * 128 + y] = 0x2000000 + b
+    for u in range(random.randint(0, 30)):  # other units: only in the unit grid
+        ugrid[random.randint(5, 120) * 128 + random.randint(5, 120)] = 0x3000000 + u
+    at = (random.randint(4, 120), random.randint(4, 120))
+    own = 0x3100000 + n
+    ugrid[at[0] * 128 + at[1]] = own
+    sgrid[at[0] * 128 + at[1]] = 0
+    size = random.randint(1, 12)
+    k = min(size - 1, 6)
+    route = [at] + [(at[0] + random.randint(-8, 8), at[1] + random.randint(-8, 8)) for _ in range(size - 1)]
+    route = [(min(124, max(3, x)), min(124, max(3, y))) for x, y in route]
+    route[0] = at
+    ub, sb = random.choice([1, 1, 500, 70000]), random.choice([1, 40, 70000])
+    if random.random() < 0.25 and route[min(size - 1, 6)] != at:  # something stands on the look-ahead cell
+        lx, ly = route[min(size - 1, 6)]
+        ugrid[lx * 128 + ly] = random.choice([0x3200000, 0xFFFFFD])
+        if random.random() < 0.3:
+            sgrid[lx * 128 + ly] = random.choice([own, 0x2100000, 0x1ffffe])
+    sgrid = [v if v >= 0x1fffff else (0 if random.random() < 0.9 else sb - 1) for v in sgrid]  # static stamps below its base count as free
+    mu.mem_write(UGRID, struct.pack("<16384I", *ugrid))
+    mu.mem_write(SGRID, struct.pack("<16384I", *sgrid))
+    mu.mem_write(UBASE, struct.pack("<I", ub))
+    mu.mem_write(SBASE, struct.pack("<I", sb))
+    mu.mem_write(UNIT, b"\0" * 0x200)
+    mu.mem_write(POS, b"\0" * 0x40)
+    mu.mem_write(ROUTE, struct.pack(f"<{size * 2}i", *[c for p in route for c in p]))
+    mu.mem_write(UNIT + 4, struct.pack("<I", POS))
+    mu.mem_write(UNIT + 0x14, struct.pack("<I", own))
+    mu.mem_write(UNIT + 0x88, struct.pack("<II", ROUTE, size))
+    mu.mem_write(UNIT + 0x5C, struct.pack("<ii", -1, -1))
+    mu.mem_write(POS + 0x14, struct.pack("<ii", at[0] * 32 + 16, at[1] * 32 + 16))
+    heap_top[0] = HEAP
+    ok = call(0x476870, [at[0] * 32 + 16, at[1] * 32 + 16, 0], ecx=UNIT) & 0xFF
+    nx, ny = struct.unpack("<ii", mu.mem_read(UNIT + 0x6C, 8))
+    gx, gy = struct.unpack("<ii", mu.mem_read(UNIT + 0x5C, 8))
+    (nb,) = struct.unpack("<I", mu.mem_read(UBASE, 4))
+    ptr, psize = struct.unpack("<II", mu.mem_read(UNIT + 0xB0, 8))
+    path = struct.unpack(f"<{psize * 2}i", mu.mem_read(ptr, psize * 8)) if psize else ()
+    stop = int(gx != -1)
+    if ok:
+        exe = f"0 {nb} | {nx} {ny} | " + " ".join(map(str, path))
+        stats["step"] += 1
+    else:
+        exe = f"{stop} {nb} | none | "
+        stats["stop" if stop else "none"] += 1
+    with tempfile.NamedTemporaryFile("wb", delete=False) as f:
+        f.write(struct.pack("<32768I", *(ugrid + sgrid)))
+    rust = sh("local", f.name, ub, sb, own, *at, *[c for p in route for c in p])
+    os.unlink(f.name)
+    if exe.split() != rust.split():
+        bad += 1
+        if bad <= 3:
+            print("  local mismatch at", at, "route", route[:k + 1][-1], "bases", ub, sb, "\n   exe ", exe[:150], "\n   rust", rust[:150])
+print(f"  ({stats['step']} steps, {stats['stop']} stops, {stats['none']} without a step)")
+report("local avoidance (0x476870)", 300, bad)
+
+# 11. chase cell search (0x477630): the handle queries are hooked (a live unit target at a given pixel position)
+TOBJ, OUT = STACK + 0xBA000, STACK + 0xBB000
+
+
+def make_ret_hook(value):
+    def hook(uc, addr, size, ud):
+        sp = uc.reg_read(UC_X86_REG_ESP)
+        (ret,) = struct.unpack("<I", uc.mem_read(sp, 4))
+        uc.reg_write(UC_X86_REG_ESP, sp + 4)
+        uc.reg_write(UC_X86_REG_EIP, ret)
+        uc.reg_write(UC_X86_REG_EAX, value)
+    return hook
+
+
+mu.hook_add(UC_HOOK_CODE, make_ret_hook(0), begin=0x43AAA0, end=0x43AAA0)  # handle type: not 4
+mu.hook_add(UC_HOOK_CODE, make_ret_hook(1), begin=0x43AAB0, end=0x43AAB0)  # a unit
+mu.hook_add(UC_HOOK_CODE, make_ret_hook(TOBJ), begin=0x43AAC0, end=0x43AAC0)  # alive: its object
+bad = 0
+stats = {"ok": 0, "fail": 0}
+for n in range(300):
+    mapw, maph = random.choice([(64, 64), (48, 40), (100, 100)])
+    grid = [0] * 16384
+    for x in range(128):
+        for y in range(128):
+            if x < 1 or y < 1 or x >= mapw - 1 or y >= maph - 1 or random.random() < random.choice([0.0, 0.1, 0.25, 0.35]):
+                grid[x * 128 + y] = 0xFFFFFD
+    free = [(x, y) for x in range(4, mapw - 4) for y in range(4, maph - 4)]
+    unit, target = random.choice(free), random.choice(free)
+    handle = 0x2000007
+    for _ in range(random.randint(0, 6)):  # cells of the target's own building around it
+        grid[(target[0] + random.randint(-2, 2)) * 128 + target[1] + random.randint(-2, 2)] = handle
+    if random.random() < 0.2:  # wall the target in: the wave never gets near it
+        for dx in range(-3, 4):
+            for dy in range(-3, 4):
+                if max(abs(dx), abs(dy)) == 3:
+                    grid[(target[0] + dx) * 128 + target[1] + dy] = 0xFFFFFD
+    grid[unit[0] * 128 + unit[1]] = random.choice([0, 0, 0x3000000])
+    base = random.choice([1, 1, 500, 70000])
+    rng_ = random.choice([1, 2, 3, 5, 8, 12])
+    mu.mem_write(SGRID, struct.pack("<16384I", *grid))
+    mu.mem_write(SBASE, struct.pack("<I", base))
+    mu.mem_write(0x71CEC0, struct.pack("<II", mapw, maph))
+    mu.mem_write(TOBJ, b"\0" * 0x40)
+    mu.mem_write(TOBJ + 0x14, struct.pack("<ii", target[0] * 32 + 16, target[1] * 32 + 16))
+    mu.mem_write(OUT, b"\0" * 16)
+    ok = call(0x477630, [unit[0], unit[1], handle, rng_, OUT, OUT + 4], ecx=UNIT) & 0xFF
+    ox, oy = struct.unpack("<ii", mu.mem_read(OUT, 8))
+    (nb,) = struct.unpack("<I", mu.mem_read(SBASE, 4))
+    exe = f"ok {ox} {oy} {nb}" if ok else f"fail {nb}"
+    stats["ok" if ok else "fail"] += 1
+    with tempfile.NamedTemporaryFile("wb", delete=False) as f:
+        f.write(struct.pack("<16384I", *grid))
+    rust = sh("approach", f.name, base, mapw, maph, *unit, *target, handle, rng_)
+    os.unlink(f.name)
+    if exe.split() != rust.split():
+        bad += 1
+        if bad <= 3:
+            print("  approach mismatch", unit, target, "range", rng_, "base", base, "\n   exe ", exe, "\n   rust", rust)
+print(f"  ({stats['ok']} destinations, {stats['fail']} failures)")
+report("chase cell search (0x477630)", 300, bad)
 
 sys.exit(1 if failures else 0)

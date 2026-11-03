@@ -7,7 +7,7 @@ See the module docs in `crates/opensow-formats/src/` for the authoritative descr
 
 ## Level files (`Data/Levels/`)
 - Per level `Mxx`: `.srf` (terrain JPEG, 32 px per cell, e.g. 2048x2048 = 64x64 cells), `.srfa` (second JPEG layer, half resolution; purpose unconfirmed),
-  `.map`, `.tmi`, `.til`, `.edt`, `.sgv` (MPEG-1 briefing/intro video). `M00` is a test/menu level without `.sgv`. Multiplayer maps are `NN-Name.net`.
+  `.map`, `.tmi`, `.til`, `.edt`, `.sgv` (briefing/intro video: MPEG-1, or AVI for mA/mB; docs/video.md). `M00` is a test/menu level without `.sgv`. Multiplayer maps are `NN-Name.net`.
 - `.map` (VER7): header + `w*h` 17-byte cells; see `map.rs`. Cell byte 1 = blocked (lake/mountain outline verified on M01), byte 5 = border ring,
   byte 11 = sparse flag (unknown). Header `a,b` look like pixel coordinates (M01: 1341,1560 => cell ~42,48), maybe player start. Sizes seen: 64x64, 96x80.
 - `.tmi`: `u16 w,h` + `w*h` u16 tile indices (0 = none) into `.til`. Max index = frame count - 1 (M01: 1030 frames).

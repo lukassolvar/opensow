@@ -1,5 +1,6 @@
 use crate::art::Source;
 use crate::scene::{Scene, CELL};
+use opensow_formats::effects::Blit;
 use opensow_formats::level::{Object, ObjectKind, Owner, UnitKind};
 use opensow_formats::sprite::{rgb565_to_rgb8, Frame};
 
@@ -123,6 +124,46 @@ pub fn blit(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, ax: i32
                 let [r, g, b] = rgb565_to_rgb8(f.pixels[i]);
                 *p = pack(r, g, b);
             }
+        }
+    }
+}
+
+/// Like [`blit`] but combines the sprite with the picture the way the exe's blit routines do ([`Blit`], exact RGB565
+/// arithmetic: plain copy, additive, half-additive, 50 % average, darkening, shade, lens).
+pub fn blit_blend(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, ax: i32, ay: i32, mode: Blit) {
+    let z = view.zoom;
+    let (x0, y0) = view.to_screen((ax - f.hot_x as i32) as f32, (ay - f.hot_y as i32) as f32);
+    let (x1, y1) = view.to_screen((ax - f.hot_x as i32 + f.width as i32) as f32, (ay - f.hot_y as i32 + f.height as i32) as f32);
+    for dy in y0.max(0)..y1.min(h as i32) {
+        let sy = (((dy - y0) as f32 / z) as usize).min(f.height as usize - 1);
+        for dx in x0.max(0)..x1.min(w as i32) {
+            let sx = (((dx - x0) as f32 / z) as usize).min(f.width as usize - 1);
+            let i = sy * f.width as usize + sx;
+            if !f.mask[i] {
+                continue;
+            }
+            let [r, g, b] = rgb565_to_rgb8(f.pixels[i]);
+            let idx = dy as usize * w + dx as usize;
+            let out = match mode {
+                Blit::Plain => pack(r, g, b),
+                // the exe works on RGB565 words; do the same and expand the result back to 8 bits
+                _ => {
+                    // the lens mode brightens the picture pixel 2 columns right and 3 rows down instead of the covered one
+                    let q = if mode == Blit::Lens {
+                        let zi = z.round().max(1.0) as usize;
+                        let (qx, qy) = ((dx as usize + 2 * zi).min(w - 1), (dy as usize + 3 * zi).min(h - 1));
+                        buf[qy * w + qx]
+                    } else {
+                        buf[dy as usize * w + dx as usize]
+                    };
+                    let d = ((q >> 19 & 31) << 11 | (q >> 10 & 63) << 5 | (q >> 3 & 31)) as u16;
+                    let s = f.pixels[i];
+                    let o = mode.apply565(d, s);
+                    let (or, og, ob) = ((o >> 11) as u32, (o >> 5 & 63) as u32, (o & 31) as u32);
+                    pack((or << 3 | or >> 2) as u8, (og << 2 | og >> 4) as u8, (ob << 3 | ob >> 2) as u8)
+                }
+            };
+            buf[idx] = out;
         }
     }
 }

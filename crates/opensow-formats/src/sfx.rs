@@ -84,6 +84,30 @@ pub fn path(id: u8) -> Option<&'static str> {
     SFX.iter().find(|s| s.0 == id).map(|s| s.1)
 }
 
+/// Muzzle sound of a weapon kind (`docs/projectiles.md`, `opensow weapons`): the volley spawner `0x47cf40` plays one
+/// sound at the fire point after it creates the bullets (switch on the kind through the byte table `0x47d28c` and the jump
+/// table `0x47d244`). `jitter` is the fourth argument of `0x4075b0`: a random pitch change of up to 10 % (off for
+/// walkers 1 and 3). Kinds 14, 15, 44 and every non-weapon kind make no muzzle sound.
+pub fn muzzle(kind: u8) -> Option<(u8, bool)> {
+    let id = match kind {
+        1..=3 | 42 => 0,
+        4 => 1,
+        5 => 2,
+        6 => 3,
+        7 => 4,
+        8 => 5,
+        9 => 6,
+        10..=12 => 10,
+        13 => 7,
+        41 => 16,
+        43 => 17,
+        45 => 18,
+        109..=113 => kind - 109 + 11,
+        _ => return None,
+    };
+    Some((id, !matches!(kind, 41 | 43)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,5 +117,19 @@ mod tests {
         assert_eq!(path(58), Some("sfx/cinky2/tt-Upgrade.wav"));
         assert!(path(71).is_none());
         assert_eq!(SFX.len(), 72);
+    }
+
+    #[test]
+    fn muzzle_sounds() {
+        assert_eq!(muzzle(5), Some((2, true)));
+        assert_eq!(muzzle(41), Some((16, false)));
+        assert_eq!(muzzle(111), Some((13, true)));
+        assert_eq!(muzzle(14), None);
+        assert!(muzzle(200).is_none());
+        for k in 0..=255u8 {
+            if let Some((id, _)) = muzzle(k) {
+                assert!(path(id).is_some());
+            }
+        }
     }
 }
