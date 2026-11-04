@@ -6,8 +6,15 @@ use crate::ui::{self, Rect};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     NewGame,
+    /// Main menu TUTORIAL: mission M00 straight away (no briefing movie), `0x4460a0` case 2 -> state 5 (docs/tutorial.md).
+    Tutorial,
     Unavailable(&'static str),
     Options,
+    /// The load page (state `0x11`).
+    LoadGame,
+    Multiplayer,
+    /// The prototype's own settings (game speed, health bars ...), key `P`.
+    Prototype,
     Exit,
     Level(String),
     Back,
@@ -37,11 +44,17 @@ pub struct Settings {
     pub show_range: bool,
     /// Production is not implemented, so missions that start with few units get a free squad next to the Advancer.
     pub starter_squad: bool,
+    /// Options menu "KEYS SCROLL" / "MOUSE SCROLL" (0..=10): the map moves `2 * ticks * speed` px per step (docs/options.md).
+    pub scroll_keys: u32,
+    pub scroll_mouse: u32,
+    /// Options RADAR / QUAKE switches (`+8` / `+9`).
+    pub radar_on: bool,
+    pub quake_on: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { ticks_per_second: crate::sim::TICKS_PER_SECOND, hp_bars: true, show_range: false, starter_squad: true }
+        Settings { ticks_per_second: crate::sim::TICKS_PER_SECOND, hp_bars: true, show_range: false, starter_squad: true, scroll_keys: 5, scroll_mouse: 3, radar_on: true, quake_on: true }
     }
 }
 
@@ -56,9 +69,9 @@ pub struct Button {
 
 const MAIN: [(&str, Action); 6] = [
     ("New game", Action::NewGame),
-    ("Load game", Action::Unavailable("Saved games are not implemented yet.")),
-    ("Tutorial", Action::Unavailable("The tutorial missions are not playable yet.")),
-    ("Multiplayer", Action::Unavailable("Multiplayer is not implemented yet.")),
+    ("Load game", Action::LoadGame),
+    ("Tutorial", Action::Tutorial),
+    ("Multiplayer", Action::Multiplayer),
     ("Options", Action::Options),
     ("Exit game", Action::Exit),
 ];
@@ -142,7 +155,7 @@ pub fn draw(screen: &Screen, buttons: &[Button], hover: Option<usize>, assets: &
     let (title, panel) = match screen {
         Screen::Main => ("", false),
         Screen::Levels => ("Choose a mission", true),
-        Screen::Options => ("Options", true),
+        Screen::Options => ("Prototype settings", true),
         Screen::Pause => ("Paused", true),
         Screen::Message(_) => ("", true),
     };

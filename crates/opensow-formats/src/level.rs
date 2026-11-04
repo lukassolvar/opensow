@@ -35,7 +35,7 @@ pub const HEADER_WORDS: usize = 94;
 /// (heavy factories first appear on map 06, walker factories only on maps 04/05/07/08,
 /// gold mines dominate "Gold Rush", air bases are absent from "First Spark").
 /// Kind 107 (`Wind`) is assumed to be the energy source (InfoBox has energy meters); unconfirmed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ObjectKind {
     /// Kinds 25..=29 = `tur_01`..`tur_05` (HP 900/1250/1540/2100/2600); `1..=5`.
     Turret(u8),
@@ -97,7 +97,7 @@ impl ObjectKind {
 /// Probable owner from object word 14. Evidence: on M01 the player's HQ has 0,
 /// the island enemy HQ has 1, and the neutral capturable research lab (half health,
 /// the one the briefing says to seize) has 2.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Owner {
     Player,
     Enemy,

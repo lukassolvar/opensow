@@ -1,13 +1,15 @@
 # Settings files
 
-Code: `crates/opensow-formats/src/config.rs` (`opensow cfg <file>`); checks: `scripts/verify_save_layout.py` (the `Options` field order and header), `scripts/verify_config.py` (the exe's own `player.cfg` writer, 20 random level-state sets, decoded by `PassedLevels`). Both files are MFC `CArchive` streams (little-endian, no compression) that start with `u16 1, u16 0x1d6c`. The install ships neither: the game writes them on first run.
+Code: `crates/opensow-formats/src/config.rs` (`opensow cfg <file>`); checks: `scripts/verify_save_layout.py` (the `Options` field order and header), `scripts/verify_config.py` (the exe's own `player.cfg` writer, 20 random level-state sets, decoded by `PassedLevels`; and the `State of War_1.cfg` writers `0x4536d0` + `0x407ff0`, 30 random settings, decoded by `SettingsFile`). Both files are MFC `CArchive` streams (little-endian, no compression) that start with `u16 1, u16 0x1d6c`. The install ships neither: the game writes `State of War_1.cfg` when the options menu is closed with O.K.
 
 ## `State of War_1.cfg` (`COptions`)
 Written next to the exe (current directory); the file name is the string the constructor `0x452a90` stores at `+4`. One object per player lives at `0x6bf710 + 0x28 * player`; the file holds the one of the local player (`0x452c30` loads it after the video modes are known, `0x453310` saves it when the options menu closes). Stream after the header: `u32` detail (`+0xc`), scroll speed (`+0x14`), scroll speed (`+0x18`), width (`+0x1c`), height (`+0x20`), four bytes (bools `+8 +9 +0x10 +0x11`), `u32` language (`+0x24`).
 - detail `0..=4` (the options menu's arrow buttons `0x452bc0/0x452c00`; the ring toggle at `0x44c16f` flips 0 <-> 2): after loading, `0x453060` trims or grows the cloud list `[0x49a3fc]` to 0, 13, 32, 45 or 70 objects.
-- the two scroll speeds go `0..=10` through the `+/-` buttons (`0x452be0/0x452c20`, `0x452bd0/0x452c10`) and multiply the map scroll step (`0x457f80` on the map object, `0x416b8f` / `0x415ef4`).
+- the two scroll speeds go `0..=10` through the `+/-` buttons (`0x452be0/0x452c20`, `0x452bd0/0x452c10`): `+0x14` is the mouse (window edge) speed, `+0x18` the arrow keys speed; the map moves `2 * ticks * speed` px per step (`0x457f80` on the map object, `0x416b8b` / `0x415ef1`).
 - width/height: constructor defaults 1920 x 1080 (`0x780`, `0x438`); the options menu offers 640x480, 800x600, 1024x768, 1600x900 and 1920x1080.
-- the four bools are the options menu's switches (`0x44c131`, `0x44c150`, `0x44c1cb`, `0x44c1e7`); the sound switches (music, effects, speech) and volumes (`0x6b3d88/8c/90`, +-5 per click) belong to the audio object and are not in this file.
+- the four bools are the options menu's switches (`0x44c131`, `0x44c150`, `0x44c1cb`, `0x44c1e7`): radar `+8`, quake `+9`, hardware cursor `+0x10`, vblank `+0x11`; what they do: docs/options.md.
+- **The file continues with the audio object `0x6b3d38`** (`0x407ff0`, `config::Audio`): header `u16 1, u16 0x6121`, `u32` music, speech, effect volume (`+0x50/+0x54/+0x58`, 0..=100, +-5 per menu click), `u32` music, speech, effect switch (`+0x5c/+0x5d/+0x5e`, non-zero = on). Total 60 bytes; `config::SettingsFile`.
+- first run (file missing): see docs/options.md (`Options::first_run`: 1024 x 768, radar/quake/vblank on, clouds and HW cursor off, scroll 3/5; audio 100/100/100 all on).
 - language id 0..=7 as in docs/text.md; it selects `data\diffdata\<code>\` for the localised level files.
 
 ## `Savegame\player.cfg` (`CPassedLevels`)

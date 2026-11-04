@@ -13,6 +13,7 @@ pub struct Assets {
     pub art: Art,
     fonts: HashMap<String, Rc<(Font, Font)>>,
     pub backdrop: Option<Image>,
+    infobox_pictures: HashMap<String, Option<Rc<Vec<Frame>>>>,
     /// `001_buttons.tsp`: frames 0..6 highlighted, 6..12 normal (NEW GAME, LOAD GAME, TUTORIAL, MULTIPLAYER, OPTIONS, EXIT GAME).
     pub buttons: Vec<Frame>,
 }
@@ -26,7 +27,22 @@ impl Assets {
             .and_then(|p| std::fs::read(p).ok())
             .and_then(|d| sprite::parse(&d, Kind::Color).ok())
             .unwrap_or_default();
-        Ok(Assets { game, art, fonts: HashMap::new(), backdrop, buttons })
+        Ok(Assets { game, art, fonts: HashMap::new(), backdrop, infobox_pictures: HashMap::new(), buttons })
+    }
+
+    /// An info box picture (`Data\\Sprites2\\InfoBox\\<path>.tsp`, case-insensitive), cached.
+    pub fn infobox_picture(&mut self, path: &str) -> Option<Rc<Vec<Frame>>> {
+        if let Some(p) = self.infobox_pictures.get(path) {
+            return p.clone();
+        }
+        let loaded = self
+            .game
+            .resolve(&format!("Data\\Sprites2\\InfoBox\\{path}.tsp"))
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|d| sprite::parse(&d, Kind::Color).ok())
+            .map(Rc::new);
+        self.infobox_pictures.insert(path.to_owned(), loaded.clone());
+        loaded
     }
 
     /// Inner and outline masks of a font (`small`, `medium`, `big`, `msg`).

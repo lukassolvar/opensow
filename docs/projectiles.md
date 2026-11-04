@@ -1,6 +1,6 @@
 # Projectiles and damage
 
-Code: `crates/opensow-formats/src/projectile.rs`; CLI `opensow weapons`; tests `weapon_shots_match_the_exes_top_constructor`,
+Code: `crates/opensow-formats/src/projectile.rs` (random curves: `curves.rs`); CLI `opensow weapons`; tests `weapon_shots_match_the_exes_top_constructor`,
 `bullet_types_match_the_exes_constructor` (`tests/real_data.rs`).
 
 ## Pipeline
@@ -11,7 +11,7 @@ Code: `crates/opensow-formats/src/projectile.rs`; CLI `opensow weapons`; tests `
    - every **ground unit** (`[unit+0x4b] == 0`; flyers are immune) with `distance < 32` px loses the **full strength**, whoever owns it (no friendly-fire check);
    - kinds 109..113 (turrets under construction) redirect the damage to their building;
    - bullet type 30 spares kind-45 units of the shooter's own team (the nuke walker);
-   - the building in the impact cell loses the strength from `[bld+0x74]` unless shielded (`[bld+0x94] == 100`), and the damage is tallied per player at `[bld+0x7c+owner*4]`; some bullet types (17..35 through a table at `0x42f468`) do half damage to buildings.
+   - the building in the impact cell loses damage `d` from `[bld+0x74]`, tallied per player at `[bld+0x7c+owner*4]`. `d` comes from `type - 17` through a byte table `0x42f474` into a jump table `0x42f468` (`projectile::building_hit`, `building_damage`; exe-tested): types **24, 25 (meteors) and 35 (Rogon blast) do half** (`strength / 2`, rounded toward zero) and types **17, 18, 26** (Tripler pod, bomber bomb, fighter bomb) full damage, but all six do **nothing to a Headquarters** (`[bld+0x94] == 100` is the building *kind*; the "shield" is the HQ). Every other type, including everything below 17, does full damage to any building.
    - `distance` (`0x437720`) is `trunc(sqrt(dx^2 + dy^2))`, 200 when either axis differs by more than 200.
 
 ## Weapons (`opensow weapons`)
@@ -27,16 +27,35 @@ Unit max HP is 180-600 for ground units (`docs/levels.md`), so one 5W5 shot (920
 
 ## Bullet type table
 `projectile::BULLET_TYPES` lists, for each of the 35 types, the speed `[+0x2664]`, the interval `[+0x264c]` (default 100; for type 1 it paces smoke puffs of the trail) and the four animation fields `[+0x2670/2674/2678/267c]`.
-Types 19-23 contain loops that were not decoded (marked `partial`); types 13, 14 and 32 compute their speed with the random generator; 28, 29 and 31 also run effect code. Those are not cross-checked against the exe; all other types are.
-Types 2 and 13 draw a random start value (`[+0x26ac]`, `[+0x2664]`); not modelled.
+Types 19-21 (Advancer beam sparks) and 23 (dim effect) contain loops and a branch the generic table cannot hold; they are decoded in `sparks.rs` and checked in emulation (below). Type 32 computes its speed with the random generator (13 and 14: `curves.rs`); 28, 29 and 31 also run effect code. Those are not cross-checked against the exe; all other types are.
+Type 2 draws a random start value (`[+0x26ac]`); not modelled. Types 13 and 14 are decoded: speed 30+rand(60) / 60+rand(30), see below.
 
 ## Paths (`projectile::build_path`, viewer `--shot x1,y1,x2,y2,type`)
 - The constructor passes start `(x1, y1)`, end `(x2, y2)` and a delay (`[bullet+0x26ac]`, a random 0..4 for type 2) to `0x40ef60`; the bullet starts at the start point.
 - Ground track: an integer **Bresenham line**, one pixel on the long axis per step, start excluded, end included, at most **800 points**; each point is stored as (x, y) at `[bullet+0xd44+8i]`.
 - Arc types lift the bullet by `h(i)` pixels at step `i` of `N` (subtracted from y; kept at `[bullet+0xc4+4i]`, probably for the shadow): types 2 and 3 `h = i - i*i/N` (peak N/4: the tier-1 artillery shell is type 3), type 4 `h = (i - i*i/N) * 20 / 13` (peak ~0.385 N: tier-2/3 artillery), types 15 and 16 `h = 4i - 4i*i/N` (peak N). Paths that hit the 800-point cap are not lifted. All other types are straight.
-- Types 13 and 14 pick one of 200 random precomputed curves from tables built at start-up (`0x4ec228`, `0x49de98`...), which are not in the file; they are not reproduced (`build_path` returns `None`).
+- Types 13 and 14 copy one of 200 random curves, see Random-curve bullets below (`curves.rs`; `build_path` still returns `None` for them).
 - The start index is `delay` (steps skipped) unless the path is not longer than it.
 - Flight time: `flight_ticks(speed, steps)`; e.g. a 400 px cannon shot (type 6, speed 1800) takes 14 ticks, a 400 px type-4 shell (speed 120) about 200.
+
+## Random-curve bullets (types 13 and 14, `curves.rs`)
+Debris of a destroyed building: the destruction animation (`0x409b60`; every time its counter `[b+0x110]` runs out it throws 3 bullets of type 14 and 3 of type 13, strength 80, owner = the building's, then sets the counter to 90 + rand(15)). Not used by any weapon.
+- **Curve table** (`0x40f2c0`, called from game init `0x422c13` straight after the lockstep RNG index is set to 0, so the table is the same in every game; the 600 draws leave the index at 600): per curve k < 200, `dx = rand(300)-150`, `dy = rand(300)-150`, Bresenham line from (0,0) to (dx,dy) as in the normal path builder (start excluded, `max(|dx|,|dy|)` points, n), then `rand(3)`: 0 -> lift `h(i) = i - i*i/n`, else `h(i) = 2i - 2*i*i/n`; `y -= h(i)`, lift kept per point. Stored at `0x4ec098` (counts, 2 per point), `0x49de98` (points, `0x640` bytes per curve) and `0x4ec228` (lifts, `0x320` per curve).
+- **Constructor** (`0x411dc0`): type 13 `[+0x265c]=1`, `[+0x268c] = rand(2)`, speed `30 + rand(60)`, anim fields `[0,16,1,2]`; type 14 `[+0x264c]=3`, speed `60 + rand(30)`. **Path** (`0x40ef60`, via `0x40ef10`): `rand(200)` picks the curve, points are the curve plus the start (the end point given is ignored); first step `delay*2` (0 here). Draw order per bullet: constructor numbers, then the curve number (`curves::RandomBullet::draw`).
+- **Flight** (`0x411220`): the common step loop; type 13 (not 14) also copies the lift to `[+0xc0]` each step (shadow). After the last point the bullet is removed, and the removal (`0x40f590`) has no special case for 13/14, so it does the generic area damage `0x42f2c0(x, y, 80, owner, type)` at the last point (checked in emulation: it is called for 13 and 14).
+- Verified by `scripts/verify_against_exe.py` section 14: the whole table (counts, points, lifts, RNG index 600) and 300 constructor+path draws are identical to `opensow curves|curvebullet`. Not wired into the game: the prototype sim has no building destruction animation to throw them.
+
+## Beam sparks and dim effect (types 19-21, 23; `sparks.rs`)
+Constructor cases `0x412408` (19), `0x4123aa` (20), `0x412333` (21), `0x411ee0` (23). Each fills three int arrays in the bullet: `A[i]` at `[+0x0c+4i]` (x offset), `B[i]` at `[+0x48+4i]` (y offset), `C[i]` at `[+0x84+4i]` (frame), `i < [+0x268c]`. The randomness is `0x437cd0`, the *visual* generator (C `rand()` table, not the lockstep one), so the values are not reproducible, only their ranges:
+| type | action | speed | `[+0x264c]` | fragments | `A` | `B` | `C` |
+|---|---|---|---|---|---|---|---|
+| 19 | repair (`bodky_b`) | 60 | 100 | 5 | `rand(30)-15` | `rand(20)-10` | `rand(3)` |
+| 20 | upgrade (`bodky_y`) | 60 | 2 | 2 | `rand(20)-10` | `rand(20)-10` | 0 |
+| 21 | destroy (`bodky_r`) | 60 | 100 | 12 | 0 | `-i` | `rand(2)`, then fragments 9, 10, 11 forced to 0, 4, 0 |
+Draw order per fragment: x, y, frame. Type 21 also sets the start delay `[+0x26ac]` to 5 (the `-i` comes from reusing the owner argument slot `[ebp+0x20]` as a down counter after it was copied to `[+0x266c]`). Type 23 (`dim1..dim4`, 21 frames each): speed 60, counter 0, period 1 / 3, and the end frame `[+0x2674]` is 16 for variant `[+0x2680]` 0 or 2, otherwise 20. Checked against the exe by `scripts/verify_against_exe.py` (visual RNG hooked, 400 constructor runs); `opensow sparks`.
+
+## Targeted bullets and the handle `[+0x2688]`
+The shot spawner (`0x47cf40` -> `0x47cf70`, callers: weapon tops `0x479e35`, the Advancer beam `0x46f440`) passes the shooter's **target handle** (`[top+0x7c]`) as its fifth argument and stores it at `[bullet+0x2688]` (`0x47d0fe`; the satellite check `0x40a0b7` stores the Advancer's `[unit+0x3c]`). A handle is a 32-bit number: slot index in bits 0..9, player (side) bits 16..18 (`0x43aa80`), class bits 19..21 (`0x43aaa0`: 4 = a unit on the air grid), subclass bits 22..24 (`0x43aab0`: 4 = aircraft, 1 = ground unit, `0x43aac0` checks it); 0 = none. Only bullet types **1** (anti-air missile), **10** (satellite laser) and **31** (the Advancer's gun) use it: the impact function `0x40f590` sends them to `0x4108bc` instead of the generic tail. There, subclass 4 loops over the side's aircraft array `0x5ba910` (30 per side) and subtracts the strength from `[aircraft+0x2c]` of the entry whose `[+0x1c]` equals the handle; any other handle loops over the three sides' unit arrays `0x5b62c0` (1000 slots each) for the unit whose `[+0x3c]` matches, subtracting from `[unit+0x34]` and setting the hit flash `[+0x5c] = 180`, `[+0x60] = 5`. **No area damage, no splash on neighbours, and nothing at all when the target is gone** (died or was removed meanwhile). The damage comes when the bullet lands, not when it is fired. `World::shoot_at` / `hit_target` implement this for the three shooters (anti-air units, the anti-air turret, the Advancer gun); aircraft carry an `id` in place of the exe's handle. Exe-tested by `targeted_bullets_hit_their_handle_in_the_exes_impact_function`. (An earlier version of the sim took the strength off the target at the moment of firing.)
 
 ## Range rings
 - `0x436230` builds, at start-up, a list of cell offsets `(dx, dy)` (words at `0x65bbd8`) and a cumulative index table (dwords at `0x6b3a18`, value = words up to and including ring `r`; `T[0]=2` is the centre). `rings::Rings::generate()` reproduces both exactly (`opensow rings`).
@@ -50,7 +69,7 @@ Types 2 and 13 draw a random start value (`[+0x26ac]`, `[+0x2664]`); not modelle
 `scripts/verify_against_exe.py` runs the exe's own functions in an x86 emulator (unicorn) and compares them with the Rust ports on random inputs: bullet paths (`0x40ef60`, 1500 cases over 22 bullet types), the speed table (`0x436df0`, every row), heading -> facing (`0x46b180`, 2500 cases incl. 32/16/8 steps and degenerate points) the turn step (`0x46a190`, 1500 cases) and the ring list builder (`0x436230`, whole index table + 14017 offsets). All match (0 mismatches). The run found three bugs in earlier hand-reading: paths at the 800-point cap are not lifted, the 8-step facing mode is live (`(2 - round(theta/45)) mod 8`, default 2), and none in the speed table or turn step.
 
 ## Not decoded
-Which bullet type uses which sprite (`extras\bodky_*`, `missile`, `flamerburst_*`, `heavylaser`, `satlaser`, `plasma`, `elektron`, `blast_*`), explosion/blast effects, the half-damage table for buildings, the homing target handle `[+0x2688]`, and network serialisation (`0x4128f0`).
+Which bullet type uses which sprite (`extras\bodky_*`, `missile`, `flamerburst_*`, `heavylaser`, `satlaser`, `plasma`, `elektron`, `blast_*`), explosion/blast effects, and network serialisation (`0x4128f0`).
 
 ## Method notes
 - Weapon constructor cases share tail code, so extraction must follow the unconditional jumps up to `0x47ab5f`/`0x47ab66`. An earlier cut-off version gave several kinds reload 0 (corrected in `aim.rs`: kinds 2, 3, 11, 12, 14, 15, 42, 45).

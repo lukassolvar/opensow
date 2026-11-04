@@ -71,14 +71,17 @@ fn parse_args() -> Result<Args, String> {
             }
             "--overlay" => {
                 let v = value("a list")?;
-                a.overlays = Overlays { blocked: false, grid: false, objects: false, markers: false, sprites: false, muzzles: false, walk: None, fire: None };
+                a.overlays = Overlays { blocked: false, grid: false, objects: false, markers: false, sprites: false, muzzles: false, walk: None, fire: None, foreground: false };
                 for o in v.split(',').filter(|s| !s.is_empty()) {
                     match o {
                         "blocked" => a.overlays.blocked = true,
                         "grid" => a.overlays.grid = true,
                         "objects" => a.overlays.objects = true,
                         "markers" => a.overlays.markers = true,
-                        "sprites" => a.overlays.sprites = true,
+                        "sprites" => {
+                            a.overlays.sprites = true;
+                            a.overlays.foreground = true;
+                        }
                         "muzzles" => a.overlays.muzzles = true,
                         _ => return Err(format!("unknown overlay {o}")),
                     }

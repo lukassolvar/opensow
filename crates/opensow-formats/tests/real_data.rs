@@ -556,8 +556,8 @@ fn bullet_types_match_the_exes_constructor() {
     for t in 1..=35u8 {
         let want = bullet_type(t).unwrap();
         let Some(f) = exe.bullet_case(jt[t as usize - 1]) else {
-            // 13/14/32 compute their speed with the random generator, 28/29 also trigger an effect, 31 branches on a comparison.
-            assert!(want.partial || [13, 14, 28, 29, 31, 32].contains(&t), "type {t} could not be decoded but is not marked partial");
+            // 13/14/32 compute their speed with the random generator, 19/20/21 fill spark arrays in loops (sparks.rs), 23 branches on its variant, 28/29 also trigger an effect, 31 branches on a comparison.
+            assert!(want.partial || [13, 14, 19, 20, 21, 23, 28, 29, 31, 32].contains(&t), "type {t} could not be decoded but is not marked partial");
             continue;
         };
         let get = |k: u32| f.get(&k).map(|&v| v as u32);
@@ -612,6 +612,27 @@ fn building_hit_points_match_the_exes_constructor() {
 }
 
 #[test]
+fn advancer_beam_period_comes_from_the_exes_cooldown_member() {
+    use opensow_formats::advancer::{BeamTimer, BEAM_PERIOD};
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    let imm = |b: &[u8], pat: &[u8]| -> Option<u32> { (0..b.len() - pat.len() - 3).find(|&i| b[i..i + pat.len()] == *pat).map(|i| u32::from_le_bytes(b[i + pat.len()..i + pat.len() + 4].try_into().unwrap())) };
+    // 0x47c630 (cooldown member constructor): `mov [ecx+0x20], 10` (reload), `mov [ecx+0x24], 0` (spread)
+    let ctor = exe.at(0x47c630, 0x70);
+    assert_eq!(imm(ctor, &[0xC7, 0x41, 0x20]), Some(BEAM_PERIOD));
+    assert_eq!(imm(ctor, &[0xC7, 0x41, 0x24]), Some(0));
+    // the Advancer top's constructor (0x470048..) stores 10 in [top+0x124] = member +0x20 and nothing else changes it
+    let top = exe.at(0x470048, 0x40);
+    assert_eq!(imm(top, &[0xC7, 0x86, 0x24, 0x01, 0x00, 0x00]), Some(BEAM_PERIOD));
+    // 0x47c6b0 tick: `mov esi,[ecx+0x20]`, state 5 / 6 compare chain (`sub eax,5` ... `sub eax,1`)
+    let tick = exe.at(0x47c6b0, 0x50);
+    assert_eq!(&tick[10..13], &[0x8B, 0x71, 0x20]);
+    assert_eq!(&tick[0x1d..0x20], &[0x83, 0xE8, 0x05]);
+    assert_eq!(&tick[0x22..0x25], &[0x83, 0xE8, 0x01]);
+    assert_eq!(BeamTimer::default().reload as u32, BEAM_PERIOD);
+}
+
+#[test]
 fn tech_level_tiers_match_the_exes_slot_upgrade() {
     use opensow_formats::production::next_tier;
     let Some(game) = GameDir::locate() else { return };
@@ -653,10 +674,11 @@ fn factory_exit_cells_match_the_exes_constructor() {
         (0..code.len() - 10).find(|&i| code[i..i + 2] == [0xC7, 0x83] && u32::from_le_bytes(code[i + 2..i + 6].try_into().unwrap()) == disp).map(|i| i32::from_le_bytes(code[i + 6..i + 10].try_into().unwrap()))
     };
     for (kind, from) in [(101, 0x40a596u32), (102, 0x40a636)] {
-        let (spawn, walk) = factory_exit(kind).unwrap();
+        let e = factory_exit(kind).unwrap();
         let got = |d| find(from, 0xa0, d).unwrap();
-        assert_eq!((got(0x124), got(0x128)), spawn, "kind {kind} spawn");
-        assert_eq!((got(0x12c), got(0x130)), walk, "kind {kind} walk-to");
+        assert_eq!((got(0x124), got(0x128)), e.spawn, "kind {kind} spawn");
+        assert_eq!((got(0x12c), got(0x130)), e.primary, "kind {kind} walk-to");
+        assert_eq!((got(0x134), got(0x138)), e.alternative, "kind {kind} alternative walk-to");
     }
 }
 
@@ -810,6 +832,19 @@ impl Exe {
             assert!(i < 400, "no ret found");
         }
     }
+}
+
+#[test]
+fn flamer_trail_branch_matches_the_exes_flight_step() {
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    // 0x4118e2: cmp edx,8 / je / cmp edx,9 / jne; counter [+0x264c] dec, reload [+0x2650]; puff at site 0x411952
+    assert_eq!(exe.at(0x4118e2, 3), [0x83, 0xFA, 0x08]);
+    assert_eq!(exe.at(0x4118e7, 3), [0x83, 0xFA, 0x09]);
+    assert_eq!(exe.at(0x4118f0, 6), [0xFF, 0x8E, 0x4C, 0x26, 0x00, 0x00]);
+    assert_eq!(exe.at(0x411903, 6), [0x8B, 0x86, 0x50, 0x26, 0x00, 0x00]);
+    assert!(opensow_formats::effects::flame_trail(9).is_some() && opensow_formats::effects::flame_trail(6).is_none());
+    assert_eq!(opensow_formats::projectile::bullet_type(9).unwrap().interval, Some(6));
 }
 
 #[test]
@@ -1007,7 +1042,7 @@ fn muzzle_sounds_match_the_exes_volley_spawner() {
 
 #[test]
 fn unit_death_matches_the_exes_destruction_code() {
-    use opensow_formats::effects::{debris, DEBRIS_DELAY, UNIT_DEATH_CLOUDS, UNIT_DEATH_SOUND};
+    use opensow_formats::effects::{debris, debris_variant, DEBRIS_STRENGTH, UNIT_DEATH_CLOUDS, UNIT_DEATH_SOUND};
     let Some(game) = GameDir::locate() else { return };
     let Some(exe) = Exe::open(&game) else { return };
     // the clouds: 8 initialisers of the e_unit2 array (0x5e9888, frames 0..0x1d, period 3) and one wreck (0x5e92e8)
@@ -1038,8 +1073,28 @@ fn unit_death_matches_the_exes_destruction_code() {
         }
     }
     // the bullet: 0x411dc0(type 15 + (team != 0), 0x28, ...)
-    assert_eq!(DEBRIS_DELAY, 0x28);
+    // `push 0x28` right after the owner/target pushes is argument 2 of 0x411dc0, which the constructor stores at [+0x2660]
+    assert_eq!(DEBRIS_STRENGTH, 0x28);
     assert!(exe.at(0x46ae02, 12).windows(2).any(|w| w == [0x6A, 0x28]));
+    let ctor = exe.at(0x411dc0, 0x40);
+    assert!(ctor.windows(6).any(|w| w == [0x8B, 0x45, 0x0C, 0x89, 0x86, 0x60]), "argument 2 (ebp+0xc) goes to [+0x2660]");
+    // the top sprite index [top+0x54] is the piece variant; the jump table 0x46b140 is the identity on 0..=14 and larger indices skip it
+    let table: Vec<u32> = exe.at(0x46b140, 15 * 4).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+    for (i, &t) in table.iter().enumerate() {
+        let c = exe.at(t, 5);
+        assert!(i == 0 && c.starts_with(&[0x33, 0xF6]) || c.starts_with(&[0xBE, i as u8, 0, 0, 0]), "case {i}");
+    }
+    let byte_table = exe.at(0x47ac70, 0x71).to_vec();
+    let cases = *byte_table.iter().max().unwrap() as usize + 1;
+    let jt: Vec<u32> = exe.at(0x47ac04, cases * 4).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+    for kind in (1..=15).chain(40..=45) {
+        let (f, _) = exe.top_case(jt[byte_table[kind - 1] as usize]);
+        let idx = f.get(&0x54).copied();
+        match debris_variant(kind as i32) {
+            Some(v) => assert_eq!(idx, Some(v as i32), "kind {kind} top index"),
+            None => assert!(idx.is_some_and(|i| i > 14), "kind {kind} top index {idx:?} must skip the piece"),
+        }
+    }
 }
 
 #[test]
@@ -1172,4 +1227,602 @@ fn every_music_track_is_plain_pcm() {
         total += w.seconds();
     }
     assert!(total > 1000.0, "{total} s of music");
+}
+
+#[test]
+fn pointer_types_match_the_exes_cursor_code() {
+    use opensow_formats::{cursor::{Pointer, FRAMES_PER_TYPE, SPRITE}, megafile::MegaFile, sprite};
+    let Some(game) = GameDir::locate() else { return };
+    let mega = MegaFile::open(&game.data().join("sprites.info"), &game.data().join("sprites.data")).unwrap();
+    let e = mega.find(SPRITE).expect("cursor.ps6");
+    // 19 pointer types of 8 frames each
+    assert_eq!(sprite::parse(&mega.read(e).unwrap(), sprite::Kind::Color).unwrap().len(), 19 * FRAMES_PER_TYPE);
+    let Some(exe) = Exe::open(&game) else { return };
+    // `mov dword ptr [esi+0x50], type` (C7 46 50 imm32) at the places the Advancer cases set the type
+    for (va, p) in [(0x417c4a, Pointer::Repair), (0x417cdd, Pointer::Destroy), (0x417c8d, Pointer::Upgrade)] {
+        let code = exe.at(va, 7);
+        assert_eq!(&code[..3], &[0xC7, 0x46, 0x50], "{va:#x}");
+        assert_eq!(code[3] as usize, p as usize, "{va:#x}");
+    }
+    // the scroll arrows: (va, type, x offset, y offset) in the three consecutive moves of 0x416aa5.. (`[+0x50]`, `[+0x54]`, `[+0x58]`)
+    for (va, p) in [(0x416afc, Pointer::ScrollUpLeft), (0x416ae5, Pointer::ScrollDownLeft), (0x416aa5, Pointer::ScrollLeft), (0x416acb, Pointer::ScrollUp), (0x416b48, Pointer::ScrollUpRight), (0x416b31, Pointer::ScrollDownRight), (0x416b21, Pointer::ScrollRight), (0x416b68, Pointer::ScrollDown)] {
+        let code = exe.at(va, 7);
+        assert_eq!(code[3] as usize, p as usize, "scroll type at {va:#x}");
+    }
+}
+
+#[test]
+fn building_art_offsets_match_the_exes_constructor() {
+    use opensow_formats::buildings::art_offset;
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    // `mov [ebx+0x1c], x` (C7 43 1C imm32) then `mov [ebx+0x20], y` (C7 43 20 imm32), the cases of the constructor
+    for (va, kind) in [(0x40a547, 100), (0x40a59d, 101), (0x40a63d, 102), (0x40a6dd, 103), (0x40a757, 104), (0x40a7bb, 105), (0x40a81f, 106), (0x40a883, 107), (0x40a6f7, 108)] {
+        let c = exe.at(va, 14);
+        assert_eq!(&c[..3], &[0xC7, 0x43, 0x1C], "{va:#x}");
+        assert_eq!(&c[7..10], &[0xC7, 0x43, 0x20], "{va:#x}");
+        assert_eq!((c[3] as i32, c[10] as i32), art_offset(kind), "kind {kind}");
+    }
+    // turrets: the two writes come in the other order (y first)
+    for (va, kind) in [(0x40a8e7, 25), (0x40a952, 26), (0x40a962, 28)] {
+        let c = exe.at(va, 7);
+        assert_eq!(&c[..3], &[0xC7, 0x43, 0x20], "{va:#x}");
+        assert_eq!(c[3] as i32, art_offset(kind).1, "kind {kind}");
+    }
+}
+
+#[test]
+fn building_animation_tables_match_the_exes_constructor() {
+    use opensow_formats::buildings::anim;
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    // Follow each case through its jumps to the common tail 0x40a981, collecting `mov [ebx+d], imm` stores.
+    for (start, kind) in [(0x40a540, 100), (0x40a596, 101), (0x40a636, 102), (0x40a6d6, 103), (0x40a750, 104), (0x40a7b4, 105), (0x40a818, 106), (0x40a87c, 107), (0x40a6f0, 108)] {
+        let mut stores = std::collections::HashMap::new();
+        let mut va = start;
+        loop {
+            let c = exe.at(va, 10);
+            match (c[0], c[1]) {
+                (0xC7, 0x43) => { stores.insert(c[2] as u32, u32::from_le_bytes(c[3..7].try_into().unwrap())); va += 7 }
+                (0xC7, 0x83) => { stores.insert(u32::from_le_bytes(c[2..6].try_into().unwrap()), u32::from_le_bytes(c[6..10].try_into().unwrap())); va += 10 }
+                (0xC6, 0x43) => { stores.insert(c[2] as u32, c[3] as u32); va += 4 }
+                (0xEB, _) => va = (va as i64 + 2 + c[1] as i8 as i64) as u32,
+                (0xE9, _) => va = (va as i64 + 5 + i32::from_le_bytes(c[1..5].try_into().unwrap()) as i64) as u32,
+                _ => panic!("unexpected code at {va:#x}: {c:02x?}"),
+            }
+            if va == 0x40a981 { break }
+        }
+        let a = anim(kind).unwrap();
+        let bounds: Vec<u32> = (0..8).map(|i| stores[&(0x28 + 4 * i)]).collect();
+        assert_eq!(a.bounds.iter().map(|&b| b as u32).collect::<Vec<_>>(), bounds, "kind {kind} bounds");
+        if kind != 100 {
+            assert_eq!(a.period, stores[&0x58], "kind {kind} period");
+            assert_eq!(stores[&0x54], stores[&0x58], "kind {kind} initial timer");
+        }
+    }
+}
+
+#[test]
+fn building_sprite_sets_have_the_exes_frame_counts() {
+    use opensow_formats::{buildings::anim, megafile::MegaFile, sprite};
+    let Some(game) = GameDir::locate() else { return };
+    let mega = MegaFile::open(&game.data().join("sprites.info"), &game.data().join("sprites.data")).unwrap();
+    for (kind, stem) in [(100, "_base"), (101, "_light"), (102, "_med"), (103, "_heavy"), (104, "_air"), (105, "_mine"), (106, "_rlab"), (107, "_wind"), (108, "_walker")] {
+        let a = anim(kind).unwrap();
+        let name = format!("builds\\blue\\{stem}.ps6");
+        let e = mega.find(&name).unwrap_or_else(|| panic!("{name}"));
+        let frames = sprite::parse(&mega.read(e).unwrap(), sprite::Kind::Color).unwrap().len();
+        assert_eq!(frames, a.bounds[7] as usize, "{stem}");
+    }
+}
+
+#[test]
+fn rogon_bomb_constants_match_the_exe() {
+    use opensow_formats::rogon::*;
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    let u32le = |b: &[u8]| u32::from_le_bytes(b.try_into().unwrap());
+    // 0x46df40: `cmp dword ptr [esi+0x40], 0x2e` (kind 46), then nine `cmp [4*ecx + disp32], eax` (39 04 8D / 3B 04 8D) on the
+    // 3 x 3 block around the cell of the static grid 0x5eac38 (index cx*128+cy)
+    let code = exe.at(0x46df40, 0x90).to_vec();
+    assert_eq!(&code[0x0b..0x0f], &[0x83, 0x7E, 0x40, KIND as u8]);
+    let mut disps: Vec<u32> = (0..code.len() - 7).filter(|&i| code[i..i + 3] == [0x39, 0x04, 0x8D]).map(|i| u32le(&code[i + 3..i + 7])).collect();
+    assert_eq!(disps.len(), 9);
+    disps.sort();
+    let mut want: Vec<u32> = (-1i32..=1).flat_map(|dx| (-1i32..=1).map(move |dy| (0x5eac38i32 + 4 * (dx * 128 + dy)) as u32)).collect();
+    want.sort();
+    assert_eq!(disps, want);
+    // 0x46a4f0 kind 46 case: event type 0x23 with the bomb's position and +20 (the last arguments pushed in reverse order)
+    let death = exe.at(0x46a51d, 0x56).to_vec();
+    assert_eq!(&death[0..3], &[0x83, 0xFE, KIND as u8]);
+    assert!(death.windows(2).any(|w| w == [0x6A, BULLET_TYPE]), "push 0x23");
+    // 0x411e7c: the event starts with counter 20 and k = 0 (type 35 case of the jump table at 0x412490)
+    let case = exe.at(0x411e7c, 0x24).to_vec();
+    assert_eq!(&case[0..6], &[0xC7, 0x86, 0x64, 0x26, 0x00, 0x00]);
+    assert_eq!(u32le(&case[6..10]), 100, "[+0x2664] = 0x64");
+    assert_eq!(u32le(&case[16..20]) as i32, START_COUNTER);
+    // 0x411220: `cmp eax, [0x6b3a34]` = entry 7 of the index table at 0x6b3a18; `idiv 0x11`; sounds 0x43 / 0x13
+    let ev = exe.at(0x411323, 6).to_vec();
+    assert_eq!((ev[0], ev[1], u32le(&ev[2..6])), (0x3B, 0x05, 0x6b3a18 + 4 * LAST_RING as u32));
+    let snd = exe.at(0x411337, 5).to_vec();
+    assert_eq!(u32le(&snd[1..5]) as usize, SOUND_PERIOD);
+    let tail = exe.at(0x411380, 6).to_vec();
+    assert_eq!(&tail[..2], &[0x6A, 0x43]);
+    assert_eq!(&tail[4..6], &[0x6A, 0x13]);
+}
+
+#[test]
+fn random_curve_bullets_draw_what_the_exes_code_draws() {
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    // type 14 (0x411f9b): push 0x1e; call rand; movzx; add esp,4; add eax,0x3c  => speed 60 + rand(30)
+    let c14 = exe.at(0x411f9b, 20).to_vec();
+    assert_eq!((c14[0], c14[1], c14[2]), (0x6A, 0x1E, 0xE8));
+    assert_eq!(&c14[13..16], &[0x83, 0xC0, 0x3C]);
+    // type 13 (0x411fc0): push 2 first (flag), later push 0x3c and add eax,0x1e => speed 30 + rand(60)
+    let c13 = exe.at(0x411fc0, 0x60).to_vec();
+    assert_eq!(&c13[0..2], &[0x6A, 0x02]);
+    assert!(c13.windows(2).any(|w| w == [0x6A, 0x3C]) && c13.windows(3).any(|w| w == [0x83, 0xC0, 0x1E]));
+    // table builder 0x40f2c0: push 0x12c twice (dx, dy), mov edi,0x96 (the -150 bias), push 3 (lift shape), 200 curves
+    let b = exe.at(0x40f2c0, 0x240).to_vec();
+    assert_eq!(b.windows(5).filter(|w| *w == [0x68, 0x2C, 0x01, 0x00, 0x00]).count(), 2);
+    assert!(b.windows(5).any(|w| w == [0xBF, 0x96, 0x00, 0x00, 0x00]));
+    assert!(b.windows(2).any(|w| w == [0x6A, 0x03]));
+    assert_eq!(exe.at(0x40f51e, 5)[0..2], [0x3D, 0x28]); // cmp eax, 0x4ec228 (= 0x4ec098 + 200 * 2)
+}
+
+/// The second-step search `0x475c30` / `0x4732f0` (docs/walking.md): grids, counters and the only call sites.
+#[test]
+fn second_step_search_uses_the_second_step_grids_and_is_only_called_by_the_networked_planner() {
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    let count = |code: &[u8], v: u32| code.windows(4).filter(|w| *w == v.to_le_bytes()).count();
+    let ground = exe.at(0x475c30, 0x476868 - 0x475c30).to_vec();
+    let air = exe.at(0x4732f0, 0x473f10 - 0x4732f0).to_vec();
+    // ground: unit grid = second step grid 0x63ac38 / [0x49a370]; the first step grid 0x61ac38 / [0x49a36c] is asked once (the
+    // look-ahead cell next to the unit); the static grid 0x5eac38 / [0x49a360] is only read, never asked about its counter
+    assert_eq!((count(&ground, 0x49a370), count(&ground, 0x63ac38), count(&ground, 0x5eac38)), (28, 14, 1));
+    assert_eq!(count(&ground, 0x49a36c), 1);
+    assert_eq!(count(&ground, 0x61ac38), 1);
+    assert_eq!(count(&ground, 0x49a360), 0);
+    // air: 0x64ac38 / [0x49a378]; first step grid 0x62ac38 / [0x49a374] once; static grid 0x60ac38
+    assert_eq!((count(&air, 0x49a378), count(&air, 0x64ac38), count(&air, 0x60ac38)), (28, 14, 1));
+    assert_eq!(count(&air, 0x49a374), 1);
+    assert_eq!(count(&air, 0x62ac38), 1);
+    assert_eq!(count(&air, 0x49a368), 0);
+    // the ground routine hands mode != 0 to the air routine (call at 0x475c5c)
+    assert_eq!(ground[0x475c5c - 0x475c30], 0xE8);
+    assert_eq!(&ground[0x475c5c - 0x475c30 + 1..][..4], &(0x4732f0u32.wrapping_sub(0x475c61)).to_le_bytes());
+    // call sites in the whole code section: 0x475c30 from 0x473057, 0x4732f0 from 0x475c5c, 0x472f50 from 0x46fdee (the networked
+    // movement 0x46fa40); 0x476870 and 0x473190 (single player) are called from the other movement code
+    let text = exe.at(0x401000, 0x7f000).to_vec();
+    let calls = |target: u32| -> Vec<u32> {
+        (0..text.len() - 5)
+            .filter(|&i| text[i] == 0xE8 && (0x401000 + i as u32 + 5).wrapping_add(u32::from_le_bytes(text[i + 1..i + 5].try_into().unwrap())) == target)
+            .map(|i| 0x401000 + i as u32)
+            .collect()
+    };
+    assert_eq!(calls(0x475c30), [0x473057]);
+    assert_eq!(calls(0x4732f0), [0x475c5c]);
+    assert_eq!(calls(0x472f50), [0x46fdee]);
+    assert_eq!(calls(0x46fa40), [0x46f1b5]);
+    assert_eq!(calls(0x473190), [0x46f614]);
+}
+
+/// `0x4774c0` (free cell near the destination), its flood `0x4726f0` and the networked step `0x46fa40` (docs/pathfinding.md).
+#[test]
+fn free_cell_fallback_and_networked_step_match_the_decoded_structure() {
+    use opensow_formats::{freecell, netwalk, rings::Rings};
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    let text = exe.at(0x401000, 0x7f000).to_vec();
+    let calls_in = |from: u32, to: u32| -> Vec<u32> {
+        (0..text.len() - 5)
+            .filter(|&i| text[i] == 0xE8 && (0x401000 + i as u32) >= from && (0x401000 + i as u32) < to)
+            .map(|i| (0x401000 + i as u32 + 5).wrapping_add(u32::from_le_bytes(text[i + 1..i + 5].try_into().unwrap())))
+            .collect()
+    };
+    let callers = |target: u32| -> Vec<u32> {
+        (0..text.len() - 5)
+            .filter(|&i| text[i] == 0xE8 && (0x401000 + i as u32 + 5).wrapping_add(u32::from_le_bytes(text[i + 1..i + 5].try_into().unwrap())) == target)
+            .map(|i| 0x401000 + i as u32)
+            .collect()
+    };
+    let count = |code: &[u8], v: u32| code.windows(4).filter(|w| *w == v.to_le_bytes()).count();
+    // 0x4774c0: the three planner call sites; the flood is called once, from its ground branch
+    assert_eq!(callers(0x4774c0), [0x472ffe, 0x473068, 0x4731e4]);
+    assert_eq!(callers(0x4726f0), [0x47758e]);
+    let f = exe.at(0x4774c0, 0x47762a - 0x4774c0).to_vec();
+    // air branch: unit grid 0x62ac38 twice (first cell + loop), free below 0x11170; ground branch: 0x61ac38 twice
+    assert_eq!((count(&f, 0x62ac38), count(&f, 0x61ac38), count(&f, 0x11170)), (2, 2, 1));
+    // the ring list: offsets 0x65bbd8 (x) / 0x65bbda (y), limit [0x6b3a98] = entry 32 of the index table at 0x6b3a18
+    assert_eq!((count(&f, 0x65bbd8), count(&f, 0x65bbda), count(&f, 0x6b3a98)), (4, 4, 2));
+    assert_eq!(0x6b3a98, 0x6b3a18 + 4 * freecell::SEARCH_RINGS as u32);
+    assert!(Rings::generate().ends[freecell::SEARCH_RINGS] > 0);
+    // the map-size test and the destination write: [0x71cec0] / [0x71cec4], [edi+0x5c] / [edi+0x60]
+    assert_eq!((count(&f, 0x71cec0), count(&f, 0x71cec4)), (1, 1));
+    // the flood: unit grid 0x61ac38 with its counter [0x49a36c], stamp base + 1, counter base + 4 (lea ecx,[esi+3])
+    let flood = exe.at(0x4726f0, 0x472a85 - 0x4726f0).to_vec();
+    assert_eq!(count(&flood, 0x49a36c), 3);
+    assert!(flood.windows(3).any(|w| w == [0x8D, 0x4E, 0x03]));
+    assert!(flood.windows(5).any(|w| w == [0x3D, 0x00, 0x40, 0x00, 0x00]), "generation limit 0x4000 dwords = 8192 cells");
+    // 0x46fa40: plans with 0x472f50, searches with 0x4753a0, removes the order with 0x470810, builds lines with 0x46ee80, faces
+    // with 0x46b180 and asks 0x41f020; there is no turn step 0x46a190 (the single-player step calls it)
+    let targets = calls_in(0x46fa40, 0x46ff49);
+    for t in [0x472f50, 0x4753a0, 0x470810, 0x46ee80, 0x46b180, 0x41f020, 0x470480, 0x46eb40] {
+        assert!(targets.contains(&t), "0x46fa40 calls {t:#x}");
+    }
+    assert!(!targets.contains(&0x46a190));
+    assert!(calls_in(0x46f550, 0x46f9b3).contains(&0x46a190));
+    // 0x41f020(player) = [0x575720] > 0 && player != 0
+    assert_eq!(exe.at(0x41f020, 0x1a), [0x55, 0x8B, 0xEC, 0x83, 0x3D, 0x20, 0x57, 0x57, 0x00, 0x00, 0x7E, 0x0A, 0x83, 0x7D, 0x08, 0x00, 0x74, 0x04, 0xB0, 0x01, 0x5D, 0xC3, 0x32, 0xC0, 0x5D, 0xC3]);
+    // the speed row table 0x5524a0 (60 bytes per row) and the clock comparison seconds * 64 + tick (shl 6)
+    let net = exe.at(0x46fa40, 0x46ff49 - 0x46fa40).to_vec();
+    assert_eq!(count(&net, 0x5524a0), 1);
+    assert!(net.windows(3).any(|w| w == [0xC1, 0xE0, 0x06]));
+    assert_eq!(netwalk::ROW, 60);
+}
+
+/// The string index a switch case pushes: skips the `mov esi, [ebp+8]` / `mov ecx, 0x6bed04` set-up some cases have, then reads `push imm`.
+fn case_string(exe: &Exe, mut va: u32) -> Option<u32> {
+    for _ in 0..4 {
+        let b = exe.at(va, 5);
+        match b[0] {
+            0x68 => return Some(u32::from_le_bytes(b[1..5].try_into().unwrap())),
+            0x6A => return Some(b[1] as u32),
+            0x8B if b[1] == 0x75 => va += 3,
+            0xB9 => va += 5,
+            _ => return None,
+        }
+    }
+    None
+}
+
+#[test]
+fn string_groups_match_the_exes_name_switches() {
+    use opensow_formats::lang::{LangFile, Language};
+    use opensow_formats::strings::*;
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    // object names 0x431ad0 / weapon names 0x4321c0: `dec kind; movzx byte table; jmp [table*4 + jump table]`; the exe's index is the file index + 1
+    let cases = |bytes: u32, jt: u32, n: usize| -> Vec<Option<u32>> {
+        let sel = exe.at(bytes, n).to_vec();
+        let jmp: Vec<u32> = exe.at(jt, 4 * (*sel.iter().max().unwrap() as usize + 1)).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+        sel.iter().map(|&s| case_string(&exe, jmp[s as usize])).collect()
+    };
+    let names = cases(0x43214c, 0x432064, 0x73);
+    for (i, got) in names.iter().enumerate() {
+        let kind = i as u32 + 1;
+        assert_eq!(got.map(|v| v as usize - 1), object_name(kind).filter(|_| kind < 1000), "object kind {kind}");
+    }
+    let weapons = cases(0x4323d0, 0x432348, 0x6c);
+    for (i, got) in weapons.iter().enumerate() {
+        let kind = i as u32 + 1;
+        assert_eq!(got.map(|v| v as usize - 1), Some(weapon_name(kind)), "weapon kind {kind}");
+    }
+    // the English strings the groups name
+    let en = LangFile::parse(&read(&game, &format!("Data\\Language\\{}", Language::English.file_name())).unwrap()).unwrap();
+    let s = |i: usize| en.get(i).unwrap_or("");
+    assert_eq!((s(*MAIN_MENU.start()), s(*MAIN_MENU.end())), ("New Game", "Exit Game"));
+    assert_eq!((s(OPTIONS_TITLE), s(OK), s(CANCEL), s(ON), s(OFF)), ("Options", "OK", "Cancel", "On", "Off"));
+    assert_eq!((s(*LANGUAGE_NAMES.start()), s(*LANGUAGE_NAMES.end())), ("ENGLISH", "CHINESSE_T"));
+    assert_eq!(s(NO_DATA), "No data available");
+    assert!(s(land_heading(1)).starts_with("TERRITORY") && s(land_place(22)).starts_with("Coordinate"));
+    assert!(s(land_objectives(1)).starts_with("Objectives") && s(land_objectives(22)).starts_with("Objectives"));
+    assert_eq!((s(*MESSAGES.start()), s(SPEED), s(SATELLITE_PROTECTION)), ("Building captured", "speed", "SATELLITE PROTECTION"));
+    assert!(s(*TUTORIAL.start()).starts_with("i Welcome") && s(*TUTORIAL.end()).starts_with("! Excellent"));
+    assert_eq!((s(*OBJECT_NAMES.start()), s(*OBJECT_NAMES.end())), ("Radar", "Research Influx 3"));
+    assert_eq!((s(*WEAPON_NAMES.start()), s(*WEAPON_NAMES.end()), s(NO_WEAPON), s(TECH_LEVEL_HINT)), ("2x antiair rockets", "4x AG bombs", "n/a", "increase tech-level for 500"));
+    assert_eq!((s(SELECTED_LEVEL), s(*SESSION_BUTTONS.start()), s(*SLOT_TEXTS.start()), s(*SIDE_AND_START.end()), s(*HINTS.start())), ("Selected level:", "CREATE SESSION", "Empty Savegame...", "RESEARCH", "Now increase tech-level in your factory."));
+    assert_eq!((s(*INFOBOX_LINES.start()), s(*INFOBOX_LINES.end()), s(QUICK_SAVE), s(ACCEPT), s(BACK)), ("No Info Available", "cargo: reinforcements", "Quick Save", "ACCEPT", "BACK"));
+    assert_eq!((s(*STATISTICS.start()), s(*STATISTICS.end()), s(LOAD), s(SAVE), s(PAUSE), s(REMAINING_TIME), s(SAVE_TITLE)), ("CAPTURED", "SENT", "LOAD", "SAVE", "P A U S E", "Remaining Time", "Save Game"));
+}
+
+#[test]
+fn rally_point_constants_match_the_exes_code() {
+    use opensow_formats::rally::*;
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    // the widget jump table: id 0x7b -> case 12 -> 0x416cf9 (the click that arms the placement mode)
+    assert_eq!(exe.at(0x417eec + (WIDGET_ID - 0x19), 1)[0], 12);
+    assert_eq!(u32::from_le_bytes(exe.at(0x417eb4 + 12 * 4, 4).try_into().unwrap()), 0x416cf9);
+    // `0x456490(-0x19, -0xb, 0x19, 0xc)` then the position `[+0x2a0] + 4`, `[+0x2a4] - 0x29`
+    assert_eq!(exe.at(0x4554d1, 8), &[0x6a, 0x0c, 0x6a, 0x19, 0x6a, 0xf5, 0x6a, 0xe7]);
+    assert_eq!((BUTTON_RECT, BUTTON_OFFSET), ((-0x19, -0xb, 0x19, 0xc), (4, -0x29)));
+    assert_eq!(exe.at(0x455ddb, 3), &[0x83, 0xe8, 0x29]);
+    assert_eq!(exe.at(0x455de5, 3), &[0x83, 0xc0, 0x04]);
+    // the button's frames: `[0x5e719c]` and `[0x5e71a4]` = ikonyrpoints (array 0x5e7198) frames 1 and 3
+    assert_eq!(exe.at(0x455500, 12), &[0xff, 0x35, 0xa4, 0x71, 0x5e, 0x00, 0xff, 0x35, 0x9c, 0x71, 0x5e, 0x00]);
+    assert_eq!((0x5e719cu32 - 0x5e7198) / 4, BUTTON_FRAME as u32);
+    assert_eq!((0x5e71a4u32 - 0x5e7198) / 4, BUTTON_HOVER_FRAME as u32);
+    // the factory kinds tested by the click case (`cmp ecx, 0x65 / 0x66 / 0x67 / 0x6c`)
+    assert_eq!(exe.at(0x416d36, 3), &[0x83, 0xf9, 0x65]);
+    assert_eq!(exe.at(0x416d3b, 3), &[0x83, 0xf9, 0x66]);
+    assert_eq!(exe.at(0x416d40, 3), &[0x83, 0xf9, 0x67]);
+    assert_eq!(exe.at(0x416d45, 3), &[0x83, 0xf9, 0x6c]);
+    assert_eq!(FACTORY_KINDS, [0x65, 0x66, 0x67, 0x6c]);
+    // the hotkey: `cmp byte ptr [esi+0x77], 1`; the key array starts at +0x64 (numpad 7 = scan 0x47 is `[esi+0xab]`)
+    assert_eq!(exe.at(0x416769, 4), &[0x80, 0x7e, 0x77, 0x01]);
+    assert_eq!(0x77 - 0x64, HOTKEY_SCAN);
+    assert_eq!(exe.at(0x4166eb, 4), &[0x80, 0xbe, 0xaf, 0x00]);
+    // the click: `and eax/edi, -0x20` then `add 0x10`, the point stored in `[bld+0x2c0]`, `[bld+0x2c4]`
+    assert_eq!(exe.at(0x41748f, 3), &[0x83, 0xe0, 0xe0]);
+    assert_eq!(exe.at(0x417498, 3), &[0x83, 0xc0, 0x10]);
+    assert_eq!(exe.at(0x417586, 6), &[0x89, 0xb9, 0xc0, 0x02, 0x00, 0x00]);
+    // the marker anim `0x4054a0(x, y, 3, 0x5e6028, 0, 0x14, 1, 1)` and the sound `0x4075b0(0x44, ..)`
+    assert_eq!(exe.at(0x4175c4, 15), &[0x6a, 0x01, 0x6a, 0x01, 0x6a, 0x14, 0x6a, 0x00, 0x68, 0x28, 0x60, 0x5e, 0x00, 0x6a, 0x03]);
+    assert_eq!((CLICK_ARRAY, CLICK_LAST_FRAME, CLICK_PERIOD), (0x5e6028, 0x14, 3));
+    assert_eq!(exe.at(0x417634, 2), &[0x6a, CLICK_SOUND]);
+    // the marker frame counter: `cmp [esi+0x60], 0x10` and the reload `mov ecx, 3`
+    assert_eq!(exe.at(0x40dedb, 4), &[0x83, 0x7e, 0x60, 0x10]);
+    assert_eq!(exe.at(0x40ded6, 5), &[0xb9, 0x03, 0x00, 0x00, 0x00]);
+    assert_eq!((MARKER_FRAMES, MARKER_PERIOD), (16, 3));
+    // the pointer: type 9 for a free cell (`lea eax, [8*eax + 1]` with eax = 1) at offset -1, else type 1
+    assert_eq!(exe.at(0x417671, 7)[..3], [0x8d, 0x04, 0xc5]);
+    assert_eq!(exe.at(0x417647, 5), &[0xbf, 0xf4, 0xff, 0xff, 0xff]);
+    assert_eq!(POINTER_TYPE, 9);
+}
+
+#[test]
+fn turret_art_matches_the_exes_tables() {
+    use opensow_formats::{buildings::{anim, turret_art, turret_top_pos}, units::TOPS};
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    // tops: the weapon constructor's cases for the units 109..=113 that turrets 25..=29 create (`0x40e004`)
+    let byte_table = exe.at(0x47ac70, 0x71).to_vec();
+    let cases = *byte_table.iter().max().unwrap() as usize + 1;
+    let jt: Vec<u32> = exe.at(0x47ac04, cases * 4).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+    // bases: the building constructor's art cases (byte table 0x40af64, jump table 0x40af30) until the tail 0x40a981
+    let art_bytes = exe.at(0x40af64, 0x54).to_vec();
+    let art_cases = *art_bytes.iter().max().unwrap() as usize + 1;
+    let art_jt: Vec<u32> = exe.at(0x40af30, art_cases * 4).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+    for kind in 25..=29i32 {
+        let (fields, _) = exe.top_case(jt[byte_table[kind as usize + 83] as usize]);
+        let art = turret_art(kind).unwrap();
+        assert_eq!(TOPS[fields[&0x54] as usize], art.top, "kind {kind} top");
+        assert_eq!(fields[&0x60], art.top_dy, "kind {kind} top offset");
+        let mut stores = std::collections::HashMap::new();
+        let mut va = art_jt[art_bytes[kind as usize - 0x19] as usize];
+        while va != 0x40a981 {
+            let c = exe.at(va, 10);
+            match (c[0], c[1]) {
+                (0xC7, 0x43) => { stores.insert(c[2] as u32, u32::from_le_bytes(c[3..7].try_into().unwrap())); va += 7 }
+                (0xC7, 0x83) => { stores.insert(u32::from_le_bytes(c[2..6].try_into().unwrap()), u32::from_le_bytes(c[6..10].try_into().unwrap())); va += 10 }
+                (0xC6, 0x43) => { stores.insert(c[2] as u32, c[3] as u32); va += 4 }
+                (0xEB, _) => va = (va as i64 + 2 + c[1] as i8 as i64) as u32,
+                (0xE9, _) => va = (va as i64 + 5 + i32::from_le_bytes(c[1..5].try_into().unwrap()) as i64) as u32,
+                _ => panic!("unexpected code at {va:#x}: {c:02x?}"),
+            }
+        }
+        assert_eq!(format!("sentry{:02}", stores[&0x24] - 8), art.base, "kind {kind} base");
+        let a = anim(kind).unwrap();
+        assert_eq!(a.bounds.iter().map(|&b| b as u32).collect::<Vec<_>>(), (0..8).map(|i| stores[&(0x28 + 4 * i)]).collect::<Vec<_>>(), "kind {kind} bounds");
+        assert_eq!(a.period, stores[&0x58], "kind {kind} period");
+        let (ox, oy) = opensow_formats::buildings::art_offset(kind);
+        assert_eq!((ox as u32, oy as u32), (stores[&0x1c], stores[&0x20]), "kind {kind} offset");
+    }
+    // the unit of turrets 4 and 5 stands in the second row (`0x40e03e`, `0x40e029`: y + 1)
+    assert_eq!(turret_top_pos(26, (3, 4)), (112, 144));
+    assert_eq!(turret_top_pos(28, (3, 4)), (112, 176));
+}
+
+#[test]
+fn satellite_laser_column_matches_the_exes_draw() {
+    use opensow_formats::effects::{satlaser_column, SATLASER_END_DY, SATLASER_START_DY, SATLASER_STRENGTH};
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    // 0x411100: only for type 10; end point from the path (count [+0x2648] is twice the number of points); `sub esi, 0x17`
+    let draw = exe.at(0x411100, 0xa0).to_vec();
+    let has = |pat: &[u8]| draw.windows(pat.len()).any(|w| w == pat);
+    assert!(has(&[0x83, 0xBF, 0x58, 0x26, 0, 0, 0x0A]), "type 10 only");
+    assert!(has(&[0x83, 0xEE, 0x17]), "base 23 px above the end point");
+    assert!(has(&[0xFF, 0x34, 0x85, 0x68, 0x6B, 0x5E, 0x00]), "base piece: array 0x5e6b68 (satlaser frame + 4)");
+    assert!(has(&[0xFF, 0x34, 0x85, 0x58, 0x6B, 0x5E, 0x00]), "column pieces: array 0x5e6b58");
+    assert!(has(&[0xBB, 0x0D, 0, 0, 0]), "13 pieces");
+    assert!(has(&[0x83, 0xC6, 0xD2]), "46 px up");
+    assert!(has(&[0x83, 0xEE, 0x2E]), "46 px up per piece");
+    // the creation in 0x409f50: type 10, strength 1000, start -15, end +10 around y + lift
+    let fire = exe.at(0x40a07b, 0x30).to_vec();
+    let has = |pat: &[u8]| fire.windows(pat.len()).any(|w| w == pat);
+    assert!(has(&[0x68, 0xE8, 0x03, 0, 0]) && has(&[0x6A, 0x0A]), "strength 1000, type 10");
+    assert!(has(&[0x8D, 0x41, 0xF1]), "start y - 15");
+    assert!(has(&[0x8D, 0x41, 0x0A]), "end y + 10");
+    assert_eq!((SATLASER_STRENGTH, SATLASER_START_DY, SATLASER_END_DY), (1000, -15, 10));
+    let col = satlaser_column(2, 100, 50);
+    assert_eq!(col.len(), 14);
+    assert_eq!(col[0], (6, 100, 27));
+    assert_eq!(col[1], (2, 100, -19));
+    assert_eq!(col[13], (2, 100, 27 - 46 * 13));
+}
+
+#[test]
+fn satellite_check_scans_the_footprint_on_the_air_grid() {
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    let f = exe.at(0x409f50, 0x1d0).to_vec();
+    let has = |pat: &[u8]| f.windows(pat.len()).any(|w| w == pat);
+    // gate 0x41f020(arg [0x575730]): skipped for remote players only (`[0x575720] > 0 && arg`), single player always runs
+    assert!(has(&[0xFF, 0x35, 0x30, 0x57, 0x57, 0x00, 0xE8]), "network gate");
+    assert_eq!(exe.at(0x41f023, 7), &[0x83, 0x3D, 0x20, 0x57, 0x57, 0x00, 0x00][..]);
+    // timer [+0x11c] -= ticks of the frame [0x552494] while > 0; flag [+0x118] == 1 and timer <= 0 -> timer = 0xf0
+    assert!(has(&[0x2B, 0x05, 0x94, 0x24, 0x55, 0x00]), "timer minus ticks per frame");
+    assert!(has(&[0x83, 0xBF, 0x18, 0x01, 0, 0, 0x01]), "flag == 1");
+    assert!(has(&[0xC7, 0x87, 0x1C, 0x01, 0, 0, 0xF0, 0, 0, 0]), "timer = 240");
+    // footprint box [+4]..[+4]+[+0x14] (x), [+8]..[+8]+[+0x18] (y) on the air grid 0x60ac38 (index x*128 + y, 4 bytes)
+    assert!(has(&[0xC1, 0xE0, 0x07]) && has(&[0x8D, 0x0C, 0x85, 0x38, 0xAC, 0x60, 0x00]), "grid 0x60ac38");
+    // handle class 4 (air grid), side != owner [+0x8c], unit kind [+0x40] == 0x28 (Advancer), hp [+0x34] = 0
+    assert!(has(&[0x83, 0xF8, 0x04]), "class 4");
+    assert!(has(&[0x3B, 0x87, 0x8C, 0, 0, 0]), "side differs from the building's owner");
+    assert!(has(&[0x83, 0x7E, 0x40, 0x28]), "Advancer");
+    assert!(has(&[0xC7, 0x46, 0x34, 0, 0, 0, 0]), "hp = 0");
+    // the flag is cleared on every pass that gets past the gate
+    assert!(has(&[0xC7, 0x87, 0x18, 0x01, 0, 0, 0, 0, 0, 0]), "flag cleared");
+    // the only caller is the building update tail, for buildings with [+0x114] != 0; the flag is set only by the destroy beam
+    assert_eq!(exe.at(0x40e383, 7), &[0x83, 0xBE, 0x14, 0x01, 0, 0, 0][..]);
+    assert_eq!(exe.at(0x40e38e, 5), &[0xE8, 0xBD, 0xBB, 0xFF, 0xFF][..]);
+    assert_eq!(exe.at(0x4102f7, 10), &[0xC7, 0x82, 0x18, 0x01, 0, 0, 1, 0, 0, 0][..]);
+}
+
+#[test]
+fn building_damage_table_matches_the_exes_area_damage() {
+    use opensow_formats::projectile::{building_hit, BuildingHit};
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    // 0x42f417: eax = type - 0x11; > 0x12 -> 0x42f458; byte table 0x42f474 -> jump table 0x42f468
+    let bytes = exe.at(0x42f474, 19).to_vec();
+    let jt: Vec<u32> = exe.at(0x42f468, 12).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+    for ty in 1..=40u8 {
+        let target = if (17..=35).contains(&ty) { jt[bytes[ty as usize - 17] as usize] } else { 0x42f458 };
+        let want = match target {
+            0x42f44f => BuildingHit::FullUnlessHq,
+            0x42f430 => BuildingHit::HalfUnlessHq,
+            0x42f458 => BuildingHit::Full,
+            t => panic!("unexpected case {t:#x}"),
+        };
+        assert_eq!(building_hit(ty), want, "type {ty}");
+    }
+    // the shield test is `cmp [ecx+0x94], 0x64` in both shielded cases; half damage is `sar eax, 1` of strength - sign
+    assert!(exe.at(0x42f430, 7).starts_with(&[0x83, 0xB9, 0x94, 0, 0, 0, 0x64]));
+    assert!(exe.at(0x42f44f, 7).starts_with(&[0x83, 0xB9, 0x94, 0, 0, 0, 0x64]));
+    // [bld+0x94] is the building kind: the constructor `0x40a358` stores esi (kind) there
+    assert!(exe.at(0x40a358, 6).starts_with(&[0x89, 0xB3, 0x94, 0, 0, 0]));
+}
+
+#[test]
+fn targeted_bullets_hit_their_handle_in_the_exes_impact_function() {
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    // 0x40ff65: types 1, 10 and 31 (0x1f) jump to 0x4108bc, which reads the handle [bullet+0x2688]
+    let c = exe.at(0x40ff65, 0x1d).to_vec();
+    assert_eq!(&c[..3], [0x83, 0xF8, 0x01]);
+    assert_eq!(&c[9..12], [0x83, 0xF8, 0x0A]);
+    assert_eq!(&c[18..21], [0x83, 0xF8, 0x1F]);
+    assert_eq!(exe.at(0x4108bc, 6), [0xFF, 0xB3, 0x88, 0x26, 0, 0]);
+    // the shot spawner 0x47cf70 stores its fifth argument ([ebp+0x18]) there
+    assert_eq!(exe.at(0x47d0fe, 6), [0x89, 0x87, 0x88, 0x26, 0, 0]);
+    // the handle's fields: player = bits 16..18, class = bits 19..21, subclass = bits 22..24 (sar 0x10/0x13/0x16, and 7)
+    assert_eq!(&exe.at(0x43aa8f, 6)[..3], [0xC1, 0xF8, 0x10]);
+    assert_eq!(&exe.at(0x43aaa6, 6)[..3], [0xC1, 0xF8, 0x13]);
+    assert_eq!(&exe.at(0x43aab6, 6)[..3], [0xC1, 0xF8, 0x16]);
+    // subclass 4 = aircraft: the unit loop is skipped and `[aircraft+0x2c] -= strength` for the entry whose `[+0x1c]` is the handle
+    assert_eq!(exe.at(0x41094c, 12), [0x8B, 0x83, 0x60, 0x26, 0, 0, 0x29, 0x42, 0x2C, 0x8B, 0x4D, 0xF4]);
+    // other targets: `[unit+0x34] -= strength` for the unit whose `[+0x3c]` is the handle, then the hit flash `[+0x5c] = 180`, `[+0x60] = 5`
+    assert_eq!(exe.at(0x4109a8, 12), [0x8B, 0x83, 0x60, 0x26, 0, 0, 0x29, 0x42, 0x34, 0xC7, 0x42, 0x5C]);
+}
+
+#[test]
+fn anim_sprite_draw_modes_match_the_exes_jump_table() {
+    use opensow_formats::effects::{ANIM_COLUMN, ANIM_DRAW_MODES};
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    let jt: Vec<u32> = exe.at(0x405080, 15 * 4).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+    for &(mode, routine) in ANIM_DRAW_MODES.iter().filter(|m| m.0 != 12) {
+        let case = jt[mode as usize - 1];
+        let code = exe.at(case, 0x60).to_vec();
+        // the first `call rel32` of the case
+        let i = (0..code.len() - 5).find(|&i| code[i] == 0xE8).unwrap();
+        let target = (case + i as u32 + 5).wrapping_add(i32::from_le_bytes(code[i + 1..i + 5].try_into().unwrap()) as u32);
+        let want = if jt[mode as usize - 1] == 0x40504c { 0x45edf0 } else { routine };
+        assert_eq!(target, want, "mode {mode}");
+    }
+    // the creators' modes: the puff initialiser stores 8, the missile smoke 14, the fighter's smoke trail 9, blasts 6
+    let imm = |va: u32, reg_op: u8, mode: u8| assert_eq!(exe.at(va, 7), [0xC7, reg_op, 0x34, mode, 0, 0, 0], "mode store at {va:#x}");
+    imm(0x40537a, 0x47, 8);
+    imm(0x41159e, 0x43, 14);
+    imm(0x4117e8, 0x43, 14);
+    imm(0x4118af, 0x43, 14);
+    imm(0x4676dd, 0x43, 9);
+    imm(0x46777b, 0x43, 9);
+    imm(0x40527d, 0x46, 6);
+    for s in opensow_formats::effects::SPAWNS {
+        let want = match s.site {
+            0x411599 | 0x4117e3 | 0x4118aa => 14,
+            0x4676d8 | 0x467776 => 9,
+            _ => 6,
+        };
+        assert_eq!(s.spec.mode, want, "{:#x}", s.site);
+    }
+    assert_eq!(opensow_formats::effects::smoke_puff(0, 0).mode, 8);
+    assert_eq!(opensow_formats::effects::smoke_puff(1, 3).routine(), 0x45b5e0);
+    // mode 12: the call at 0x404e8c is the additive blit
+    let call = exe.at(0x404e8c, 5);
+    assert_eq!(call[0], 0xE8);
+    assert_eq!(0x404e91u32.wrapping_add(i32::from_le_bytes(call[1..5].try_into().unwrap()) as u32), 0x45cde0);
+    // the column: `sub eax, 0x17` / `add edi, 0x2e` / `cmp edi, 0x284`
+    let c = exe.at(0x404e51, 0x50).to_vec();
+    let has = |pat: &[u8]| c.windows(pat.len()).any(|w| w == pat);
+    assert!(has(&[0x83, 0xE8, 0x17]) && has(&[0x83, 0xC7, 0x2E]) && has(&[0x81, 0xFF, 0x84, 0x02, 0, 0]));
+    assert_eq!(ANIM_COLUMN, (14, 46, 23));
+    assert_eq!((0x284 + 45) / 46, 14); // edi = 0, 46, .., 598 are drawn
+}
+
+#[test]
+fn shell_smoke_trails_match_the_exes_flight_step() {
+    use opensow_formats::effects::trail;
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    let has = |va: u32, len: usize, pat: &[u8]| exe.at(va, len).windows(pat.len()).any(|w| w == pat);
+    // each branch: `cmp edx, type`, then `dec [+0x264c]`; the reload and the jitter (`push n; call 0x437cd0` twice)
+    assert!(has(0x41150a, 3, &[0x83, 0xFA, 0x01]) && has(0x4115d1, 3, &[0x83, 0xFA, 0x18]) && has(0x411695, 3, &[0x83, 0xFA, 0x19]));
+    assert!(has(0x411759, 3, &[0x83, 0xFA, 0x03]) && has(0x41181b, 3, &[0x83, 0xFA, 0x04]));
+    let reload_half = |va: u32| has(va, 0x14, &[0x8B, 0x86, 0x50, 0x26, 0, 0]) && has(va, 0x14, &[0x2B, 0xC2, 0xD1, 0xF8]);
+    assert!(reload_half(0x411526) && reload_half(0x411837), "types 1 and 4 reload with [+0x2650] / 2");
+    assert!(has(0x411775, 0x10, &[0x8B, 0x86, 0x50, 0x26, 0, 0]) && !has(0x411775, 0x10, &[0xD1, 0xF8]), "type 3 reloads with [+0x2650]");
+    assert!(has(0x4115ef, 10, &[0xC7, 0x86, 0x4C, 0x26, 0, 0, 0x0A, 0, 0, 0]), "type 24 reloads 10");
+    assert!(has(0x4116b3, 10, &[0xC7, 0x86, 0x4C, 0x26, 0, 0, 0x05, 0, 0, 0]), "type 25 reloads 5");
+    for (va, n) in [(0x41155c, 4u8), (0x4117a6, 4), (0x41186d, 4), (0x41161c, 10), (0x4116e0, 6)] {
+        assert_eq!(exe.at(va, 2), [0x6A, n], "jitter at {va:#x}");
+    }
+    // offsets: `dec eax` (-1) for types 1, 3, 4; `add eax, -5` for 24; `add eax, -3` for 25
+    assert_eq!(exe.at(0x41157d, 1), [0x48]);
+    assert_eq!(exe.at(0x41163d, 3), [0x83, 0xC0, 0xFB]);
+    assert_eq!(exe.at(0x411701, 3), [0x83, 0xC0, 0xFD]);
+    for (ty, reload, jitter, offset, mode) in [(1, 4, 4, -1, 14), (3, 8, 4, -1, 14), (4, 4, 4, -1, 14), (24, 10, 10, -5, 6), (25, 5, 6, -3, 6)] {
+        let t = trail(ty).unwrap();
+        assert_eq!((t.reload, t.jitter, t.offset, t.spec.mode), (reload, jitter, offset, mode), "type {ty}");
+    }
+    // the counters start at the type's interval: 8 for 1, 3, 4 and 0 for the meteors
+    use opensow_formats::projectile::bullet_type;
+    assert_eq!([1, 3, 4, 24, 25].map(|t| bullet_type(t).unwrap().interval), [Some(8), Some(8), Some(8), Some(0), Some(0)]);
+    assert!(trail(2).is_none() && trail(8).is_none());
+}
+
+#[test]
+fn the_frame_draw_order_stamps_the_mask_before_the_smoke_and_the_top_shadows() {
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    let call_at = |va: u32| -> u32 {
+        let c = exe.at(va, 5);
+        assert_eq!(c[0], 0xE8, "call at {va:#x}");
+        (va + 5).wrapping_add(i32::from_le_bytes(c[1..5].try_into().unwrap()) as u32)
+    };
+    // the main loop (0x42d6b0): the map pass 0x459350 (generation increment `0x459457`, foreground tiles `0x459666` and the static
+    // buildings `0x45969d` -> `0x4586a0`, whose loop stamps each building's mask `0x45888c`), then the world pass 0x41f690
+    assert_eq!(call_at(0x42e497), 0x459350);
+    assert_eq!(call_at(0x42e4a2), 0x41f690);
+    assert_eq!(call_at(0x459666), 0x460120);
+    assert_eq!(call_at(0x45969d), 0x4586a0);
+    assert_eq!(call_at(0x45888c), 0x460120);
+    assert_eq!(exe.at(0x459457, 6), [0xA0, 0x3B, 0xA3, 0x49, 0x00, 0xFE]);
+    // inside the world pass, in this order: the smoke puffs (list 0x49a3a8, mode 8), the live buildings (they stamp too, `0x4093e8`),
+    // the units' tops (masked shadow), the explosion list 0x49a394 and the second AnimSprite list, the bullets, the Advancers' bodies
+    let order = [
+        (0x41faf7, 0x404e30u32),
+        (0x41fb43, 0x4092f0),
+        (0x41fd43, 0x46a3a0),
+        (0x4200c3, 0x46a370),
+        (0x420105, 0x404e30),
+        (0x420147, 0x404e30),
+        (0x420219, 0x410a30),
+        (0x420253, 0x46a310),
+    ];
+    for (site, target) in order {
+        assert_eq!(call_at(site), target, "{site:#x}");
+    }
+    // the puffs come from the list at 0x49a3ac/0x49a3b0 (data, count of the object at 0x49a3a8), the explosions from 0x49a398/0x49a39c
+    assert_eq!(exe.at(0x41fae2, 6), [0x8B, 0x0D, 0xAC, 0xA3, 0x49, 0x00]);
+    assert_eq!(exe.at(0x4200f0, 6), [0x8B, 0x0D, 0x98, 0xA3, 0x49, 0x00]);
+    // the top draw 0x46e9c0 uses the masked shade blit 0x462110, the chassis shadow 0x46e980 the unmasked 0x460f60
+    assert_eq!(call_at(0x46ea2d), 0x462110);
+    assert_eq!(call_at(0x46e9af), 0x460f60);
 }

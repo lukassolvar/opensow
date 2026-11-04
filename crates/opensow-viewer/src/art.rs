@@ -5,6 +5,7 @@ use opensow_formats::anim::{phase_after, walk_params, WalkParams};
 use opensow_formats::fire::FireTables;
 use opensow_formats::megafile::MegaFile;
 use opensow_formats::recoil::{fire_sequence, FireSequence, FLASH_SETS};
+use opensow_formats::buildings::BuildingAnim;
 use opensow_formats::sprite::{self, Frame, Kind};
 use opensow_formats::units::unit_art;
 use opensow_formats::GameDir;
@@ -51,11 +52,82 @@ pub struct Placed {
     pub shadow: Option<(Rc<Vec<Frame>>, usize)>,
     pub ax: i32,
     pub ay: i32,
+    /// Draw-order key (`scene` sorts by it, then by layer): the object's foot line; a turret's top sits above its base but is drawn after it.
+    pub sort_y: i32,
     /// Muzzle positions in map pixels (one per barrel) for weapon tops.
     pub muzzles: Vec<(i32, i32)>,
     /// Set for chassis that animate while walking.
     pub walk: Option<Walk>,
     pub recoil: Option<Recoil>,
+    /// Set for buildings with state art (`buildings::anim`).
+    pub anim: Option<BuildingAnim>,
+    /// The sprite sets of both teams of a building, so a captured one can change colour.
+    pub art: Option<Box<BuildArt>>,
+}
+
+/// Team art of a building and what it currently shows.
+pub struct BuildArt {
+    pub blue: Rc<Vec<Frame>>,
+    pub green: Rc<Vec<Frame>>,
+    /// One frame: the damaged look of a neutral building (neutral art has no damage stage of its own).
+    pub grey: Option<Rc<Vec<Frame>>>,
+    pub owner: Owner,
+    /// `builds\\mask\\{stem}.msk`: the part of each building frame that stands in front of units (the exe draws it with the
+    /// sprite, `0x4092f0` / `0x40df80`); the front ramp of a factory is left out, so units come out over it.
+    pub mask: Option<Rc<Vec<Frame>>>,
+    /// Frame of `mask` that goes with the frame shown.
+    pub mask_frame: usize,
+    /// Rebuilding after a capture: the exe constructs a new building at 1 hit point (`0x43ab40`), shown as scaffold, construction, finished.
+    pub up: bool,
+}
+
+impl Placed {
+    /// The mask frame of a building: where its sprite hides units standing behind it.
+    pub fn mask(&self) -> Option<&Frame> {
+        let a = self.art.as_ref()?;
+        a.mask.as_ref().and_then(|m| m.get(a.mask_frame))
+    }
+
+    /// Shows a building as the exe's state machine does (`0x40e099`..`0x40e0eb`): scaffold stages while it is being built up
+    /// after a capture (hit points in thirds), else the idle loop, the damaged frame at half hit points or less, or for a
+    /// neutral one its grey look. `heal` is the hit points still to be added.
+    pub fn set_building_state(&mut self, owner: Owner, hp: i32, max_hp: i32, heal: i32, tick: u32) {
+        use opensow_formats::buildings::*;
+        let (Some(a), Some(art)) = (self.anim, self.art.as_mut()) else { return };
+        if owner != art.owner {
+            art.owner = owner;
+            art.up = owner != Owner::Neutral && heal > 0;
+        }
+        if art.up && heal == 0 {
+            art.up = false;
+        }
+        let (set, frame) = if owner == Owner::Neutral {
+            // below a third: the neutral look has no damage art of its own, so it only changes once clearly damaged
+            if hp >= max_hp / 3 {
+                (art.blue.clone(), a.range(STATE_NEUTRAL).0)
+            } else {
+                match &art.grey {
+                    Some(g) => (g.clone(), 0),
+                    None => (art.blue.clone(), a.range(STATE_NEUTRAL).0),
+                }
+            }
+        } else {
+            let set = if owner == Owner::Enemy { art.green.clone() } else { art.blue.clone() };
+            if art.up {
+                let third = max_hp / 3;
+                (set, if hp < third { 0 } else if hp < 2 * third { 1 } else { 2 })
+            } else {
+                (set, a.frame(hp, max_hp, tick))
+            }
+        };
+        self.frame = frame.min(set.len() - 1);
+        art.mask_frame = if owner == Owner::Neutral && hp < max_hp / 3 && art.grey.is_some() { a.range(STATE_DAMAGED).0 } else { frame };
+        self.set = set;
+        let shadow_frame = if owner == Owner::Neutral && hp < max_hp / 3 { a.range(STATE_DAMAGED).0 } else if art.up { self.frame } else { frame };
+        if let Some((s, i)) = &mut self.shadow {
+            *i = shadow_frame.min(s.len() - 1);
+        }
+    }
 }
 
 pub struct Art {
@@ -102,32 +174,56 @@ impl Art {
     }
 
     /// Sprite for an object, or `None` when the game has no art for it (e.g. turret 4).
-    pub fn place(&mut self, index: usize, o: &Object) -> Option<Placed> {
-        let (cx, cy) = (o.cell_x * 32 + 16, o.cell_y * 32 + 16);
-        let kind = o.object_kind();
-        if let ObjectKind::Turret(n) = kind {
+    pub fn place(&mut self, index: usize, o: &Object) -> Vec<Placed> {
+        let turret = opensow_formats::buildings::turret_art(o.kind);
+        let Some(base) = self.place_building(index, o, turret.map(|t| t.base)) else { return Vec::new() };
+        let sort_y = base.sort_y;
+        let mut out = vec![base];
+        // a turret is a base plus a gun top that the exe creates as a separate unit (kinds 109-113): drawn over the base
+        if let Some(t) = turret {
             let team = if o.owner() == Owner::Enemy { "gren" } else { "blue" };
-            let set = self.load(&format!("units\\tur_0{n}_{team}.ps6"))?;
-            return Some(Placed { source: Source::Object(index), layer: 0, set, frame: 0, shadow: None, ax: cx, ay: cy, muzzles: vec![], walk: None, recoil: None });
-        }
-        let stem = building_stem(kind)?;
-        let team = if o.owner() == Owner::Enemy { "green" } else { "blue" };
-        let set = self.load(&format!("builds\\{team}\\{stem}.ps6"))?;
-        // Frame layout seen on every set: 0 scaffold, 1 construction, 2.. idle animation,
-        // then damaged, destroyed and (last) a grey "neutral" look; the HQ set is shorter.
-        let idle = 4.min(set.len() - 1);
-        let frame = match o.owner() {
-            Owner::Neutral => {
-                let blue = if team == "blue" { set.clone() } else { self.load(&format!("builds\\blue\\{stem}.ps6"))? };
-                return self.neutral(index, stem, blue, cx, cy);
+            if let Some(set) = self.load(&format!("units\\{}_{team}.ps6", t.top)) {
+                let (x, y) = opensow_formats::buildings::turret_top_pos(o.kind, (o.cell_x, o.cell_y));
+                let shadow = self.load(&format!("units\\{}_{team}.sha", t.top)).map(|s| (s, 0));
+                // tops are created facing north (docs/art.md); the game then turns them (aim and idle look-around)
+                let frame = 0;
+                out.push(Placed { source: Source::Object(index), layer: 1, set, frame, shadow, ax: x, ay: y + t.top_dy, sort_y: sort_y + 1, muzzles: self.muzzles(t.top, frame, x, y + t.top_dy), walk: None, recoil: None, anim: None, art: None });
             }
-            _ => idle,
+        }
+        out
+    }
+
+    fn place_building(&mut self, index: usize, o: &Object, turret_base: Option<&str>) -> Option<Placed> {
+        let kind = o.object_kind();
+        // the exe draws a building's hotspot at `cell * 32 + (b+0x1c, b+0x20)` (buildings::art_offset), not at the cell centre
+        let (ox, oy) = opensow_formats::buildings::art_offset(o.kind);
+        let (cx, cy) = (o.cell_x * 32 + ox, o.cell_y * 32 + oy);
+        let stem = match turret_base {
+            Some(b) => b,
+            None => building_stem(kind)?,
         };
-        let shadow = self.load(&format!("builds\\shadow\\{stem}.sha")).map(|s| {
-            let i = frame.min(s.len() - 1);
-            (s, i)
+        let blue = self.load(&format!("builds\\blue\\{stem}.ps6"))?;
+        let green = self.load(&format!("builds\\green\\{stem}.ps6")).unwrap_or_else(|| blue.clone());
+        // Frame layout (`buildings::anim`): 0 scaffold, 1 construction, 2 finished, 3.. idle loop,
+        // then damaged, destroyed and (last) a grey "neutral" look; the HQ set is shorter (one frame per state: 3 healthy, 4 damaged).
+        let anim = opensow_formats::buildings::anim(o.kind);
+        let shadow = self.load(&format!("builds\\shadow\\{stem}.sha")).map(|s| (s, 0));
+        // a damaged neutral building: the damaged frame without its colour
+        let grey = anim.and_then(|a| blue.get(a.bounds[opensow_formats::buildings::STATE_DAMAGED] as usize)).map(|f| {
+            let mut g = f.clone();
+            for px in &mut g.pixels {
+                let [r, gr, b] = sprite::rgb565_to_rgb8(*px);
+                let l = ((r as u32 * 30 + gr as u32 * 59 + b as u32 * 11) / 100) as u8;
+                *px = ((l as u16 >> 3) << 11) | ((l as u16 >> 2) << 5) | (l as u16 >> 3);
+            }
+            Rc::new(vec![g])
         });
-        Some(Placed { source: Source::Object(index), layer: 0, set, frame, shadow, ax: cx, ay: cy, muzzles: vec![], walk: None, recoil: None })
+        let owner = o.owner();
+        let mask = self.load(&format!("builds\\mask\\{stem}.msk"));
+        let art = BuildArt { blue: blue.clone(), green: green.clone(), grey, owner, mask, mask_frame: 0, up: false };
+        let mut p = Placed { source: Source::Object(index), layer: 0, set: blue, frame: 0, shadow, ax: cx, ay: cy, sort_y: cy, muzzles: vec![], walk: None, recoil: None, anim, art: Some(Box::new(art)) };
+        p.set_building_state(owner, 1, 1, 0, 0);
+        Some(p)
     }
 
     /// Chassis + weapon top for a unit marker. Markers carry no facing, so the caller picks one of 32
@@ -164,9 +260,15 @@ impl Art {
                 (s, i)
             });
             // Marker pixels are the unit centre (cell*32+16).
-            out.push(Placed { source: Source::Marker(index), layer: layer as u8, set, frame, shadow, ax: m.x, ay: m.y, muzzles, walk, recoil });
+            out.push(Placed { source: Source::Marker(index), layer: layer as u8, set, frame, shadow, ax: m.x, ay: m.y, sort_y: m.y, muzzles, walk, recoil, anim: None, art: None });
         }
         out
+    }
+
+    /// The `.po1` muzzle tables of a weapon top (`units\\{top}.po1`).
+    pub fn fire_tables(&mut self, top: &str) -> Option<FireTables> {
+        let e = self.mega.find(&format!("units\\{top}.po1"))?;
+        self.mega.read(e).ok().and_then(|d| FireTables::parse(&d).ok())
     }
 
     /// `frame` is the top's own frame index: fire-point tables of 16-facing tops only fill their first 16 entries.
@@ -175,13 +277,39 @@ impl Art {
         let Some(t) = self.mega.read(e).ok().and_then(|d| FireTables::parse(&d).ok()) else { return Vec::new() };
         (0..t.variants()).filter_map(|v| t.muzzle(v, frame)).map(|(dx, dy)| (x + dx, y + dy)).collect()
     }
+}
 
-    fn neutral(&mut self, index: usize, stem: &str, blue: Rc<Vec<Frame>>, cx: i32, cy: i32) -> Option<Placed> {
-        let frame = blue.len() - 1;
-        let shadow = self.load(&format!("builds\\shadow\\{stem}.sha")).map(|s| {
-            let i = 4.min(s.len() - 1);
-            (s, i)
-        });
-        Some(Placed { source: Source::Object(index), layer: 0, set: blue, frame, shadow, ax: cx, ay: cy, muzzles: vec![], walk: None, recoil: None })
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn set(n: usize, tag: u16) -> Rc<Vec<Frame>> {
+        Rc::new((0..n).map(|_| Frame { width: 1, height: 1, hot_x: 0, hot_y: 0, extra: [0; 4], pixels: vec![tag], mask: vec![true] }).collect())
+    }
+
+    fn placed(owner: Owner) -> Placed {
+        let (blue, green) = (set(18, 1), set(17, 2));
+        let art = BuildArt { blue: blue.clone(), green, grey: Some(set(1, 3)), owner, mask: None, mask_frame: 0, up: false };
+        Placed { source: Source::Object(0), layer: 0, set: blue, frame: 0, shadow: None, ax: 0, ay: 0, sort_y: 0, muzzles: vec![], walk: None, recoil: None, anim: opensow_formats::buildings::anim(106), art: Some(Box::new(art)) }
+    }
+
+    #[test]
+    fn neutral_buildings_show_damage_and_captured_ones_change_colour() {
+        let mut p = placed(Owner::Neutral);
+        p.set_building_state(Owner::Neutral, 100, 100, 0, 0);
+        assert_eq!((p.set[0].pixels[0], p.frame), (1, 17)); // grey neutral frame of the blue set
+        p.set_building_state(Owner::Neutral, 49, 100, 0, 0);
+        assert_eq!(p.frame, 17); // about half hit points is still the regular look
+        p.set_building_state(Owner::Neutral, 30, 100, 0, 0);
+        assert_eq!(p.set[p.frame].pixels[0], 3); // damaged, colourless
+        // captured: a new building at 1 hp builds up (scaffold, construction, finished) in the new colour
+        p.set_building_state(Owner::Enemy, 1, 100, 99, 5);
+        assert_eq!((p.set[0].pixels[0], p.frame), (2, 0));
+        p.set_building_state(Owner::Enemy, 40, 100, 60, 5);
+        assert_eq!(p.frame, 1);
+        p.set_building_state(Owner::Enemy, 90, 100, 10, 5);
+        assert_eq!(p.frame, 2);
+        p.set_building_state(Owner::Enemy, 100, 100, 0, 5);
+        assert!((3..15).contains(&p.frame));
     }
 }

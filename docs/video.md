@@ -103,13 +103,13 @@ The briefing movies have no language copies (only mI/mO do); the player falls ba
 
 ## How the exe uses the two AVIs
 
-`mA.sgv` (the green BRIEFING animation with `brief2.wav`/`brief1.wav`, chosen by a language test) is opened
-by the briefing screen's code at 0x441d2d; `mB.sgv` (128x112, played with flags 0x20) at 0x4413e6, 0x44148a,
-0x441553 and 0x441c7f, around the same screen's state changes. Both go through the same DirectShow player
+`mA.sgv` (the green BRIEFING animation) is opened at (0, 0) by the briefing screen's code at 0x441d2d, with the music
+track `Brief`/`Brief2` chosen by a coin flip at 0x441cf9; `mB.sgv` (128x112) at x = 0x20, y = 1 (the `0x20` is the x, not a flag) at 0x4413e6, 0x44148a,
+0x441553 and 0x441c7f, around the same screen's state changes (docs/lands.md). Both go through the same DirectShow player
 object as the MPEG files.
 
 Indeo 5 (mA): decoded by `indeo5.rs`, bit-exact against FFmpeg for all 104 frames (all intra, docs/indeo5.md); 
 
 In the game (`intro.rs::Anim`, `lands.rs`): "New game" plays `mA` full screen (with its PCM sound), then the campaign map appears
-with `mB` looping at (32, 0) (found by matching it against the globe in mA's last frame); see docs/lands.md. The mission
+with `mB` looping at (32, 1) (the exe's open call); see docs/lands.md. The mission
 briefings M01..M22 are plain full-screen movies played when a mission is accepted. `opensow sgvavi mA.sgv N out.png` writes an mA frame.

@@ -16,11 +16,13 @@ pub struct Overlays {
     pub walk: Option<u32>,
     /// Show weapon tops at this tick of their fire sequence (1 = first tick), looping.
     pub fire: Option<u32>,
+    /// Draw the foreground (tree tops etc.) over the sprites; a caller that draws units itself does it after them.
+    pub foreground: bool,
 }
 
 impl Default for Overlays {
     fn default() -> Self {
-        Overlays { blocked: false, grid: false, objects: true, markers: true, sprites: true, muzzles: false, walk: None, fire: None }
+        Overlays { blocked: false, grid: false, objects: true, markers: true, sprites: true, muzzles: false, walk: None, fire: None, foreground: true }
     }
 }
 
@@ -106,12 +108,17 @@ pub fn rect(buf: &mut [u32], w: usize, h: usize, x0: i32, y0: i32, x1: i32, y1: 
 
 /// Nearest-neighbour blit of `f` with its hotspot at map pixel (ax, ay); `shadow` darkens instead of copying.
 pub fn blit(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, ax: i32, ay: i32, shadow: bool) {
+    blit_clip(buf, w, h, view, f, ax, ay, shadow, (0, 0, w as i32, h as i32));
+}
+
+/// [`blit`] restricted to the screen rectangle `clip = (x0, y0, x1, y1)`.
+pub fn blit_clip(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, ax: i32, ay: i32, shadow: bool, clip: (i32, i32, i32, i32)) {
     let z = view.zoom;
     let (x0, y0) = view.to_screen((ax - f.hot_x as i32) as f32, (ay - f.hot_y as i32) as f32);
     let (x1, y1) = view.to_screen((ax - f.hot_x as i32 + f.width as i32) as f32, (ay - f.hot_y as i32 + f.height as i32) as f32);
-    for dy in y0.max(0)..y1.min(h as i32) {
+    for dy in y0.max(0).max(clip.1)..y1.min(h as i32).min(clip.3) {
         let sy = (((dy - y0) as f32 / z) as usize).min(f.height as usize - 1);
-        for dx in x0.max(0)..x1.min(w as i32) {
+        for dx in x0.max(0).max(clip.0)..x1.min(w as i32).min(clip.2) {
             let sx = (((dx - x0) as f32 / z) as usize).min(f.width as usize - 1);
             let i = sy * f.width as usize + sx;
             if !f.mask[i] {
@@ -128,9 +135,58 @@ pub fn blit(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, ax: i32
     }
 }
 
+/// A shadow blit ([`blit`] with `shadow`) that skips the screen pixels `mask` marks: the exe's masked shade blit `0x462110` for the
+/// shadows of weapon tops (docs/effects.md, "The screen mask").
+pub fn blit_shadow_masked(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, ax: i32, ay: i32, mask: &[bool]) {
+    let z = view.zoom;
+    let (x0, y0) = view.to_screen((ax - f.hot_x as i32) as f32, (ay - f.hot_y as i32) as f32);
+    let (x1, y1) = view.to_screen((ax - f.hot_x as i32 + f.width as i32) as f32, (ay - f.hot_y as i32 + f.height as i32) as f32);
+    for dy in y0.max(0)..y1.min(h as i32) {
+        let sy = (((dy - y0) as f32 / z) as usize).min(f.height as usize - 1);
+        for dx in x0.max(0)..x1.min(w as i32) {
+            let sx = (((dx - x0) as f32 / z) as usize).min(f.width as usize - 1);
+            let idx = dy as usize * w + dx as usize;
+            if f.mask[sy * f.width as usize + sx] && !mask[idx] {
+                buf[idx] = blend(buf[idx], 0, 0, 0, 110);
+            }
+        }
+    }
+}
+
+/// [`blit_clip`] that only draws the pixels of `f` where the building mask `m` (same hotspot frame of `builds\\mask`) is set.
+pub fn blit_masked(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, m: &Frame, ax: i32, ay: i32, clip: (i32, i32, i32, i32)) {
+    let z = view.zoom;
+    let (x0, y0) = view.to_screen((ax - f.hot_x as i32) as f32, (ay - f.hot_y as i32) as f32);
+    let (x1, y1) = view.to_screen((ax - f.hot_x as i32 + f.width as i32) as f32, (ay - f.hot_y as i32 + f.height as i32) as f32);
+    for dy in y0.max(0).max(clip.1)..y1.min(h as i32).min(clip.3) {
+        let sy = (((dy - y0) as f32 / z) as usize).min(f.height as usize - 1);
+        for dx in x0.max(0).max(clip.0)..x1.min(w as i32).min(clip.2) {
+            let sx = (((dx - x0) as f32 / z) as usize).min(f.width as usize - 1);
+            let i = sy * f.width as usize + sx;
+            if !f.mask[i] {
+                continue;
+            }
+            // the same map pixel in the mask frame
+            let (mx, my) = (sx as i32 - f.hot_x as i32 + m.hot_x as i32, sy as i32 - f.hot_y as i32 + m.hot_y as i32);
+            if mx < 0 || my < 0 || mx >= m.width as i32 || my >= m.height as i32 || !m.mask[(my * m.width as i32 + mx) as usize] {
+                continue;
+            }
+            let [r, g, b] = rgb565_to_rgb8(f.pixels[i]);
+            buf[dy as usize * w + dx as usize] = pack(r, g, b);
+        }
+    }
+}
+
 /// Like [`blit`] but combines the sprite with the picture the way the exe's blit routines do ([`Blit`], exact RGB565
 /// arithmetic: plain copy, additive, half-additive, 50 % average, darkening, shade, lens).
 pub fn blit_blend(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, ax: i32, ay: i32, mode: Blit) {
+    blit_blend_masked(buf, w, h, view, f, ax, ay, mode, None);
+}
+
+/// [`blit_blend`] that skips the screen pixels `mask` marks (the exe's screen mask, docs/effects.md: `0x45b5e0` and `0x45f4d0` draw
+/// only where the byte is below the frame's stamp, i.e. where no building or foreground tile was stamped this frame).
+#[allow(clippy::too_many_arguments)]
+pub fn blit_blend_masked(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, ax: i32, ay: i32, mode: Blit, mask: Option<&[bool]>) {
     let z = view.zoom;
     let (x0, y0) = view.to_screen((ax - f.hot_x as i32) as f32, (ay - f.hot_y as i32) as f32);
     let (x1, y1) = view.to_screen((ax - f.hot_x as i32 + f.width as i32) as f32, (ay - f.hot_y as i32 + f.height as i32) as f32);
@@ -144,6 +200,9 @@ pub fn blit_blend(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, a
             }
             let [r, g, b] = rgb565_to_rgb8(f.pixels[i]);
             let idx = dy as usize * w + dx as usize;
+            if mask.is_some_and(|m| m[idx]) {
+                continue;
+            }
             let out = match mode {
                 Blit::Plain => pack(r, g, b),
                 // the exe works on RGB565 words; do the same and expand the result back to 8 bits
@@ -164,6 +223,76 @@ pub fn blit_blend(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, a
                 }
             };
             buf[idx] = out;
+        }
+    }
+}
+
+/// Marks the screen pixels whose map pixel has something standing in front of the ground (the foreground tiles: tree tops, rock tops).
+/// The exe stamps the same pixels into its screen mask while it draws the tiles (`0x459666`, `0x460120`).
+pub fn stamp_foreground(scene: &Scene, view: &View, mask: &mut [bool], w: usize, h: usize) {
+    if scene.foreground.is_empty() {
+        return;
+    }
+    let inv = 1.0 / view.zoom;
+    for sy in 0..h {
+        let my = view.y + sy as f32 * inv;
+        if my < 0.0 || my >= scene.bg_h as f32 {
+            continue;
+        }
+        let row = my as usize * scene.bg_w;
+        for sx in 0..w {
+            let mx = view.x + sx as f32 * inv;
+            if mx >= 0.0 && (mx as usize) < scene.bg_w && scene.foreground[row + mx as usize] {
+                mask[sy * w + sx] = true;
+            }
+        }
+    }
+}
+
+/// Marks the screen pixels covered by the set pixels of `f` (a building's `builds\mask` frame, `0x460120`).
+pub fn stamp_frame(mask: &mut [bool], w: usize, h: usize, view: &View, f: &Frame, ax: i32, ay: i32) {
+    let z = view.zoom;
+    let (x0, y0) = view.to_screen((ax - f.hot_x as i32) as f32, (ay - f.hot_y as i32) as f32);
+    let (x1, y1) = view.to_screen((ax - f.hot_x as i32 + f.width as i32) as f32, (ay - f.hot_y as i32 + f.height as i32) as f32);
+    for dy in y0.max(0)..y1.min(h as i32) {
+        let sy = (((dy - y0) as f32 / z) as usize).min(f.height as usize - 1);
+        for dx in x0.max(0)..x1.min(w as i32) {
+            let sx = (((dx - x0) as f32 / z) as usize).min(f.width as usize - 1);
+            if f.mask[sy * f.width as usize + sx] {
+                mask[dy as usize * w + dx as usize] = true;
+            }
+        }
+    }
+}
+
+/// Copies the background over everything drawn so far wherever the level's tiles say something stands in front of the ground.
+pub fn draw_foreground(scene: &Scene, view: &View, buf: &mut [u32], w: usize, h: usize) {
+    foreground_rows(scene, view, buf, w, h, 0, scene.bg_h);
+}
+
+/// [`draw_foreground`] for the map pixel rows of one cell row only.
+pub fn draw_foreground_row(scene: &Scene, view: &View, buf: &mut [u32], w: usize, h: usize, row: usize) {
+    foreground_rows(scene, view, buf, w, h, row * CELL as usize, (row + 1) * CELL as usize);
+}
+
+fn foreground_rows(scene: &Scene, view: &View, buf: &mut [u32], w: usize, h: usize, y0: usize, y1: usize) {
+    if scene.foreground.is_empty() {
+        return;
+    }
+    let inv = 1.0 / view.zoom;
+    let (s0, s1) = (((y0 as f32 - view.y) * view.zoom).floor().max(0.0) as usize, (((y1 as f32 - view.y) * view.zoom).ceil().max(0.0) as usize).min(h));
+    for sy in s0..s1 {
+        let my = view.y + sy as f32 * inv;
+        if my < y0 as f32 || my >= y1.min(scene.bg_h) as f32 {
+            continue;
+        }
+        let row = my as usize * scene.bg_w;
+        for sx in 0..w {
+            let mx = view.x + sx as f32 * inv;
+            if mx >= 0.0 && (mx as usize) < scene.bg_w && scene.foreground[row + mx as usize] {
+                let i = (row + mx as usize) * 3;
+                buf[sy * w + sx] = pack(scene.bg[i], scene.bg[i + 1], scene.bg[i + 2]);
+            }
         }
     }
 }
@@ -241,6 +370,7 @@ pub fn render(scene: &Scene, view: &View, ov: Overlays, buf: &mut [u32], w: usiz
         // Tick inside a looping fire sequence (a short pause between volleys).
         let fire_tick = |r: &crate::art::Recoil| ov.fire.map(|t| t % (r.seq.duration() + 2 * (r.seq.reload + 1)) + 1);
         let frame_of = |p: &crate::art::Placed| match (p.walk, ov.walk, &p.recoil) {
+            (None, Some(t), _) if p.anim.is_some() => p.anim.map_or(p.frame, |a| a.working_frame(t)).min(p.set.len() - 1),
             (Some(wk), Some(t), _) => wk.frame_at(t).min(p.set.len() - 1),
             (_, _, Some(r)) if ov.fire.is_some() => {
                 (r.seq.top_frame(fire_tick(r).unwrap_or(0), r.facing as u32, r.steps as u32) as usize).min(p.set.len() - 1)
@@ -249,7 +379,7 @@ pub fn render(scene: &Scene, view: &View, ov: Overlays, buf: &mut [u32], w: usiz
         };
         for p in &scene.placed {
             if let Some((set, i)) = &p.shadow {
-                blit(buf, w, h, view, &set[frame_of(p).min(set.len() - 1).max(if p.walk.is_some() { 0 } else { *i })], p.ax, p.ay, true);
+                blit(buf, w, h, view, &set[frame_of(p).min(set.len() - 1).max(if p.walk.is_some() || p.anim.is_some() { 0 } else { *i })], p.ax, p.ay, true);
             }
         }
         for p in &scene.placed {
@@ -268,6 +398,9 @@ pub fn render(scene: &Scene, view: &View, ov: Overlays, buf: &mut [u32], w: usiz
                 Source::Marker(i) => marker_sprite[i] = true,
             }
         }
+    }
+    if ov.foreground {
+        draw_foreground(scene, view, buf, w, h);
     }
     if ov.muzzles {
         for p in &scene.placed {
@@ -306,6 +439,49 @@ pub fn render(scene: &Scene, view: &View, ov: Overlays, buf: &mut [u32], w: usiz
             // Diamond-ish badge: team-colour square with a smaller class-colour square inside.
             rect(buf, w, h, cx - r - 1, cy - r - 1, cx + r + 2, cy + r + 2, team, 255);
             rect(buf, w, h, cx - r + 1, cy - r + 1, cx + r, cy + r, fill, 255);
+        }
+    }
+}
+
+#[cfg(test)]
+mod mask_tests {
+    use super::*;
+    use opensow_formats::sprite::Frame;
+
+    fn frame(w: u16, h: u16, px: u16) -> Frame {
+        Frame { width: w, height: h, hot_x: 0, hot_y: 0, extra: [0; 4], pixels: vec![px; (w * h) as usize], mask: vec![true; (w * h) as usize] }
+    }
+
+    /// The screen mask (docs/effects.md): a masked blit leaves the marked pixels alone, an unmasked one draws them; stamping a frame
+    /// marks exactly its set pixels.
+    #[test]
+    fn masked_blits_skip_stamped_pixels() {
+        let (w, h) = (8usize, 8usize);
+        let view = View { x: 0.0, y: 0.0, zoom: 1.0 };
+        let mut stamp = vec![false; w * h];
+        let mut cover = frame(3, 2, 0);
+        cover.mask[1] = false; // one transparent pixel
+        stamp_frame(&mut stamp, w, h, &view, &cover, 2, 3);
+        assert_eq!(stamp.iter().filter(|&&m| m).count(), 5);
+        assert!(stamp[3 * w + 2] && !stamp[3 * w + 3] && stamp[4 * w + 4]);
+
+        let sprite = frame(6, 6, 0x0821); // a little of every channel
+        let mut plain = vec![0u32; w * h];
+        blit_blend(&mut plain, w, h, &view, &sprite, 0, 0, Blit::Additive);
+        let mut masked = vec![0u32; w * h];
+        blit_blend_masked(&mut masked, w, h, &view, &sprite, 0, 0, Blit::Additive, Some(&stamp));
+        for i in 0..w * h {
+            let inside = i % w < 6 && i / w < 6;
+            assert_eq!(plain[i] != 0, inside, "plain {i}");
+            assert_eq!(masked[i] != 0, inside && !stamp[i], "masked {i}");
+        }
+        // shadows: the same rule
+        let shadow = frame(6, 6, 0);
+        let (mut a, mut b) = (vec![0x00ff_ffffu32; w * h], vec![0x00ff_ffffu32; w * h]);
+        blit(&mut a, w, h, &view, &shadow, 0, 0, true);
+        blit_shadow_masked(&mut b, w, h, &view, &shadow, 0, 0, &stamp);
+        for i in 0..w * h {
+            assert_eq!(a[i] == b[i], !stamp[i] || !(i % w < 6 && i / w < 6), "shadow {i}");
         }
     }
 }

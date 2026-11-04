@@ -3,10 +3,10 @@
 Code: `crates/opensow-formats/src/save.rs` (`opensow save <file>`). Read from the exe: save function `0x428bb0`, state serializer `0x42a400` (store and load in one function, MFC `Serialize` style), info writer/reader `0x42be20`, compressor `0x439240`, decompressor `0x439860` (class `CHuffcomp`, the only use found). The install's `Savegame` folder ships empty, so there are no sample files: the codec is tested by round trip plus a hand-built stream, the constants by `savegame_constants_match_the_exes_save_code`.
 
 ## Files
-`Savegame\savegame_<N>.data` and `.info` (N from the save slot). Saving first writes the state to the temp file `savegame\t`, compresses it into `.data`, deletes the temp file, then writes `.info`; afterwards it plays `01-game-saved.wav`. It needs 2 MB of free space ("Error: you need more that 2MB free space"). Everything is little-endian MFC `CArchive` data (no alignment).
+`Savegame\savegame_<stem>.data` and `.info` (the stem of slot 0..9 is built by `0x41f060`, docs/saveload.md). Saving first writes the state to the temp file `savegame\t`, compresses it into `.data`, deletes the temp file, then writes `.info`; afterwards it plays `01-game-saved.wav`. It needs 2 MB of free space ("Error: you need more that 2MB free space"). Everything is little-endian MFC `CArchive` data (no alignment).
 
 ## `.info` (the load menu's entry)
-`u16 2, u16 0x1e5`, `u32` time stamp (`[this+0x94]`), four MFC strings (title `[+0x84]`, `%X` time, `%b %d, %Y` date, `%a %H:%M`), `u32 [0x517aec]`, then a 160x120 RGB565 screenshot (the u16 range `0x71065c..0x719c5c` of the exe's memory). MFC string = `u8 len` (or `0xff, u16`, or `0xff, 0xffff, u32`) + ANSI bytes.
+`u16 2, u16 0x1e5`, `u32` checksum of the `.data` file (`[this+0x94]`, the byte sum `0x436ba0`; docs/saveload.md), four MFC strings (title `[+0x84]`, `%X` time, `%b %d, %Y` date, `%a %H:%M`), `u32 [0x517aec]`, then a 160x120 RGB565 screenshot (the u16 range `0x71065c..0x719c5c` of the exe's memory). MFC string = `u8 len` (or `0xff, u16`, or `0xff, 0xffff, u32`) + ANSI bytes.
 
 ## `.data` (compressed state)
 Huffman with the exe's own layout: `u32` uncompressed length, `u16` root index, nodes from the root down to 0 (`u8` symbol, `u16` left, `u16` right; a leaf has both `0xffff`), then the codes as `u32` words read from bit 31 down (0 = left, 1 = right). Decoding stops after `length` bytes. `save::huff_decode`; `huff_encode` produces valid but not byte-identical streams (the exe's tie-breaking is not reproduced).
@@ -53,6 +53,9 @@ Slots: units are Unit records (0xa0 bytes), 300-slot objects Buildings, 500-slot
 - **Signature = campaign progress** (`0x456ac0`, the `CPassedLevels` object `0x71c38c`, magic `0x1d6c`): written after the three Params as 313 obfuscated bytes carrying the 50 level states; decoded by `config::PassedLevels` (docs/config.md).
 - **Speech queue** (`0x403b20`, `0x6bf6b0 + 0x20*i`, `0xf8a8`): `u32 +4,+8`, count `+0x14`, then SpeechItem records (`0xd8db`: MFC string, `u32 +8,+0xc,+0x10,+0x14`).
 - Remaining sections as listed above; the decal flags are 128x128 bytes, the slot groups `u32` count + presence byte and record per slot (1000 units, 300 buildings, 500 bullets, 30 squads per player), then decal and cloud lists.
+
+## What OpenSOW saves (not the original's layout)
+The original's state stream is raw engine memory (the object records above) whose field meanings are mostly unknown, so a save of the original game cannot rebuild OpenSOW's simulation (loading one restarts the level). OpenSOW's own saves keep the container (`.data` Huffman + `.info`) and the real state head, then the marker `OpenSOW2`, the level name (MFC strings), a `u32` length and a snapshot: three `f32` camera values (`x`, `y`, zoom) and `World::snapshot` (serde JSON of the simulation: units, buildings, bullets, effects, tutorial, AI timers, the random table's position). Static tables (range rings, muzzle tables, the random table, occupancy grids) are rebuilt from the level on load. `OpenSOW1` (level only) still loads as a restart. Test: `a_saved_game_continues_exactly_where_it_was_saved` (a restored game runs 600 ticks identical to the one that was never saved). Saves break when sim fields change shape.
 
 ## Not decoded
 What most scalars mean (field names exist only for the chassis kind `+0xc`, orders, bullet path fields), the map cell layers and whether `[0x517aec]` is a tick counter. The post-load fixups (`0x458230..0x453060`) are unread. Network messages (`CNet_*`) are separate.

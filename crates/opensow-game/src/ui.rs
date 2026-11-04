@@ -50,6 +50,58 @@ pub fn sprite_lit(buf: &mut [u32], w: usize, h: usize, f: &Frame, x: i32, y: i32
     }
 }
 
+/// Additive blit (`0x45cde0`: `min(dst + src, max)` per channel); `half` is mode 2 of the widget draw (`0x45c220`),
+/// which halves the source first.
+pub fn sprite_add(buf: &mut [u32], w: usize, h: usize, f: &Frame, x: i32, y: i32, scale: f32, half: bool) {
+    let (dw, dh) = ((f.width as f32 * scale).round() as i32, (f.height as f32 * scale).round() as i32);
+    for dy in y.max(0)..(y + dh).min(h as i32) {
+        let sy = (((dy - y) as f32 / scale) as usize).min(f.height as usize - 1);
+        for dx in x.max(0)..(x + dw).min(w as i32) {
+            let sx = (((dx - x) as f32 / scale) as usize).min(f.width as usize - 1);
+            let i = sy * f.width as usize + sx;
+            if f.mask[i] {
+                let src = rgb565_to_rgb8(f.pixels[i]).map(|c| if half { c as u32 / 2 } else { c as u32 });
+                let p = &mut buf[dy as usize * w + dx as usize];
+                let add = |shift: u32, s: u32| (((*p >> shift) & 255) + s).min(255) as u8;
+                *p = pack(add(16, src[0]), add(8, src[1]), add(0, src[2]));
+            }
+        }
+    }
+}
+
+/// Full-strength additive draw (`0x45cde0`) when `additive`, else the plain copy (`0x45edf0`).
+pub fn sprite_add_or_plain_mode(buf: &mut [u32], w: usize, h: usize, f: &Frame, x: i32, y: i32, scale: f32, additive: bool) {
+    if additive {
+        sprite_add(buf, w, h, f, x, y, scale, false)
+    } else {
+        sprite(buf, w, h, f, x, y, scale)
+    }
+}
+
+/// Plain copy (`0x45edf0`), or the half-strength additive draw when `dimmed` (widget state 2).
+pub fn sprite_add_or_plain(buf: &mut [u32], w: usize, h: usize, f: &Frame, x: i32, y: i32, scale: f32, dimmed: bool) {
+    if dimmed {
+        sprite_add(buf, w, h, f, x, y, scale, true)
+    } else {
+        sprite(buf, w, h, f, x, y, scale)
+    }
+}
+
+/// Darkens only the opaque pixels of `f` drawn at `(x, y)` (a disabled icon).
+pub fn sprite_dim(buf: &mut [u32], w: usize, h: usize, f: &Frame, x: i32, y: i32, scale: f32, alpha: u32) {
+    let (dw, dh) = ((f.width as f32 * scale).round() as i32, (f.height as f32 * scale).round() as i32);
+    for dy in y.max(0)..(y + dh).min(h as i32) {
+        let sy = (((dy - y) as f32 / scale) as usize).min(f.height as usize - 1);
+        for dx in x.max(0)..(x + dw).min(w as i32) {
+            let sx = (((dx - x) as f32 / scale) as usize).min(f.width as usize - 1);
+            if f.mask[sy * f.width as usize + sx] {
+                let p = &mut buf[dy as usize * w + dx as usize];
+                *p = blend(*p, 0, 0, 0, alpha);
+            }
+        }
+    }
+}
+
 /// Text in a game font: the `_o` outline mask first, the `_i` inner mask over it (both at `pen - hot`).
 pub fn text(buf: &mut [u32], w: usize, h: usize, fonts: &(Font, Font), s: &str, x: i32, y: i32, scale: f32, fg: (u8, u8, u8), outline: (u8, u8, u8)) {
     let (inner, outer) = (&fonts.0, &fonts.1);
@@ -97,6 +149,17 @@ pub struct Rect {
 impl Rect {
     pub fn contains(&self, px: i32, py: i32) -> bool {
         px >= self.x && py >= self.y && px < self.x + self.w && py < self.y + self.h
+    }
+}
+
+/// The exe's darkening table (`0x45d5d1`): every colour channel loses `amount` (clamped at 0), as in the hint boxes.
+pub fn dim_sub(buf: &mut [u32], w: usize, h: usize, r: Rect, amount: u32) {
+    for y in r.y.max(0)..(r.y + r.h).min(h as i32) {
+        for x in r.x.max(0)..(r.x + r.w).min(w as i32) {
+            let p = &mut buf[y as usize * w + x as usize];
+            let c = |sh: u32| (((*p >> sh) & 0xff).saturating_sub(amount)) << sh;
+            *p = (*p & 0xff00_0000) | c(16) | c(8) | c(0);
+        }
     }
 }
 

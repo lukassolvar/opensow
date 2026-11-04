@@ -52,4 +52,56 @@ for case in range(20):
     if len(data) != 4 + 313 or out.stdout.strip() != want:
         bad += 1; print("MISMATCH", len(data), out.stdout.strip()[:80], out.stderr.strip()[:80])
 print("player.cfg:", "ok" if not bad else f"{bad} mismatches")
-sys.exit(1 if bad else 0)
+
+# State of War_1.cfg: COptions::Serialize (0x4536d0) then the audio object's Serialize (0x407ff0) on one archive, storing mode.
+# Compare the bytes with formats::config::SettingsFile (`opensow cfg` prints it back).
+def store(func, obj_bytes, ar_off):
+    mu.mem_write(OBJ, obj_bytes.ljust(0x100, b"\0"))
+    sp = STACK + 0x80000
+    sp -= 4; mu.mem_write(sp, struct.pack("<I", AR))
+    sp -= 4; mu.mem_write(sp, struct.pack("<I", RET))
+    mu.reg_write(UC_X86_REG_ESP, sp); mu.reg_write(UC_X86_REG_ECX, OBJ)
+    mu.emu_start(func, RET, count=2_000_000)
+
+def skip_trim(uc, addr, size, _):
+    # 0x453060 (trim the cloud list to the new detail level) needs the SEH frame and game lists: return at once
+    esp = uc.reg_read(UC_X86_REG_ESP)
+    (ret,) = struct.unpack("<I", uc.mem_read(esp, 4))
+    uc.reg_write(UC_X86_REG_ESP, esp + 4)
+    uc.reg_write(UC_X86_REG_EIP, ret)
+
+mu.hook_add(UC_HOOK_CODE, skip_trim, begin=0x453060, end=0x453060)
+bad2 = 0
+for case in range(30):
+    flags = [rnd.randrange(2) for _ in range(4)]
+    detail, sa, sb = rnd.randrange(5), rnd.randrange(11), rnd.randrange(11)
+    w, h, lang = rnd.choice([640, 800, 1024, 1600, 1920]), rnd.choice([480, 600, 768, 900, 1080]), rnd.randrange(8)
+    vols = [rnd.randrange(101) for _ in range(3)]
+    sw = [rnd.randrange(2) for _ in range(3)]
+    mu.mem_write(AR, b"\0" * 0x100)
+    mu.mem_write(AR + 0x28, struct.pack("<I", BUF)); mu.mem_write(AR + 0x2C, struct.pack("<I", BUF + 0x10000))
+    opt = bytearray(0x28)
+    opt[8], opt[9], opt[0x10], opt[0x11] = flags
+    struct.pack_into("<I", opt, 0xC, detail)
+    struct.pack_into("<IIII", opt, 0x14, sa, sb, w, h)
+    struct.pack_into("<I", opt, 0x24, lang)
+    store(0x4536D0, bytes(opt), 0)
+    # the options part is a vtable method: the object's first dword is its vtable, irrelevant for the stored fields
+    aud = bytearray(0x80)
+    struct.pack_into("<III", aud, 0x50, *vols)
+    aud[0x5C], aud[0x5D], aud[0x5E] = sw
+    store(0x407FF0, bytes(aud), 0)
+    end = struct.unpack("<I", mu.mem_read(AR + 0x28, 4))[0]
+    data = bytes(mu.mem_read(BUF, end - BUF))
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".cfg") as f:
+        f.write(data)
+    out = subprocess.run([opensow, "cfg", f.name], capture_output=True, text=True).stdout
+    os.unlink(f.name)
+    want = [f"flag_a: {str(bool(flags[0])).lower()}", f"flag_b: {str(bool(flags[1])).lower()}", f"flag_c: {str(bool(flags[2])).lower()}", f"flag_d: {str(bool(flags[3])).lower()}",
+            f"detail: {detail},", f"scroll_a: {sa},", f"scroll_b: {sb},", f"width: {w},", f"height: {h},", f"language: {lang},",
+            f"music_volume: {vols[0]},", f"voice_volume: {vols[1]},", f"fx_volume: {vols[2]},",
+            f"music_on: {str(bool(sw[0])).lower()}", f"voice_on: {str(bool(sw[1])).lower()}", f"fx_on: {str(bool(sw[2])).lower()}"]
+    if len(data) != 60 or any(x not in out for x in want):
+        bad2 += 1; print("MISMATCH", len(data), out.replace("\n", " ")[:200])
+print("State of War_1.cfg:", "ok" if not bad2 else f"{bad2} mismatches")
+sys.exit(1 if bad or bad2 else 0)

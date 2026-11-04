@@ -259,7 +259,7 @@ pub fn bullet_draw(ty: u8) -> &'static [Layer] {
 /// Bullet types whose frame counter the step function advances on a timer: the other four animation fields
 /// ([`crate::projectile::BULLET_TYPES`] `anim`) are the start frame, the frame count, the first countdown and the delay.
 /// Types 17 and 18 take their frame from the flight progress instead.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BulletAnim {
     pub frame: i32,
     count: i32,
@@ -340,16 +340,28 @@ pub fn impact_blast(ty: u8) -> Option<u8> {
 /// An animation sprite: frames `from..to` of `array` played `repeat` times, each shown for `period` logic steps
 /// (`AnimSprite::update` `0x4050d0`: `[+0xc]` counts down from `[+0x10]`, `[+0x38]` is the frame index, finished when it
 /// reaches the list length `[+0x3c]`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AnimSpec {
     pub array: u32,
     pub from: u16,
     pub to: u16,
     pub period: u8,
     pub repeat: u8,
+    /// Draw mode `[obj+0x34]` ([`ANIM_DRAW_MODES`]): 6 for nearly everything, 8 for the smoke puffs, 9 and 14 for smoke trails.
+    pub mode: u8,
 }
 
 impl AnimSpec {
+    /// The same animation drawn with another mode.
+    pub const fn with_mode(self, mode: u8) -> AnimSpec {
+        AnimSpec { mode, ..self }
+    }
+
+    /// The exe's blit routine for this mode (`0x404e30`).
+    pub fn routine(&self) -> u32 {
+        ANIM_DRAW_MODES.iter().find(|m| m.0 == self.mode).map_or(0x45edf0, |m| m.1)
+    }
+
     /// Number of frames in the list.
     pub fn len(&self) -> usize {
         (self.to - self.from) as usize * self.repeat as usize
@@ -377,7 +389,7 @@ pub fn blast(size: u8) -> AnimSpec {
         5 | 6 => 30,
         _ => 22,
     };
-    AnimSpec { array: 0x5e6230 + 0xa0 * size as u32, from: 0, to, period: 4, repeat: 1 }
+    AnimSpec { array: 0x5e6230 + 0xa0 * size as u32, from: 0, to, period: 4, repeat: 1, mode: 6 }
 }
 
 /// One place that creates an [`AnimSprite`](AnimSpec) with constant arguments, from the call sites of `0x4054a0`.
@@ -390,20 +402,25 @@ pub struct Spawn {
     pub what: &'static str,
 }
 
+/// [`sp`] with a draw mode other than 6.
+const fn spm(site: u32, array: u32, from: u16, to: u16, period: u8, mode: u8, what: &'static str) -> Spawn {
+    Spawn { site, spec: AnimSpec { array, from, to, period, repeat: 1, mode }, what }
+}
+
 const fn sp(site: u32, array: u32, from: u16, to: u16, period: u8, what: &'static str) -> Spawn {
-    Spawn { site, spec: AnimSpec { array, from, to, period, repeat: 1 }, what }
+    Spawn { site, spec: AnimSpec { array, from, to, period, repeat: 1, mode: 6 }, what }
 }
 
 /// A turret destroyed (`0x409ccb`): 45 frames of `e_turret`, two steps each.
-pub const TURRET_DESTROYED: AnimSpec = AnimSpec { array: 0x5e9ba8, from: 0, to: 45, period: 2, repeat: 1 };
+pub const TURRET_DESTROYED: AnimSpec = AnimSpec { array: 0x5e9ba8, from: 0, to: 45, period: 2, repeat: 1, mode: 6 };
 /// Any other building destroyed (`0x409d03`): 83 frames of `e_bubg`.
-pub const BUILDING_DESTROYED: AnimSpec = AnimSpec { array: 0x5e9a18, from: 0, to: 83, period: 2, repeat: 1 };
+pub const BUILDING_DESTROYED: AnimSpec = AnimSpec { array: 0x5e9a18, from: 0, to: 83, period: 2, repeat: 1, mode: 6 };
 /// An air force unit destroyed (`0x467999`): 52 frames of `e_air2`.
-pub const AIR_DESTROYED: AnimSpec = AnimSpec { array: 0x5e96f8, from: 0, to: 52, period: 2, repeat: 1 };
+pub const AIR_DESTROYED: AnimSpec = AnimSpec { array: 0x5e96f8, from: 0, to: 52, period: 2, repeat: 1, mode: 6 };
 /// One cloud of a ground unit's destruction (`0x46a693`...): 29 frames of `e_unit2`, three steps each.
-pub const UNIT_CLOUD: AnimSpec = AnimSpec { array: 0x5e9888, from: 0, to: 29, period: 3, repeat: 1 };
+pub const UNIT_CLOUD: AnimSpec = AnimSpec { array: 0x5e9888, from: 0, to: 29, period: 3, repeat: 1, mode: 6 };
 /// The wreck that stays after a ground unit's destruction (`0x46a7b1`): `newvrak`.
-pub const UNIT_WRECK: AnimSpec = AnimSpec { array: 0x5e92e8, from: 0, to: 20, period: 5, repeat: 1 };
+pub const UNIT_WRECK: AnimSpec = AnimSpec { array: 0x5e92e8, from: 0, to: 20, period: 5, repeat: 1, mode: 6 };
 
 /// The sprite array of the scorch decals, `__extras\pustkrat` (25 frames; variant 0-4 is drawn).
 pub const DECAL_ARRAY: u32 = 0x5e6960;
@@ -419,7 +436,7 @@ pub fn impact_leaves_decal(ty: u8) -> bool {
 /// A smoke puff (`0x405340(x, y)`): `fire_sm1` or `fire_sm2` (`variant` 0/1, chosen with the visual generator), frames 0 to
 /// 8, shown 5 steps each, repeated `4 + random(13)` more times after the first pass (`extra`), drawn additively.
 pub fn smoke_puff(variant: u8, extra: u8) -> AnimSpec {
-    AnimSpec { array: 0x5e6910 + 0x28 * variant as u32, from: 0, to: 9, period: 5, repeat: 5 + extra.min(12) }
+    AnimSpec { array: 0x5e6910 + 0x28 * variant as u32, from: 0, to: 9, period: 5, repeat: 5 + extra.min(12), mode: 8 }
 }
 
 /// Smoke puffs a landing bullet makes at random offsets of -10..9 px (impact function): types 17 and 18 always make two (when
@@ -446,18 +463,91 @@ pub const UNIT_DEATH_SOUND: u8 = 27;
 
 /// The flying pieces a destroyed unit throws (`0x46abae..0x46ae3c`): a bullet of type 15 (blue) or 16 (green) with the
 /// unit's top part as variant, from `(x, y + top height)` to `(x + sx, y + sy)` where each of `sx`, `sy` is
-/// `(2 * rand(2) - 1) * (rand(spread) + spread)`; path delay [`DEBRIS_DELAY`]. Only units with a top part throw them.
+/// `(2 * rand(2) - 1) * (rand(spread) + spread)`, strength [`DEBRIS_STRENGTH`] (constructor argument 2, `[bullet+0x2660]`; the path delay
+/// `[bullet+0x26ac]` stays 0). Only units whose top sprite index is at most 14 ([`debris_variant`]) throw them, although the four
+/// lockstep draws are made for every kind with a debris class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Debris {
     /// Weapon tier class: 30, 40 or 60 pixels.
     pub spread: i32,
     /// Stored in the bullet at `+0x265c`.
     pub bullet_param: u32,
-    /// Stored in the unit at `+0x94` once the wreck exists.
+    /// Loaded into a local that the code overwrites before it is read (`0x46ad04`): no effect.
     pub wreck_param: u32,
 }
 
-pub const DEBRIS_DELAY: i32 = 40;
+/// Strength of a flying piece (argument 2 of `0x411dc0`, pushed as `0x28` at `0x46ae04`). The generic impact tail (`0x410881`) calls
+/// the area damage `0x42f2c0(x, y, strength, owner, type)` for every bullet with strength > 0, so a landing piece hurts ground units
+/// within 32 px and the building in its cell like any shell. (An earlier note read this value as the path delay.)
+pub const DEBRIS_STRENGTH: i32 = 40;
+
+/// Variant `[bullet+0x2680]` of a flying piece = the unit's top sprite index `[top+0x54]` (`tier * 5 + class`, [`crate::units::unit_art`]),
+/// which selects the 80 frames of `blueboom` / `grenboom` (frame `variant * 80 + counter`). The jump table `0x46b140` is the identity
+/// for 0..=14; larger indices (the Advancer's `1I`, the walkers' `5W1..5W5` = 20..24) skip the bullet, so walkers throw no pieces.
+pub fn debris_variant(kind: i32) -> Option<u32> {
+    match kind {
+        1..=15 => Some((((kind - 1) % 3) * 5 + (kind - 1) / 3) as u32),
+        _ => None,
+    }
+}
+
+/// Draw modes of an `AnimSprite` (`[obj+0x34]`, set by its creator after the initialiser `0x4054a0`; draw `0x404e30` with the jump
+/// table `0x405080` over `mode - 1`): the blit routine each mode calls. Mode 0 and 1..=5 (nothing sets them, the initialiser stores 0)
+/// fall into the plain draw. `(mode, blit routine)`; the routines are described in docs/effects.md ("Blit routines").
+pub const ANIM_DRAW_MODES: [(u8, u32); 15] = [
+    (1, 0x45edf0),
+    (2, 0x45edf0),
+    (3, 0x45edf0),
+    (4, 0x45edf0),
+    (5, 0x45edf0),
+    (6, 0x45cde0),  // additive: blasts, bodky sparks, most effects
+    (7, 0x45e560),  // 6 + (`[0x49a33a] == 0`): building / air-force destruction picks 6 or 7 by that flag
+    (8, 0x45b5e0),  // smoke puffs (additive under the screen mask)
+    (9, 0x45c220),  // half-strength additive: the fighter's smoke
+    (10, 0x4611f0),
+    (11, 0x4611f0),
+    (12, 0x45cde0), // a column (see [`ANIM_COLUMN`]); no creator ever sets it
+    (13, 0x461740),
+    (14, 0x45f4d0), // the missile's smoke (`0x41159e`, `0x4117e8`, `0x4118af`)
+    (15, 0x45df40),
+];
+
+/// Mode 12 (`0x404e51`) draws the current frame 14 times, additively (`0x45cde0`), at `(x, y - 23 - 46 * k)` for `k = 0..14` (the loop
+/// runs `edi = 0, 46, .., 644` while `edi < 0x284`). It is the same column as the satellite laser's ([`satlaser_column`]), a leftover of
+/// an earlier version of that effect: no code in the exe stores 12 into an `AnimSprite`'s mode (the immediates stored are 0, 6, 7, 8, 9
+/// and 14, the register stores are 6 or 7), so it never runs.
+pub const ANIM_COLUMN: (usize, i32, i32) = (14, 46, 23);
+
+/// The satellite laser (bullet type 10). A protected building's check `0x409f50` (docs/advancer-actions.md) kills every foreign Advancer
+/// above its footprint (`[unit+0x34] = 0`) and fires this bullet at it: strength [`SATLASER_STRENGTH`], from `(x, y + lift - 15)` to
+/// `(x, y + lift + 10)` (`lift = [unit+0x88]` = -64), owner = the Advancer's team, target handle `[+0x2688]` = the Advancer's handle,
+/// speed 60, animation counter `[+0x2670]` 0..3 (4 steps each). The impact (`0x4108bc`, types 1, 10 and 31) only subtracts the strength
+/// from that handle's unit and makes no area damage, decal or sound; the Advancer is already dead, so the bullet is purely visual.
+/// The bullet itself draws nothing; its draw (`0x411100`, additive `0x45cde0`) puts a column at the *end* point (see [`satlaser_column`]).
+pub const SATLASER_STRENGTH: i32 = 1000;
+pub const SATLASER_START_DY: i32 = -15;
+pub const SATLASER_END_DY: i32 = 10;
+
+/// Sprites of the satellite laser column at the end point `(x, y_end)` for the animation counter `frame` (0..=3): one `satlaser` frame
+/// `frame + 4` at `y_end - 23`, then 13 frames `frame` at 46 px intervals going up (`y_end - 23 - 46 * k`, `k = 1..=13`), each as
+/// `(satlaser frame, x, y)`. The exe skips the whole column when the base point is outside the 480-pixel-high view.
+pub fn satlaser_column(frame: i32, x: i32, y_end: i32) -> Vec<(i32, i32, i32)> {
+    let base = y_end - 23;
+    let mut v = vec![(frame + 4, x, base)];
+    v.extend((1..=13).map(|k| (frame, x, base - 46 * k)));
+    v
+}
+
+/// The burning wreck object (`0x45afc0`, 0x1c bytes, vtable `0x490100`, list `[0x49a3e4]`), created for every destroyed unit except the
+/// Advancer by `0x45b210(x, y + [chassis+0x2c], 0, 0, 20, 5)`: fields `+4` x, `+8` y, `+0x10` 0, `+0x14` remaining smoke columns (20),
+/// `+0x18` countdown (5). Its update `0x45b0a0` runs once per logic step: when `+0x14 <= 0` the object is removed; otherwise the
+/// countdown drops by one and at 0 it reloads [`WRECK_SMOKE_PERIOD`], `+0x14` drops by one and a bullet of type [`WRECK_SMOKE_TYPE`]
+/// (the fighter-smoke sprite, speed 20, strength 0, owner 0) rises from the wreck to `(x + 80 + rand(80), y - 80 - rand(40))`, the two
+/// draws made in this order with the visual generator `0x437cd0`. The first column leaves after 5 steps, the last after 5 + 19 * 20 = 385.
+pub const WRECK_SMOKE_COLUMNS: i32 = 20;
+pub const WRECK_SMOKE_FIRST: i32 = 5;
+pub const WRECK_SMOKE_PERIOD: i32 = 20;
+pub const WRECK_SMOKE_TYPE: u8 = 22;
 
 /// Debris class of a unit kind (`0x46b110` byte table over kinds 1..=45 -> `0x46b100` cases): kinds 1 to 15 cycle through the
 /// tiers (30, 40, 60), the walkers 41 to 45 use the largest; everything else (the Advancer 40 included) has none.
@@ -489,6 +579,47 @@ pub fn impact_anims(ty: u8) -> Vec<AnimSpec> {
     v
 }
 
+/// The flame stream of the flamer bullets (types 8 and 9, no sprite of their own): in the flight step (`0x411220`, branch
+/// `0x4118e2`: `cmp edx, 8 / 9`) every path step the counter `[+0x264c]` counts down; at 0 it is reloaded from `[+0x2650]`
+/// (= the constructor's interval 6, `projectile::BULLET_TYPES`) and an AnimSprite `blast_verysmall` frames 16..22 (period 5,
+/// additive, call site `0x411952`) is created at the bullet's position. The last path step (the landing) makes none. So the
+/// beam is a trail of tail-end blast puffs every 6th pixel of the path, followed by the flame burst of the impact.
+pub const FLAME_TRAIL_SITE: u32 = 0x411952;
+
+/// The puff a flamer bullet of type `ty` drops every `projectile::bullet_type(ty).interval` path steps, see [`FLAME_TRAIL_SITE`].
+pub fn flame_trail(ty: u8) -> Option<AnimSpec> {
+    if !matches!(ty, 8 | 9) {
+        return None;
+    }
+    SPAWNS.iter().find(|s| s.site == FLAME_TRAIL_SITE).map(|s| s.spec)
+}
+
+/// The smoke a flying shell leaves (flight step `0x411220`, branches `0x411513` type 1, `0x4115d1` type 24, `0x411695` type 25,
+/// `0x411759` type 3, `0x41181b` type 4): once per path step the counter `[+0x264c]` (the type's interval at the start: 8 for types
+/// 1, 3 and 4, 0 for the meteors, so those drop one at once) is decremented, and at 0 it reloads with [`Trail::reload`] and an
+/// `AnimSprite` is created at the step's point plus `offset + rand(jitter)` on each axis (the visual generator `0x437cd0`, y drawn
+/// first). None on the landing step. The flamers' puff (types 8 and 9, no jitter) is [`flame_trail`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Trail {
+    pub reload: i32,
+    pub spec: AnimSpec,
+    pub jitter: u32,
+    pub offset: i32,
+}
+
+pub fn trail(ty: u8) -> Option<Trail> {
+    let find = |site: u32| SPAWNS.iter().find(|s| s.site == site).map(|s| s.spec);
+    Some(match ty {
+        // type 1 reloads with `[+0x2650] / 2` = 8 / 2, type 4 likewise, type 3 with `[+0x2650]` = 8
+        1 => Trail { reload: 4, spec: find(0x411599)?, jitter: 4, offset: -1 },
+        3 => Trail { reload: 8, spec: find(0x4117e3)?, jitter: 4, offset: -1 },
+        4 => Trail { reload: 4, spec: find(0x4118aa)?, jitter: 4, offset: -1 },
+        24 => Trail { reload: 10, spec: find(0x41165d)?, jitter: 10, offset: -5 },
+        25 => Trail { reload: 5, spec: find(0x411721)?, jitter: 6, offset: -3 },
+        _ => return None,
+    })
+}
+
 pub static SPAWNS: &[Spawn] = &[
     sp(0x40887d, 0x5e96a8, 0, 16, 3, "walker teleport, leaving"),
     sp(0x408a85, 0x5e96a8, 0, 16, 3, "walker teleport, arriving"),
@@ -503,19 +634,19 @@ pub static SPAWNS: &[Spawn] = &[
     sp(0x410342, 0x5e6b80, 6, 16, 2, "bullet type 21 hits: a bodky_r fragment"),
     sp(0x4107cf, 0x5e9340, 0, 13, 2, "bullet type 8 hits: flamerburst_sma"),
     sp(0x41084f, 0x5e93c0, 0, 13, 2, "bullet type 9 hits: flamerburst_big"),
-    sp(0x411599, 0x5e6788, 0, 32, 1, "missile trail puff (type 1): missileSmoke"),
+    spm(0x411599, 0x5e6788, 0, 32, 1, 14, "missile trail puff (type 1): missileSmoke"),
     sp(0x41165d, 0x5e9fb8, 0, 42, 2, "meteor_medium trail: meteor_medium_smoke"),
     sp(0x411721, 0x5ea1c0, 0, 42, 1, "meteor_small trail: meteor_small_smoke"),
-    sp(0x4117e3, 0x5e6788, 4, 32, 2, "missile smoke, later frames"),
-    sp(0x4118aa, 0x5e6788, 0, 32, 2, "missile smoke, all frames"),
-    sp(0x411952, 0x5e6230, 16, 22, 5, "blast_verysmall tail frames"),
+    spm(0x4117e3, 0x5e6788, 4, 32, 2, 14, "missile smoke, later frames"),
+    spm(0x4118aa, 0x5e6788, 0, 32, 2, 14, "missile smoke, all frames"),
+    sp(0x411952, 0x5e6230, 16, 22, 5, "flamer bullet (types 8, 9) trail puff: blast_verysmall tail frames"),
     sp(0x411ada, 0x71c548, 0, 14, 1, "menu light flash (bullet type 32)"),
-    Spawn { site: 0x411c2d, spec: AnimSpec { array: 0x5e6bd0, from: 4, to: 6, period: 1, repeat: 3 }, what: "bodky_b spark (three passes)" },
+    Spawn { site: 0x411c2d, spec: AnimSpec { array: 0x5e6bd0, from: 4, to: 6, period: 1, repeat: 3, mode: 6 }, what: "bodky_b spark (three passes)" },
     sp(0x4171d5, 0x5e5fb0, 0, 20, 3, "order marker cross_as"),
     sp(0x4175e6, 0x5e6028, 0, 20, 3, "order marker cross_rp"),
     sp(0x418457, 0x5e6140, 0, 8, 3, "click marker"),
-    sp(0x4676d8, 0x5ea3d0, 7, 178, 1, "fighter smoke trail"),
-    sp(0x467776, 0x5ea3d0, 7, 178, 1, "fighter smoke trail"),
+    spm(0x4676d8, 0x5ea3d0, 7, 178, 1, 9, "fighter smoke trail"),
+    spm(0x467776, 0x5ea3d0, 7, 178, 1, 9, "fighter smoke trail"),
     Spawn { site: 0x467999, spec: AIR_DESTROYED, what: "air force unit destroyed: e_air2" },
     sp(0x467ac4, 0x5e96f8, 0, 52, 4, "air force unit destroyed (slow): e_air2"),
     Spawn { site: 0x46a693, spec: UNIT_CLOUD, what: "ground unit destroyed: e_unit2 cloud (several per unit)" },
@@ -577,7 +708,7 @@ mod tests {
 
     #[test]
     fn anim_spec_plays_frames_in_order() {
-        let a = AnimSpec { array: 0, from: 4, to: 7, period: 2, repeat: 2 };
+        let a = AnimSpec { array: 0, from: 4, to: 7, period: 2, repeat: 2, mode: 6 };
         let frames: Vec<_> = (0..14).map(|t| a.frame_at(t)).collect();
         assert_eq!(frames, [Some(4), Some(4), Some(5), Some(5), Some(6), Some(6), Some(4), Some(4), Some(5), Some(5), Some(6), Some(6), None, None]);
     }

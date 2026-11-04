@@ -8,7 +8,7 @@
 //! u8   unknown         always 0 so far
 //! width*height * 17-byte cells, row-major:
 //!   u8 x; [u8;3]+u8 blocked (0xFFFFFD when impassable, else 0);
-//!   [u8;4] border (same encoding; set on the outer ring of the map);
+//!   [u8;4] border (same encoding; set on the outer ring of the map and, on M04/M10/M22, on no-fly areas: the air layer's terrain, docs/pathfinding.md);
 //!   [u8;3] zero; u8 flag (sparse, meaning unknown); [u8;4] zero; u8 y
 //! 4 zero bytes
 //! ```

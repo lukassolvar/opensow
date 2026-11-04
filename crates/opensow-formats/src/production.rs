@@ -65,13 +65,28 @@ pub fn income_per_tick(active: usize) -> i32 {
 pub const CREDITS_CAP: i32 = 99_999;
 pub const RESEARCH_CAP: i32 = 9_999;
 
-/// Where a factory's units appear and where they walk to, as cell offsets from the building's origin cell (constructor
-/// `0x40a330`: `[bld+0x124/0x128]` spawn, `[bld+0x12c/0x130]` walk-to; spawn routine `0x408740`). Light factory (101):
-/// spawn (1,1), walk to (3,3); medium (102), heavy (103) and walker factory (108): spawn (2,1), walk to (4,3).
-pub fn factory_exit(kind: i32) -> Option<((i32, i32), (i32, i32))> {
+/// A factory's two exits as cell offsets from the building's origin cell (constructor `0x40a330`: `[bld+0x124/0x128]`
+/// spawn, `[bld+0x12c/0x130]` primary walk-to, `[bld+0x134/0x138]` alternative walk-to; spawn routine `0x408740`).
+///
+/// The unit always appears at `spawn` (inside the footprint) and then walks out through one of two cells: the primary one
+/// at the bottom right, matching the model (light factory (3,3), the others (4,3)), or, only when that cell is occupied
+/// (blocked terrain, a building or any unit), the opposite one at the top left (light (-1,-1), the others (1,0)). Both
+/// occupied: nothing is spawned and the slot retries every tick (see [`NO_SPACE_TICKS`]). After the walk-to cell the unit
+/// continues two cells further out: down from the primary one (`y + 0x50` px), up from the alternative (`y - 0x30` px).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FactoryExit {
+    pub spawn: (i32, i32),
+    pub primary: (i32, i32),
+    pub alternative: (i32, i32),
+}
+
+/// Ticks a finished unit may wait for a free exit before "No space for units" is said (`0x40e2ee`: counter reaches `0xf0`).
+pub const NO_SPACE_TICKS: u32 = 240;
+
+pub fn factory_exit(kind: i32) -> Option<FactoryExit> {
     match kind {
-        101 => Some(((1, 1), (3, 3))),
-        102 | 103 | 108 => Some(((2, 1), (4, 3))),
+        101 => Some(FactoryExit { spawn: (1, 1), primary: (3, 3), alternative: (-1, -1) }),
+        102 | 103 | 108 => Some(FactoryExit { spawn: (2, 1), primary: (4, 3), alternative: (1, 0) }),
         _ => None,
     }
 }

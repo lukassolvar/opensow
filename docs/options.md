@@ -1,0 +1,76 @@
+# Options menu (`CMenuOptions`)
+
+Read from the exe: setup `0x44c590..0x44cb31` (loads the art, builds the buttons), click handler `0x44bf00..0x44c4b5` (two jump tables), draw `0x44ade0`, text overlay `0x44b320`, digit routine `0x44b1f0`; the settings object is the one of `docs/config.md` (`COptions`, `0x6bf710 + 0x28 * player`, saved by `0x453310`, reloaded by `0x452c30`) plus the audio object at `0x6b3d38`. Code: `crates/opensow-game/src/options.rs`.
+
+## Art
+`Data\PICTURES\Options.srf` (640x480, the gear picture with the arrow slots), `OptionsBackground.srf` (fills the window when the screen is larger than 640 wide, `0x44ade0`), `Data\Sprites2\Menu\options.tsp` (52 frames) and `options_numbers.tsp` (digits 0-9, 13x19, hotspot 6,9). Frame `extra` is the design resolution `[640, 480, 320, 240]`: a frame's top-left is the screen centre minus its `hot` (same as docs/lands.md).
+
+| frames | what |
+|---|---|
+| 0 / 1 | CANCEL (bottom centre) / O.K. (bottom left); both pointers are the same frame, so no hover art |
+| 2..9 | the word "On", one per toggle (positions where the On/Off text goes) |
+| 10..12 | resolution captions 640x480 / 800x600 / 1024x768 at one spot (unused by the text path) |
+| 13..26 | the 14 arrow buttons, normal; 27..40 are their highlighted versions (hover frame = normal + 14, `0x44ca35..0x44caeb`) |
+| 41..51 | label art RADAR, QUAKE, CLOUDS, FX, VOICE, MUSIC, VBLANK, HW CURSOR, KEYS SCROLL, MOUSE SCROLL, RESOLUTION; the exe only uses their rectangles as the click areas of the 11 label buttons |
+
+The visible text is drawn by the exe through GDI from the language file (`0x44b320`; strings are one higher than the 0-based file index, like docs/lands.md): title 4 `Options` (top, centre-ish), headings 6 `GFX` (top left), 7 `ACCESSORY` (middle left), 8 `SFX` (top middle), labels 9..19, On/Off 267/268 (file index, 0-based). Hovered buttons draw white text, idle ones grey (`0xb4`).
+
+## Controls (button -> handler)
+Label buttons (index = frame 41 + k, click = `0x44c12a` jump table, sound 34 `options-onoff`):
+
+| k | label | effect |
+|---|---|---|
+| 0 | RADAR | toggle bool `+8` |
+| 1 | QUAKE | toggle bool `+9` |
+| 2 | CLOUDS | `+0xc` detail: 0 -> 2, anything else -> 0 |
+| 3 | FX | toggle audio byte `0x6b3d96` (effects on/off) |
+| 4 | VOICE | toggle `0x6b3d95` (speech) |
+| 5 | MUSIC | `0x408390(!0x6b3d94)`: music on/off (starts/stops the player) |
+| 6 | VBLANK | toggle bool `+0x11` |
+| 7 | HW CURSOR | toggle bool `+0x10` |
+| 8, 9, 10 | KEYS SCROLL, MOUSE SCROLL, RESOLUTION | nothing (only their arrows act) |
+
+Arrow buttons (frame 13 + k, jump table `0x44c4d8`, sound 33 `options-arrow`; "-" is the left arrow):
+
+| k | where | effect |
+|---|---|---|
+| 0 / 1 | clouds row | detail `-1` (min 0) / `+1` (max 4), `0x452bc0` / `0x452c00` |
+| 2 / 3 | FX row | effect volume `0x6b3d90` `-5` / `+5` via `0x4084c0` (clamped 0..100) |
+| 4 / 5 | VOICE row | speech volume `0x6b3d8c` `-5` / `+5` (`0x4084e0`) |
+| 6 / 7 | MUSIC row | music volume `0x6b3d88` `-5` / `+5` (`0x408490`; also sets the playing music's volume) |
+| 8 / 9 | KEYS SCROLL | `+0x18` `-1` (min 0) / `+1` (max 10) (`0x452bd0` / `0x452c10`) |
+| 10 / 11 | MOUSE SCROLL | `+0x14` the same (`0x452be0` / `0x452c20`) |
+| 12 / 13 | RESOLUTION | previous / next of 640x480, 800x600, 1024x768, 1600x900, 1920x1080 (table `0x49ce68`, 8 bytes each; no match = nothing) |
+
+Numbers are drawn with `options_numbers` by `0x44b1f0(x, y, value)`: the value is capped at 999; three digits at x-12, x, x+12; two digits at x-6, x+6; one digit at x (no leading zeros). Shown: detail (x = centre-65), the three volumes (x = centre+230), the two scroll speeds (x = centre-36); the resolution shows its text from the table instead.
+
+## Buttons and sounds
+Every button's hover sound is 30 (`mainmenu-move`; `+0x54 = 0x1e`). Click sounds (`+0x58`, played by `0x456410`): labels 34, arrows 33, O.K. 38 `ingame-ano`, CANCEL 39 `ingame-nie` (setup `0x44c883..0x44c937`). O.K. stores the chosen size (`+0x1c/+0x20` from the screen-size pair `[+0xaf0]/[+0xaf4]`) and writes the config file; CANCEL reloads it (including the audio object, see below). Both then close the menu (back to the main menu or, in a game, the in-game menu).
+
+## Gears (animated)
+`0x44ade0` draws two turning cogs from `extras\kruh` (`.ps6` in `sprites.data`, loaded into the frame array `0x5e9658` at start-up, 20 slots, 16 real frames 0..15, hot spot = centre ~(77,77), design 640x480): first both shadows with the stencil blit `0x460f60` (`Blit::Shade`, offset +3,+3), then both cogs with the additive blit `0x45cde0`; always under the buttons. Positions are screen-centre relative (cog, shadow = cog + 3,3): cog 1 at (+0x69, +0x50), cog 2 at (+0xba, +0x51). The animation runs inside the draw (`0x44ae78`): for each logic tick elapsed since the last draw (`[0x552494]`) a counter `[0x71cdd4]` is decremented; below 0 it is reset to 3 and both frame indices step by one (period 4 ticks = 15 steps/s, 16 steps = 64 ticks per turn). Cog 1 shows frame `a = [0x71cdd8]` (starts 0), cog 2 shows frame `15 - b` with `b = [0x49ce90]` (starts 8): they turn opposite ways, half a turn apart. All three are globals that keep their values between visits. Code: `options::Gears`, `blit`.
+
+## What the settings do (read from the exe)
+- **RADAR** `+8`: the HUD only creates/draws/updates the radar widget (`+0x900` of the HUD object) when it is set (`0x4541de` draw, `0x454b1d` click, `0x4559cf` reset).
+- **QUAKE** `+9`: the screen shake (camera object `0x6bf980`) is started by a destroyed building (`0x409130` -> `0x458620(duration, x, y)`, duration 0x57 = 87
+  for buildings, 0x1e = 30 for turrets 25-29, epicentre = the building's centre; `duration / 2` ticks, the list of pending steps is dropped). Per tick
+  `0x458930(player)`: switched off it clears the timer and the step list. Otherwise while ticks are left: distance `d` from the epicentre to the screen
+  middle, `m = max(0, 9 - d/256) / 2`, each axis `sign = rand(2)`, `r = rand(m)`, step `r + 2` or `-2 - r` (x first, then y; the lockstep generator `0x437b10`),
+  `0x457f80(dx, dy)` moves the camera by **twice** the step (clamped to the map) and the step is pushed on a list. When the time is over it pops one step
+  per tick at a random index and applies its negative. `World::quake_step`, `Quake`, test `quake_shakes_then_undoes_every_step`. Open: `0x437780` (the
+  distance) compares an uninitialised stack slot with 200 first; taken as a plain square root. The HQ's destruction also jumps the camera to it (`0x4588c0`), not ported.
+- **CLOUDS** `+0xc`: the cloud/smoke list limit (`Options::cloud_cap`, `0x453060`).
+- **KEYS SCROLL** `+0x18` (menu rows 8/9) and **MOUSE SCROLL** `+0x14` (10/11), 0..10: the per-step map scroll is `ticks * speed` per axis, then `0x457f80(dx, dy, player)` adds **twice** that to the camera (clamped to the map). Arrow keys use KEYS (`0x415ef1`, held key state 2), the pointer at the window edge (x < 4, x > w-5, same for y; diagonal moves both axes) uses MOUSE (`0x416b8b`). Net: `120 * speed` px/s per axis (keys 5 -> 600, mouse 3 -> 360); speed 0 turns that scroll off. Right-button drag scrolling is by the pointer movement and independent of both. In the game: `options::scroll_px_per_second`, `Settings::scroll_keys/scroll_mouse`, `Play::update`.
+- **VBLANK** `+0x11`: when presenting a frame (`0x42d444..0x42d4a0`) it calls `IDirectDraw::WaitForVerticalBlank(DDWAITVB_BLOCKBEGIN)` first, and blits to the primary surface `[0x5dde34]` instead of the back buffer `[0x5ddec8]`; `0x42d2b1` also reads it for the cursor rule below. `[0x5baa8a]` (set at `0x42c6c2`) says the primary has an attached back buffer (a flipping chain, only in full screen with enough video memory); the wait happens only without it. No effect on the simulation (a vsync / tearing option).
+- **HW CURSOR** `+0x10` ("HWMOUSE" in the file): the mouse thread (`0x4269e0`, DirectInput `GetDeviceState`) then draws the 32x32 pointer straight onto the front surface: it restores the saved rectangle under the old pointer (`0x418ca0`, a `Blt` from the back buffer), moves it (`0x419d50`) and redraws it (`0x415370`) at once. When it is off (or in a window, `[0x5baa89]`, or with no flip chain) the frame loop draws the pointer itself (`0x419c30` + `0x4152d0` at `0x42d2c5`). Only latency / flicker differ; nothing for us to do, the pointer is a window overlay here.
+- The language id `+0x24` is stored by `0x453b60(id)`, which also writes the file at once.
+
+## First run
+`0x452c30` loads `State of War_1.cfg` from the current directory (opened by the name at `+4`); when it cannot be opened or its archive throws (error message, then the same path) it stores `0x452fd1..0x453000`: radar and quake on (`+8` = `+9` = 1), detail 0 (clouds **off**), `+0x10` = 0 (HW cursor off), `+0x11` = 1 (VBLANK on), mouse scroll 3, keys scroll 5, size 1024 x 768 (`0x400`, `0x300`; the constructor `0x452a90`'s 1920 x 1080 is overwritten), `ResetEvent([0x6b3d08])`, and `0x408510` for the audio object: all three volumes 100, music on (`0x408390(1)`), speech and effects on. `Options::first_run`, `Audio::default`, `GameOptions::default`.
+
+## The file holds the audio object too
+`0x452c30` / `0x453310` serialize the audio object `0x6b3d38` (`0x407ff0`) into the same archive right after the options record: header `u16 1, u16 0x6121`, then six `u32`: music, speech, effect volume (clamped 0..=100 on load) and music, speech, effect switches (non-zero = on). So CANCEL (`0x44bf2e` calls `0x452c30`) reloads the volumes and switches too, and the sounds follow (music starts or stops) - the earlier note that they stay was wrong. Without a file CANCEL gives the first-run values. `scripts/verify_config.py` runs both exe serializers on random values and decodes the bytes with `config::SettingsFile` (60 bytes). The game reads/writes `State of War_1.cfg` in the current directory (`GameOptions::load/save`; O.K. saves, tests never touch the disk) and applies the audio, scroll speeds and volumes at start-up.
+
+## Open
+- RADAR off (no radar widget: not drawn, not clickable) and QUAKE are honoured (`Settings::radar_on/quake_on`). CLOUDS is stored but not honoured yet.
+- Resolution, VBLANK and HW CURSOR are stored only: the window is resizable and presented by the OS.

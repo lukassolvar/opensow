@@ -13,6 +13,10 @@
 //!    State 3 returns to 0 if the target is gone, and starts the fire sequence (state 4) once the top's facing equals the
 //!    target facing. State 4 plays [`crate::recoil`] and ends in state 6 (cooldown), which counts down in step 1.
 //!
+//! The top does not follow its chassis by itself: after each chassis turn step the exe calls `0x479980` with the chassis's
+//! target facing (see [`TopAim::set_target_facing`]), which only takes effect in state 0. A unit with no orders also picks a
+//! random facing every 240..1139 ticks (`0x46e114..0x46e198`, docs/art.md).
+//!
 //! Target choice (`0x47b140`, ground search): cells are scanned in rings from the minimum to the maximum range (in
 //! cells; the ring table is built at runtime at `0x436230`, an expanding diamond that is not reproduced here). The current
 //! target is kept while it is still found; otherwise the nearest *unit* wins, then a turret-like building, then any
@@ -29,7 +33,7 @@ use crate::recoil::{fire_sequence, FireSequence};
 pub const SEARCH_POLL_TICKS: i32 = 30;
 pub const TURN_DELAY: i32 = 4;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AimParams {
     /// Target range in cells (`min`, `max`).
     pub min_range: u32,
@@ -66,6 +70,8 @@ pub fn aim_params(kind: i32) -> Option<AimParams> {
         43 => p(2, 6, 0, 0, 16),
         44 => p(2, 11, 2, 1, 16),
         45 => p(0, 1, 180, 36, 16),
+        // the Advancer's own gun top (case at 0x47a8af: range 0-10, reload 180 +- 36 from the shared tail 0x47a57a)
+        40 => p(0, 10, 180, 36, 32),
         // turret tops (kinds 109-113 = turrets 1-5, constructor cases at 0x47a000..)
         109 => p(0, 6, 72, 0, 32),
         110 => p(0, 9, 120, 24, 32),
@@ -76,7 +82,7 @@ pub fn aim_params(kind: i32) -> Option<AimParams> {
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum State {
     /// Looking for a target (every 30 ticks).
     Idle,
@@ -88,9 +94,12 @@ pub enum State {
     Cooldown,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TopAim {
     pub params: AimParams,
+    /// The weapon kind the tables came from (a snapshot keeps this and rebuilds `seq`, see [`TopAim::restore`]).
+    kind: i32,
+    #[serde(skip, default = "no_sequence")]
     seq: FireSequence,
     pub state: State,
     /// Current and target facing of the top (`[obj+0x6c]`, `[obj+0x70]`).
@@ -112,11 +121,23 @@ pub struct Events {
     pub shot: Option<(u8, u8)>,
 }
 
+fn no_sequence() -> FireSequence {
+    FireSequence { flash_set: None, reload: 0, steps: &[] }
+}
+
 impl TopAim {
+    /// Rebuilds the static fire sequence after the aim was deserialized from a savegame.
+    pub fn restore(&mut self) {
+        if let Some(s) = fire_sequence(self.kind) {
+            self.seq = s;
+        }
+    }
+
     pub fn new(kind: i32, facing: u32) -> Option<TopAim> {
         let params = aim_params(kind)?;
         Some(TopAim {
             params,
+            kind,
             seq: fire_sequence(kind)?,
             state: State::Idle,
             facing,
@@ -126,6 +147,15 @@ impl TopAim {
             cooldown: 0,
             seq_tick: 0,
         })
+    }
+
+    /// `0x479980`: the chassis (or the idle look-around, `0x46e198`) sets the top's target facing, but only while the top is
+    /// idle (state 0). In every other state the aim code (`0x4797c0`) owns the target facing (the enemy's direction).
+    /// The top then turns to it at one step per 4 ticks like for any target.
+    pub fn set_target_facing(&mut self, facing: u32) {
+        if self.state == State::Idle {
+            self.target_facing = facing;
+        }
     }
 
     /// The sequence being played and the tick inside it, for drawing.
@@ -273,10 +303,25 @@ mod tests {
     }
 
     #[test]
+    fn target_facing_is_only_settable_while_idle() {
+        let mut t = TopAim::new(7, 0).unwrap();
+        t.set_target_facing(5);
+        for _ in 0..20 {
+            t.tick(None, |_| 0);
+        }
+        assert_eq!(t.facing, 5, "an idle top follows the facing it was given, one step per 4 ticks");
+        let mut t = TopAim::new(7, 0).unwrap();
+        t.tick(Some(8), |_| 0); // the first tick searches
+        assert_eq!(t.state, State::Aiming);
+        t.set_target_facing(20);
+        assert_eq!(t.target_facing, 8, "ignored while aiming");
+    }
+
+    #[test]
     fn parameters() {
         assert_eq!(aim_params(7), Some(p(0, 6, 72, 0, 32)));
         assert_eq!(aim_params(44).unwrap().steps, 16);
-        assert!(aim_params(40).is_none());
+        assert_eq!(aim_params(40).map(|p| (p.max_range, p.reload)), Some((10, 180))); // the Advancer gun top (0x47a8af)
         assert!(TopAim::new(100, 0).is_none());
     }
 }

@@ -15,12 +15,17 @@ opensow <command> [args]
   text <font> <text> <out.png> [fg] [outline]   render text; font = small|medium|big|msg (tinted, hex colours)
                                      or font02_dark|font02_light|font_msg2|font_briefing_big|font_briefing_small
   lang <EN|SK|CZ|PL|HU|RU|CS|CT> [index]   print the language's strings (damaged ones are flagged)
+  sparks <19|20|21|23> <variant> <rand values...>   spark arrays of a new beam bullet (rand(n) = value % n), or the dim end frame
+  curvebullet <generic.file> <13|14> <rng index> x1 y1   speed, flag, steps, then the path of a new random-curve bullet
+  curves <Data dir>                  the 200 random bullet curves (types 13/14): index, then x y lift per point
   path <type> x1 y1 x2 y2 delay      print a bullet's flight path points (x y lift), one per line
   launch <code> <tx> <ty> <side> <cells> <counter>   fields of a launched aircraft (code 30..=34)
   squad <0..17>                      units a carryall lands: dx dy kind per line
   rings                              print the range index table and the ring offset list (dx dy ...)
   weapons                            table of every weapon: range, reload, volley, projectile, speed, strength
   hover                              the Advancer's hover bob table (0x89cf58)
+  scanlines banner|banner555|pause W H HEXPIXELS..   the pause / mission-end frame effects (0x45d3a0 / 0x45d400)
+  beamtick STATE COUNTER RELOAD      one tick of the Advancer beam cooldown (0x47c6b0): prints new state and counter
   frames <sprite file>               list every frame's size and hotspot
   level <file.edt|.net>              print header values, objects and markers of a level script
   map <Mxx.map> <out.png>            render blocked/border/flag cells as a 1px-per-cell image
@@ -118,7 +123,10 @@ fn run(args: &[String]) -> Res<()> {
                 let p = opensow_formats::config::PassedLevels::parse(&bytes)?;
                 println!("level states {:?}", p.states);
             } else {
-                println!("{:?}", opensow_formats::config::Options::parse(&bytes)?);
+                match opensow_formats::config::SettingsFile::parse(&bytes) {
+                    Ok(f) => println!("{f:#?}"),
+                    Err(_) => println!("{:?}", opensow_formats::config::Options::parse(&bytes)?),
+                }
             }
         }
         ["sgv", path] => println!("{:#?}", opensow_formats::video::parse(&std::fs::read(path)?)?),
@@ -189,6 +197,27 @@ fn run(args: &[String]) -> Res<()> {
         ["cfglayout"] => println!("Options 1 0x1d6c u0xc u0x14 u0x18 u0x1c u0x20 b0x8 b0x9 b0x10 b0x11 u0x24"),
         ["weapons"] => print_weapons(),
         ["hover"] => println!("{}", opensow_formats::anim::HOVER_TABLE.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" ")),
+        ["beamtick", state, counter, reload] => {
+            let mut t = opensow_formats::advancer::BeamTimer { enabled: true, state: state.parse()?, counter: counter.parse()?, reload: reload.parse()? };
+            t.tick();
+            println!("{} {}", t.state, t.counter);
+        }
+        ["scanlines", mode, w, h, px @ ..] => {
+            // 0x45d400 ("banner": tint even rows, blank odd rows) / 0x45d3a0 ("pause": blank even rows) on RGB565 pixels given in hex
+            use opensow_formats::endscreen;
+            let (w, h): (usize, usize) = (w.parse()?, h.parse()?);
+            let mut v: Vec<u16> = px.iter().map(|p| u16::from_str_radix(p, 16)).collect::<Result<_, _>>()?;
+            if v.len() != w * h {
+                return Err("scanlines: need w*h pixels".into());
+            }
+            match *mode {
+                "banner" => endscreen::banner_rows(&mut v, w, h, true),
+                "banner555" => endscreen::banner_rows(&mut v, w, h, false),
+                "pause" => endscreen::pause_rows(&mut v, w, h),
+                _ => return Err("scanlines: banner|banner555|pause".into()),
+            }
+            println!("{}", v.iter().map(|p| format!("{p:04x}")).collect::<Vec<_>>().join(" "));
+        }
         ["speedrow", v] => {
             let v: u32 = v.parse()?;
             println!("{}", (0..60).map(|t| projectile::steps_at(v, t).to_string()).collect::<Vec<_>>().join(" "));
@@ -228,36 +257,67 @@ fn run(args: &[String]) -> Res<()> {
             let cells = r.as_ref().map(|r| r.iter().map(|(x, y)| format!("{x} {y}")).collect::<Vec<_>>().join(" ")).unwrap_or_default();
             println!("{} {} {}", if r.is_some() { "ok" } else { "fail" }, w.base, cells);
         }
-        ["local", file, ubase, sbase, own, ax, ay, route @ ..] => {
-            // file: 16384 little-endian u32 unit grid, then 16384 static grid; route: x y pairs (the unit's cell first)
+        ["local", file, ubase, sbase, own, ax, ay, route @ ..] => local_cmd(file, ubase, sbase, None, own, ax, ay, route)?,
+        // 0x475c30 / 0x4732f0: the file holds the second step grid, the static grid and the first step grid
+        // (`air` before the route selects 0x4732f0, which also asks for the stop)
+        ["local2", file, ubase, sbase, fbase, air, own, ax, ay, route @ ..] => local_cmd(file, ubase, sbase, Some((fbase, *air == "air")), own, ax, ay, route)?,
+        // 0x4774c0: file = unit grid (16384 u32); prints `found base dx dy checksum` (dx dy = `none` when the destination is kept;
+        // checksum = sum of (i+1)*cell mod 2^32 over the grid after the flood)
+        ["freecell", file, base, own, dx, dy, ax, ay, layer, mw, mh] => {
             let bytes = std::fs::read(file)?;
-            let words: Vec<u32> = bytes.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
             let mut w = opensow_formats::wave::Wave::new(|_, _| false);
-            w.cells = words[..16384].to_vec();
-            w.base = ubase.parse()?;
-            let nums: Vec<i32> = route.iter().map(|s| s.parse()).collect::<Result<_, _>>()?;
-            let route: Vec<(i32, i32)> = nums.chunks(2).map(|c| (c[0], c[1])).collect();
-            let r = w.local_step(&words[16384..], sbase.parse()?, own.parse()?, &route, (ax.parse()?, ay.parse()?));
-            let next = r.next.map_or("none".to_string(), |(x, y)| format!("{x} {y}"));
-            let path = r.path.iter().map(|(x, y)| format!("{x} {y}")).collect::<Vec<_>>().join(" ");
-            println!("{} {} | {} | {}", u8::from(r.stop), w.base, next, path);
+            w.cells = bytes.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).take(16384).collect();
+            w.base = base.parse()?;
+            let rings = opensow_formats::rings::Rings::generate();
+            let r = opensow_formats::freecell::free_cell_near(&mut w, &rings, own.parse()?, (dx.parse()?, dy.parse()?), (ax.parse()?, ay.parse()?), *layer == "air", (mw.parse()?, mh.parse()?));
+            let sum = w.cells.iter().enumerate().fold(0u32, |a, (i, &v)| a.wrapping_add((i as u32 + 1).wrapping_mul(v)));
+            let d = r.destination.map_or("none".to_string(), |(x, y)| format!("{x} {y}"));
+            println!("{} {} {} {}", u8::from(r.found), w.base, d, sum);
         }
-        ["approach", file, base, w, h, ux, uy, tx, ty, handle, range] => {
-            // file: 16384 little-endian u32 (the static grid); prints `ok <x> <y> <new base>` or `fail <new base>`
+        // 0x46fa40 (networked step) with recording stubs for its callees; arguments are key=value (docs/pathfinding.md):
+        // air guest route now since pos dest handle row line prev step1 step2 plan1 plan2 planline cd anim kind40 turn routelen stat
+        ["netstep", kv @ ..] => netstep_cmd(kv)?,
+        ["approach", file, base, w, h, ux, uy, tx, ty, handle, range, layer @ ..] => {
+            // file: 16384 little-endian u32 (the static grid); prints `ok <x> <y> <new base>` or `fail <new base>`;
+            // a trailing `air` runs the chase for handle type 4 (0x478200, an Advancer) instead of the ground one (0x477630)
             let bytes = std::fs::read(file)?;
             let mut cells: Vec<u32> = bytes.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
             let mut b: u32 = base.parse()?;
-            let r = opensow_formats::wave::approach(&mut cells, &mut b, (w.parse()?, h.parse()?), (ux.parse()?, uy.parse()?), (tx.parse()?, ty.parse()?), handle.parse()?, range.parse()?);
+            let chase = if layer.first().is_some_and(|l| *l == "air") { opensow_formats::wave::approach_air } else { opensow_formats::wave::approach };
+            let r = chase(&mut cells, &mut b, (w.parse()?, h.parse()?), (ux.parse()?, uy.parse()?), (tx.parse()?, ty.parse()?), handle.parse()?, range.parse()?);
             match r {
                 Some((x, y)) => println!("ok {x} {y} {b}"),
                 None => println!("fail {b}"),
             }
+        }
+        ["targets", file, base, w, h, cx, cy, own] => {
+            // file: 16384 u32 (static grid, exe handles); prints `unit building turret new-base` (building = non-turret)
+            use opensow_formats::wave::Seen;
+            let bytes = std::fs::read(file)?;
+            let mut cells: Vec<u32> = bytes.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+            let mut b: u32 = base.parse()?;
+            let own: u32 = own.parse()?;
+            let t = opensow_formats::wave::find_targets(&mut cells, &mut b, (w.parse()?, h.parse()?), (cx.parse()?, cy.parse()?), |h| {
+                if (h >> 16) & 7 == own {
+                    return Seen::Ignore;
+                }
+                match (h >> 22) & 7 {
+                    1 => Seen::Unit,
+                    2 if matches!((h >> 19) & 7, 3 | 6) => Seen::Turret,
+                    2 => Seen::Building,
+                    _ => Seen::Ignore,
+                }
+            });
+            println!("{} {} {} {b}", t.unit, t.building, t.turret);
         }
         ["line", x0, y0, x1, y1] => {
             let l = opensow_formats::walk::pixel_line(x0.parse()?, y0.parse()?, x1.parse()?, y1.parse()?);
             println!("{}", l.iter().map(|(x, y)| format!("{x} {y}")).collect::<Vec<_>>().join(" "));
         }
         ["turn", c, t, n] => println!("{}", opensow_formats::facing::turn_step(c.parse()?, t.parse()?, n.parse()?)),
+        ["curvebullet", gen, t, idx, x1, y1] => print_curve_bullet(Path::new(gen), t.parse()?, idx.parse()?, x1.parse()?, y1.parse()?)?,
+        ["sparks", t, variant, vals @ ..] => print_sparks(t.parse()?, variant.parse()?, vals)?,
+        ["curves", dir] => print_curves(Path::new(dir))?,
         ["path", t, x1, y1, x2, y2, delay] => print_path(t.parse()?, x1.parse()?, y1.parse()?, x2.parse()?, y2.parse()?, delay.parse()?)?,
         ["frames", src] => frame_table(Path::new(src))?,
         ["level", src] => print_level(Path::new(src))?,
@@ -544,11 +604,176 @@ fn print_weapons() {
     println!("\nranges in cells; ticks are game ticks (a bullet's speed is path steps per 60 ticks). Damage ignores splash on neighbours.");
 }
 
-fn print_path(t: u8, x1: i32, y1: i32, x2: i32, y2: i32, delay: u32) -> Res<()> {
-    let p = projectile::build_path(t, x1, y1, x2, y2, delay).ok_or("this bullet type has no computed path")?;
-    println!("{} {}", p.points.len(), p.first_step);
+/// `opensow curves <Data dir>`: the 200 random curves of bullet types 13/14 (RNG index 0 at game start): `i n`, then n lines `x y lift`.
+fn print_curves(data: &Path) -> Res<()> {
+    let bytes = std::fs::read(data.join("generic.file"))?;
+    let mut rng = opensow_formats::rng::GameRng::from_file(&bytes).ok_or("generic.file too short")?;
+    let t = opensow_formats::curves::CurveTable::generate(&mut rng);
+    for (i, c) in t.curves.iter().enumerate() {
+        let last = c.points.last().copied().unwrap_or((0, 0));
+        let peak = c.lift.iter().max().copied().unwrap_or(0);
+        let _ = (last, peak);
+        println!("{i} {}", c.points.len());
+        for (p, l) in c.points.iter().zip(&c.lift) {
+            println!("{} {} {l}", p.0, p.1);
+        }
+    }
+    Ok(())
+}
+
+/// `opensow curvebullet generic.file type rng_index x1 y1`: what a new type 13/14 bullet draws (the table is built from index 0,
+/// then the stream continues at `rng_index`) and the path it gets.
+fn print_curve_bullet(file: &Path, t: u8, index: usize, x1: i32, y1: i32) -> Res<()> {
+    use opensow_formats::curves::{CurveTable, RandomBullet};
+    let bytes = std::fs::read(file)?;
+    let mut rng = opensow_formats::rng::GameRng::from_file(&bytes).ok_or("generic.file too short")?;
+    let table = CurveTable::generate(&mut rng);
+    while rng.index() != index {
+        rng.next(1);
+    }
+    let b = RandomBullet::draw(t, &mut rng).ok_or("type must be 13 or 14")?;
+    let p = table.path(b.curve, x1, y1, 0);
+    println!("{} {} {}", b.speed, b.flag.map_or(-1, |f| f as i64), p.points.len());
     for (q, l) in p.points.iter().zip(&p.lift) {
         println!("{} {} {}", q.0, q.1, l);
     }
+    Ok(())
+}
+
+/// `opensow sparks type variant values...`: what the constructor of a beam bullet (types 19-21) draws when the visual generator
+/// returns `values[k] % n` for its k-th call, as `x y frame` lines after the delay; type 23 prints the end frame for `variant`.
+fn print_sparks(t: u8, variant: i32, vals: &[&str]) -> Res<()> {
+    use opensow_formats::sparks::{dim_end_frame, Sparks};
+    if t == 23 {
+        println!("{}", dim_end_frame(variant));
+        return Ok(());
+    }
+    let vals: Vec<u32> = vals.iter().map(|v| v.parse()).collect::<Result<_, _>>()?;
+    let mut k = 0;
+    let s = Sparks::draw(t, |n| {
+        let v = vals[k % vals.len()];
+        k += 1;
+        (v % n as u32) as u16
+    })
+    .ok_or("type must be 19, 20, 21 or 23")?;
+    println!("{}", s.delay);
+    for (x, y, c) in s.fragments {
+        println!("{x} {y} {c}");
+    }
+    Ok(())
+}
+
+fn print_path(t: u8, x1: i32, y1: i32, x2: i32, y2: i32, delay: u32) -> Res<()> {
+    let p = projectile::build_path(t, x1, y1, x2, y2, delay).ok_or("this bullet type has no computed path")?;
+    match p.facing {
+        Some(f) => println!("{} {} {f}", p.points.len(), p.first_step),
+        None => println!("{} {}", p.points.len(), p.first_step),
+    }
+    for (q, l) in p.points.iter().zip(&p.lift) {
+        println!("{} {} {}", q.0, q.1, l);
+    }
+    Ok(())
+}
+
+/// `opensow local|local2`: file = 16384 little-endian `u32` unit grid, the static grid (and for `local2` the first step grid);
+/// route = x y pairs (the unit's cell first). Prints `stop new-base | next | local route`.
+#[allow(clippy::too_many_arguments)]
+fn local_cmd(file: &str, ubase: &str, sbase: &str, fbase: Option<(&str, bool)>, own: &str, ax: &str, ay: &str, route: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = std::fs::read(file)?;
+    let words: Vec<u32> = bytes.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+    let mut w = opensow_formats::wave::Wave::new(|_, _| false);
+    w.cells = words[..16384].to_vec();
+    w.base = ubase.parse()?;
+    let nums: Vec<i32> = route.iter().map(|s| s.parse()).collect::<Result<_, _>>()?;
+    let route: Vec<(i32, i32)> = nums.chunks(2).map(|c| (c[0], c[1])).collect();
+    let at = (ax.parse()?, ay.parse()?);
+    let r = match fbase {
+        Some((fb, air)) => w.local_step_second(&words[16384..32768], sbase.parse()?, own.parse()?, &route, at, &words[32768..], fb.parse()?, air),
+        None => w.local_step(&words[16384..], sbase.parse()?, own.parse()?, &route, at),
+    };
+    let next = r.next.map_or("none".to_string(), |(x, y)| format!("{x} {y}"));
+    let path = r.path.iter().map(|(x, y)| format!("{x} {y}")).collect::<Vec<_>>().join(" ");
+    println!("{} {} | {} | {}", u8::from(r.stop), w.base, next, path);
+    Ok(())
+}
+
+/// `opensow netstep key=value ...`: runs `NetChassis::step` with a host that records its calls and prints the resulting state.
+fn netstep_cmd(kv: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+    use opensow_formats::netwalk::{NetChassis, NetHost};
+    let map: std::collections::HashMap<&str, &str> = kv.iter().filter_map(|s| s.split_once('=')).collect();
+    let get = |k: &str| -> &str { map.get(k).copied().unwrap_or("") };
+    let nums = |k: &str| -> Result<Vec<i32>, std::num::ParseIntError> { get(k).split(',').filter(|s| !s.is_empty()).map(|s| s.parse()).collect() };
+    let pair = |k: &str| -> Result<(i32, i32), Box<dyn std::error::Error>> {
+        let v = nums(k)?;
+        Ok((v[0], v[1]))
+    };
+    let pairs = |k: &str| -> Result<Vec<(i32, i32)>, Box<dyn std::error::Error>> { Ok(nums(k)?.chunks(2).map(|c| (c[0], c[1])).collect()) };
+    let anim = nums("anim")?;
+    let mut c = NetChassis {
+        pos: pair("pos")?,
+        dest: pair("dest")?,
+        since: pair("since")?,
+        row: nums("row")?.iter().map(|&v| v as u8).collect(),
+        line: pairs("line")?,
+        handle: get("handle").parse()?,
+        air: get("air") == "1",
+        kind40: get("kind40") == "1",
+        prev: pair("prev")?,
+        step1: pair("step1")?,
+        step2: pair("step2")?,
+        turn_steps: get("turn").parse()?,
+        cooldown: get("cd").parse()?,
+        anim_count: anim[0],
+        anim_reload: anim[1],
+        phase: anim[2],
+        phases: anim[3],
+        route_len: get("routelen").parse()?,
+        ..Default::default()
+    };
+    struct Rec {
+        calls: Vec<String>,
+        guest: bool,
+        route_ok: bool,
+        plan: ((i32, i32), (i32, i32), Vec<(i32, i32)>),
+    }
+    impl NetHost for Rec {
+        fn is_guest(&self) -> bool {
+            self.guest
+        }
+        fn chase(&mut self, c: &mut NetChassis) {
+            self.calls.push(format!("chase({},{})", c.since.0, c.since.1));
+        }
+        fn route(&mut self, c: &mut NetChassis) -> bool {
+            self.calls.push(format!("route({},{})", c.pos.0, c.pos.1));
+            self.route_ok
+        }
+        fn plan(&mut self, c: &mut NetChassis) {
+            self.calls.push(format!("plan({},{})", c.pos.0, c.pos.1));
+            (c.step1, c.step2, c.line) = self.plan.clone();
+        }
+        fn build_line(&mut self, c: &mut NetChassis, f: (i32, i32), t: (i32, i32)) {
+            self.calls.push(format!("line({},{},{},{})", f.0, f.1, t.0, t.1));
+            c.line = vec![f, t];
+        }
+        fn pop_order(&mut self) {
+            self.calls.push("pop".into());
+        }
+        fn start_order(&mut self) {
+            self.calls.push("start".into());
+        }
+        fn clear_orders(&mut self) {
+            self.calls.push("clear".into());
+        }
+    }
+    let mut host = Rec { calls: vec![], guest: get("guest") == "1", route_ok: get("route") == "1", plan: (pair("plan1")?, pair("plan2")?, pairs("planline")?) };
+    let bytes = std::fs::read(get("stat"))?;
+    let mut stat: Vec<u32> = bytes.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+    c.step(pair("now")?, &mut stat, &mut host);
+    let sum = stat.iter().enumerate().fold(0u32, |a, (i, &v)| a.wrapping_add((i as u32 + 1).wrapping_mul(v)));
+    let line = c.line.iter().map(|(x, y)| format!("{x},{y}")).collect::<Vec<_>>().join(";");
+    println!(
+        "pos={},{} since={},{} line=[{}] prev={},{} step1={},{} step2={},{} facing={} want={} frame={} cd={} anim={},{} routelen={} stat={} calls={}",
+        c.pos.0, c.pos.1, c.since.0, c.since.1, line, c.prev.0, c.prev.1, c.step1.0, c.step1.1, c.step2.0, c.step2.1, c.facing, c.want, c.frame, c.cooldown, c.anim_count, c.phase, c.route_len, sum, host.calls.join(" ")
+    );
     Ok(())
 }

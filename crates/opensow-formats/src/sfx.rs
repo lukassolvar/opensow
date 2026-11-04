@@ -3,7 +3,7 @@
 //!
 //! Paths are relative to `Data/Sounds`, lower-case as in the exe, written with `/`; resolve them case-insensitively (`GameDir::resolve`). Id 71 is unused.
 //! Known uses: 53 `tt-capture`, 57 `tt-repair`, 58 `tt-Upgrade` (the Advancer's beam sounds, `0x4111b0`), 55 `tt-dest` (order
-//! acknowledged, `0x46e5c0`), 72 `turret-place` (turret built), 4-6 `canon` shots, 1-3 `artilery`, 0 `antiair`, 23-28 `explodes\*`.
+//! acknowledged, `0x46e5c0`), 61 `unit-dest` (ground go-to order, `0x41849b`), 68 `airforce-dest` (air strike launched, `0x417221`), 54 `tt-click` (Advancer selected, `0x43ae51`), 72 `turret-place` (turret built), 4-6 `canon` shots, 1-3 `artilery`, 0 `antiair`, 23-28 `explodes\*`.
 
 pub const SFX: [(u8, &str); 72] = [
     (0, "sfx/groundunits/antiair/01.wav"),
@@ -108,6 +108,41 @@ pub fn muzzle(kind: u8) -> Option<(u8, bool)> {
     Some((id, !matches!(kind, 41 | 43)))
 }
 
+/// DirectSound pan (1/100 dB, -10000..10000) of a sound `dx` pixels right of the screen centre (`0x406510`): 6 per pixel, at most +-4000.
+/// A sound without a position (`x == -1` in the call) is centred.
+pub fn pan(dx: i32) -> i32 {
+    (dx * 6).clamp(-4000, 4000)
+}
+
+/// DirectSound volume (1/100 dB, `-10000..=0`) of a sound at `(dx, dy)` pixels from the screen centre, for the master effect volume
+/// `master` (0..=100, `[audio+0x58]`; `0x406550`). `None` positions are the unpositioned calls (x or y = -1). Returns `None` when the
+/// exe does not play the sound at all: master volume 0, or 1500 hundredths of a dB of distance loss (3 per pixel after the first
+/// 167 pixels, so about 667 px) - the function then returns 0xffff and `0x4075b0` bails out.
+pub fn volume(master: i32, offset: Option<(i32, i32)>) -> Option<i32> {
+    if master == 0 {
+        return None;
+    }
+    let base = 30 * (master - 100);
+    let loss = match offset {
+        None => 0,
+        Some((dx, dy)) => {
+            let d = ((dx as i64 * dx as i64 + dy as i64 * dy as i64) as f64).sqrt() as i32;
+            let loss = (3 * d - 500).max(0);
+            if -loss <= -1500 {
+                return None;
+            }
+            loss
+        }
+    };
+    Some((base - loss).clamp(-10000, 0))
+}
+
+/// Left and right amplitude of a DirectSound volume + pan pair (1/100 dB: 20 dB per factor 10 in amplitude; pan attenuates the far side).
+pub fn gains(volume: i32, pan: i32) -> (f32, f32) {
+    let amp = |cb: i32| 10f32.powf(cb as f32 / 2000.0);
+    (amp(volume - pan.max(0)), amp(volume + pan.min(0)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,6 +152,25 @@ mod tests {
         assert_eq!(path(58), Some("sfx/cinky2/tt-Upgrade.wav"));
         assert!(path(71).is_none());
         assert_eq!(SFX.len(), 72);
+    }
+
+    #[test]
+    fn pan_and_volume_follow_the_exes_formulas() {
+        assert_eq!(pan(0), 0);
+        assert_eq!(pan(100), 600);
+        assert_eq!(pan(-1000), -4000);
+        assert_eq!(volume(100, None), Some(0));
+        assert_eq!(volume(50, None), Some(-1500));
+        assert_eq!(volume(100, Some((100, 0))), Some(0));
+        assert_eq!(volume(100, Some((300, 0))), Some(-400));
+        assert_eq!(volume(100, Some((666, 0))), Some(-1498));
+        assert_eq!(volume(100, Some((667, 0))), None);
+        assert_eq!(volume(100, Some((400, 400))), Some(-1195));
+        assert_eq!(volume(100, Some((500, 500))), None);
+        assert_eq!(volume(0, None), None);
+        assert_eq!(volume(1, None), Some(-2970));
+        let (l, r) = gains(0, 2000);
+        assert!((l - 0.1).abs() < 1e-6 && (r - 1.0).abs() < 1e-6, "positive pan silences the left side");
     }
 
     #[test]

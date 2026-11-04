@@ -24,8 +24,11 @@ pub enum Event {
     Unload { cell_x: i32, cell_y: i32, squad: usize },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Aircraft {
+    /// Handle of the aircraft for targeted hits (`[+0x1c]` in the exe, a number with side and class bits); here a number the
+    /// simulation hands out (0 until it does).
+    pub id: u32,
     pub force: AirForce,
     pub side: i32,
     /// `[+4]`, `[+8]`: position of the flight line (map pixels).
@@ -60,6 +63,10 @@ pub struct Aircraft {
     /// `[+0x88]`: carryall squad index.
     pub squad: usize,
     map_width_px: i32,
+    /// `[+0x94]`: the bomber's drone countdown (a sound every 9 steps); also marks "sound already played" for the others.
+    sound: i32,
+    /// Sound effects the last steps asked for: `(effect id, x, y)` in map pixels. The game drains this.
+    pub sounds: Vec<(u8, i32, i32)>,
 }
 
 /// Launches a strike. `map_cells` is the map width in cells (`[0x71cec0]`), `carry_counter` the exe's global carryall
@@ -78,6 +85,7 @@ impl Aircraft {
         let map_width_px = map_cells * 32;
         let right = target_x <= 0x400;
         let mut a = Aircraft {
+            id: 0,
             force,
             side,
             x: if right { -MARGIN } else { map_width_px + MARGIN },
@@ -100,6 +108,8 @@ impl Aircraft {
             armed: false,
             squad: 0,
             map_width_px,
+            sound: 0,
+            sounds: Vec::new(),
         };
         match force {
             AirForce::Bomber => {
@@ -169,6 +179,14 @@ impl Aircraft {
         match self.force {
             AirForce::Bomber => {
                 self.animate();
+                // the engine drone (sound 63) every 9th step (`0x467bde`)
+                if self.hp > 0 {
+                    self.sound -= 1;
+                    if self.sound <= 0 {
+                        self.sound = 9;
+                        self.sounds.push((63, self.x, self.y - self.altitude));
+                    }
+                }
                 let d = (self.x - self.target.0).abs();
                 let slow = match d {
                     190.. => 0,
@@ -193,6 +211,11 @@ impl Aircraft {
                 self.x += 12;
                 if self.hp > 0 {
                     let ahead = self.x - self.target.0;
+                    // the fly-by roar (sound 66, `0x46765d`): once, as it closes in (the exe gates it on the view; approximate)
+                    if self.sound == 0 && ahead >= -400 {
+                        self.sound = 1;
+                        self.sounds.push((66, self.x, self.y - self.altitude));
+                    }
                     if self.counter <= 0 && ahead >= -226 {
                         self.fire_missiles(&mut events);
                     }
@@ -263,6 +286,11 @@ impl Aircraft {
             self.altitude = d;
         }
         self.x -= steps_at((self.speed - lead) as u32, tick) as i32;
+        // the landing sound (62, `0x467592`): once, when it is closer than 190 px and still above 45
+        if self.sound == 0 && d < 190 && self.altitude > 45 {
+            self.sound = 1;
+            self.sounds.push((62, self.x, self.y - self.altitude));
+        }
         if d < 5 && self.counter <= 0 {
             self.counter = 600;
             events.push(Event::Unload { cell_x: self.target.0 / 32, cell_y: self.target.1 / 32, squad: self.squad });
@@ -320,6 +348,7 @@ impl Aircraft {
         ];
         let Some(&(_, _, oy, ox, next, cool)) = SHOTS.iter().find(|s| s.0 == self.state && s.1 == self.frame) else { return };
         let x = self.x + self.off_x + ox;
+        self.sounds.push((69, x, self.y - self.altitude + self.off_y + oy)); // `0x46843a`
         events.push(Event::Shot {
             bullet_type: 17,
             strength: 0,
@@ -437,5 +466,30 @@ mod tests {
         assert_eq!(squad(4).unwrap(), vec![(-1, 0, 5), (-1, 1, 8), (0, 0, 13), (0, 1, 11)]);
         assert_eq!(squad(17).unwrap(), vec![(-1, 0, 41), (-1, 1, 41)]);
         assert!(squad(18).is_none());
+    }
+
+    #[test]
+    fn aircraft_ask_for_their_sounds() {
+        let mut rand = no_rand();
+        // a bomber drones every 9 steps
+        let mut b = Aircraft::launch(AirForce::Bomber, 1000, 900, 0, 64, 0);
+        let mut n = 0;
+        for tick in 0..30 {
+            b.step(tick, &mut rand);
+            n += b.sounds.drain(..).filter(|s| s.0 == 63).count();
+        }
+        assert_eq!(n, 4, "steps 1, 10, 19 and 28");
+        // a fighter roars once, a carryall announces its landing once
+        let mut f = Aircraft::launch(AirForce::Fighter, 1000, 900, 0, 64, 0);
+        let mut c = Aircraft::launch(AirForce::Carryall, 1000, 900, 0, 64, 0);
+        let (mut fs, mut cs) = (0, 0);
+        for k in 0..1500 {
+            let tick = k % 60;
+            f.step(tick, &mut rand);
+            c.step(tick, &mut rand);
+            fs += f.sounds.drain(..).filter(|s| s.0 == 66).count();
+            cs += c.sounds.drain(..).filter(|s| s.0 == 62).count();
+        }
+        assert_eq!((fs, cs), (1, 1));
     }
 }

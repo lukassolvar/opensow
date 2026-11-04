@@ -29,6 +29,8 @@ pub fn weapon_shot(kind: i32) -> Option<(u8, u32)> {
         13 => (27, 70),
         14 => (28, 133),
         15 => (29, 75),
+        // the Advancer's gun top (0x47a8af): bullet type 31, strength 64
+        40 => (31, 64),
         41 => (27, 18),
         42 => (1, 21),
         43 => (34, 22),
@@ -53,10 +55,11 @@ pub struct BulletType {
     pub interval: Option<u32>,
     /// `[+0x2670, +0x2674, +0x2678, +0x267c]` where all four are set (sprite animation parameters, meaning not traced).
     pub anim: Option<[i32; 4]>,
-    /// Types 19-23 contain loops that were not decoded, so their values may be incomplete.
     /// Types 13, 14 and 32 compute their speed from the random generator (`speed`/`interval` here are only the static stores),
     /// types 28, 29 and 31 also run effect code or branch, and types 2 and 13 draw a random start value; none of this is
     /// modelled, and those seven types are not cross-checked against the exe (`bullet_types_match_the_exes_constructor`).
+    /// Types 19-21 (spark loops, `sparks.rs`) and 23 (branch on its variant) have their loops and branch decoded separately and
+    /// are checked by `scripts/verify_against_exe.py`.
     pub partial: bool,
 }
 
@@ -83,11 +86,11 @@ pub const BULLET_TYPES: [BulletType; 35] = [
     bt(Some(30), None, Some([0, 16, 1, 3]), false),           // 16
     bt(Some(360), None, None, false),                         // 17
     bt(Some(30), None, None, false),                          // 18
-    bt(Some(60), None, None, true),                           // 19
-    bt(Some(60), Some(2), None, true),                        // 20
-    bt(Some(60), None, None, true),                           // 21
-    bt(Some(20), None, Some([10, 178, 1, 1]), true),          // 22
-    bt(Some(60), None, None, true),                           // 23
+    bt(Some(60), None, None, false),                           // 19
+    bt(Some(60), Some(2), None, false),                        // 20
+    bt(Some(60), None, None, false),                           // 21
+    bt(Some(20), None, Some([10, 178, 1, 1]), false),         // 22
+    bt(Some(60), None, None, false),                           // 23
     bt(Some(240), Some(0), Some([0, 16, 1, 2]), false),       // 24
     bt(Some(240), Some(0), Some([0, 16, 1, 2]), false),       // 25
     bt(Some(150), None, Some([0, 8, 1, 2]), false),           // 26
@@ -111,7 +114,7 @@ pub fn bullet_type(t: u8) -> Option<BulletType> {
 pub const MAX_POINTS: usize = 800;
 
 /// A bullet's precomputed flight path (`0x40ef60`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Path {
     /// Screen positions of the bullet, one per path step. The start point itself is not included; the last point is the end
     /// point. For arcing types the lift is already subtracted from `y`.
@@ -121,6 +124,10 @@ pub struct Path {
     pub lift: Vec<i32>,
     /// Index of the first step taken (`[bullet+0x2644] / 2`): the `delay` argument, or 0 when it is not shorter than the path.
     pub first_step: usize,
+    /// Type 1 only (`[bullet+0x2654]`, stored by `0x40efab`): the missile's flight facing, `facing(start, end, 32)` (`0x46b180`) of
+    /// the path builder's own arguments, i.e. of the start point (not the first path point) and the end. The draw uses it directly as
+    /// the frame of the `missile` sprite (32 of its 40 frames are reached).
+    pub facing: Option<u8>,
 }
 
 /// Builds the path of a bullet of `bullet_type` from `(x1, y1)` to `(x2, y2)` with an initial skip of `delay` steps
@@ -180,7 +187,8 @@ pub fn build_path(bullet_type: u8, x1: i32, y1: i32, x2: i32, y2: i32, delay: u3
     }
     let skip = delay as usize * 2;
     let first_step = if points.len() * 2 <= skip { 0 } else { skip } / 2;
-    Some(Path { points, lift, first_step })
+    let facing = (bullet_type == 1).then(|| crate::facing::facing(x1, y1, x2, y2, 32) as u8);
+    Some(Path { points, lift, first_step, facing })
 }
 
 /// Ticks a bullet needs for `steps` path steps at `speed` (steps per 60 ticks), counting from tick 0 of the speed cycle.
@@ -242,6 +250,38 @@ pub struct UnitRef {
     pub flying: bool,
     pub owner: u32,
     pub kind: i32,
+}
+
+/// How a bullet type damages the building in its impact cell (`0x42f2c0` tail `0x42f3cc..0x42f462`): `type - 17` indexes a byte table at
+/// `0x42f474` (19 entries, types 17..=35) into three cases; every other type goes to the third.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildingHit {
+    /// `0x42f44f`: types 17, 18, 26 (Tripler pod, bomber bomb, fighter bomb): full damage unless the building is a Headquarters.
+    FullUnlessHq,
+    /// `0x42f430`: types 24, 25, 35 (the two meteors, the Rogon explosion): **half** damage (`strength / 2`), none on a Headquarters.
+    HalfUnlessHq,
+    /// `0x42f458`: every other type: full damage, whatever the building.
+    Full,
+}
+
+/// The case of `bullet_type` in the building-damage table.
+pub fn building_hit(bullet_type: u8) -> BuildingHit {
+    match bullet_type {
+        17 | 18 | 26 => BuildingHit::FullUnlessHq,
+        24 | 25 | 35 => BuildingHit::HalfUnlessHq,
+        _ => BuildingHit::Full,
+    }
+}
+
+/// Damage (and damage tally) a shell of `strength` does to a building of kind `building_kind` in its impact cell. The "shield" the exe
+/// tests is `[bld+0x94] == 100`, the building kind of the Headquarters. Half damage is `(strength - sign) >> 1` in the exe, i.e. rounded
+/// toward zero.
+pub fn building_damage(bullet_type: u8, strength: i32, building_kind: i32) -> i32 {
+    match building_hit(bullet_type) {
+        BuildingHit::Full => strength,
+        BuildingHit::FullUnlessHq => if building_kind == 100 { 0 } else { strength },
+        BuildingHit::HalfUnlessHq => if building_kind == 100 { 0 } else { (strength - (strength >> 31)) >> 1 },
+    }
 }
 
 /// Indices of the units that lose HP to an explosion at `(x, y)` from a bullet of `bullet_type` fired by `owner`.
@@ -400,3 +440,23 @@ mod tests {
 pub const TRIPLER_RING: [(i32, i32); 36] = [(64, 1), (64, 9), (59, 18), (52, 25), (42, 32), (32, 36), (27, 38), (17, 40), (8, 41), (1, 40), (64, -9), (59, -18), (52, -25), (42, -32), (32, -36), (27, -38), (17, -40), (8, -41), (-64, -1), (-64, -9), (-59, -18), (-52, -25), (-42, -32), (-32, -36), (-27, -38), (-17, -40), (-8, -41), (-1, -40), (-64, 9), (-59, 18), (-52, 25), (-42, 32), (-32, 36), (-27, 38), (-17, 40), (-8, 41)];
 pub const TRIPLER_RING_USED: usize = 34;
 pub const TRIPLER_BLAST_STRENGTH: i32 = 100;
+
+#[cfg(test)]
+mod building_damage_tests {
+    use super::*;
+
+    #[test]
+    fn meteors_and_the_rogon_blast_halve_and_the_hq_is_immune_to_air_strikes() {
+        assert_eq!(building_damage(24, 101, 102), 50);
+        assert_eq!(building_damage(35, 100, 102), 50);
+        assert_eq!(building_damage(25, 100, 100), 0);
+        assert_eq!(building_damage(18, 100, 100), 0);
+        assert_eq!(building_damage(18, 100, 102), 100);
+        assert_eq!(building_damage(17, 100, 100), 0);
+        assert_eq!(building_damage(26, 7, 100), 0);
+        // ordinary shells and the Advancer-adjacent types ignore the HQ rule
+        assert_eq!(building_damage(4, 85, 100), 85);
+        assert_eq!(building_damage(30, 920, 100), 920);
+        assert_eq!(building_damage(15, 40, 100), 40);
+    }
+}

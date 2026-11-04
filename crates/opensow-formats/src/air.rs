@@ -10,7 +10,7 @@
 //! - event ids 17..=21 announce "bomber/carryall/asteroid/fighter/tripler ready" (`0x403340`);
 //! - manual: the fighter "cannot be destroyed by antiaircraft means".
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AirForce {
     Bomber,
     Carryall,

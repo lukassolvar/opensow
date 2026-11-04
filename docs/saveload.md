@@ -1,0 +1,50 @@
+# Load and save pages (`CMenuLoadSave`)
+
+Code: `crates/opensow-game/src/saveui.rs` (page, slots, files), pure helpers in `crates/opensow-formats/src/save.rs` (`slot_stem`, `data_checksum`, `SaveInfo::to_bytes`, `grab_thumbnail`...). Read from the exe: state dispatcher `0x42d020` (`dec eax` first: **handler = jump table `0x42d624`[state-1]**), class object `0x7104d0`; constructor `0x442fa0`, open `0x4450e0(mode)`, per-frame update + input `0x444660`, draw `0x443500` (+ `0x443ad0` texts), slot reader `0x443ca0`, screenshot reader `0x4440d0`, screenshot grab `0x445070`, spark path `0x443210`, cleanup `0x445000`.
+
+## States
+| state | handler | page |
+|---|---|---|
+| `0xc` and `0x11` | `0x434050` -> `0x4450e0(1)` | **Load** (mode byte `[+0x10]` = 1) |
+| `0xd` and `0x12` | `0x4341b0` -> `0x4450e0(0)` | **Save** (mode 0) |
+| `0xe` / `0x13` | `0x434150` -> `0x44c510` | options (docs/options.md) |
+| `0x14` | `0x433fb0` | the Esc oval; its first frame calls `0x445070`, which grabs the screenshot |
+
+`0xc`/`0xd` are the Esc menu's items (docs/pause.md; every way out ends in state 7 = the mission resumes), `0x11`/`0x12` the same pages entered from the main menu (their way out, CANCEL, goes to state `0x1c`, the main menu). (docs/pause.md first said load = page 1 etc.; the pages are the same class, only the mode differs.) CANCEL / Esc: `[0x6bed6d]`; Enter and numpad Enter = LOAD / SAVE (`[0x6bed88]`, `[0x6bee08]`); `[0x6bed12]` = left click.
+
+## Art
+- Backdrops `Data\PICTURES\Load.srf` (640x480) and `Load2.srf` (1920x1080, the Steam art). On a screen wider than 640 `Load2` is drawn cropped around the centre (no scaling), then the 640x480 `Load` at the centre (`0x443500`). Everything below is relative to the screen centre `(cx, cy)`; in the 640x480 layout cx = 320, cy = 240. The page is **not scaled**; both backdrops show the same table, so the layout is pixel-exact on any screen.
+- `Data\Sprites2\Menu\loadsave_b.tsp` (6 frames, `extra` `[640,480,320,240]`; `hot` is the offset from the centre as in docs/options.md): 0 CANCEL (155x39, top-left `(cx-2, cy+190)`), 1 LOAD (113x47, `(cx-169, cy+190)`), 2 "SAVE GAME" banner (unused by the exe), 3 and 4 SAVE (110x45 / 107x45, `(cx-166, cy+190)`), 5 the green selection bar (399x26). The exe uses frames 0, 1, 3 only as **hit rectangles** (button object `0x455e20`: pos, rect = `-hot .. size-hot`, hover flag `+0x40`, hover sound `+0x54`) and frame 5 as the bar; the visible labels are GDI text in the language's strings.
+- Strings (exe index = `lang` file index + 1, docs/text.md): title 1 `Load Game` / 363 `Save Game`, 22 `Cancel`, 359 `LOAD`, 360 `SAVE`, 351 `Quick Save`, 269 `Empty Savegame...`, 270 `No Time`, 271 `No Date`, 272 `savegame is damaged!!!`.
+- Text is drawn by `0x466f40` / `0x4670e0` (GDI, a black copy 2 px right and down first). The port draws the row texts (number, title, date) with the `gdi.rs` Times New Roman Bold stand-in after the page is scaled, so they stay sharp in big windows (bitmap fallback without the system font); the title and button labels still use the bitmap fonts. Colours (R,G,B): rows `70,195,70`, hovered row `90,252,90`; title and button labels `222,113,74`, an idle button label `166,84,55` (it turns `222,113,74` while hovered).
+
+## Layout
+- Table: x 20..424 (columns 20/50/275/424), ten rows, row `i` top `cy-156+32i`, hit area x in (20, 424), y in (`cy-156+32i`, `cy-132+32i`) (`[0x71c4e8..f4]`, `[0x71c510] = cy-160`).
+- Per row: the number `0..9` at `(cx-291, cy-153+32i)`, the title at `cx-262`, the date at `cx-36` (same y). The bar (frame 5) at `(cx-297, cy-156+32i)` marks the clicked row; the text of the row under the pointer turns bright. The time string of the `.info` is read but not shown.
+- Screenshot box: 160x120 at `(cx+130, cy+18)`; shown always on the save page, on the load page only while a valid row is selected.
+- Title at `(cx-107, cy-243)`; the buttons' labels at y = `cy+197`: SAVE/LOAD at `cx-160`, CANCEL at `cx+4`.
+- A random 1-in-5 spark (bullet type `0x21`, `0x411dc0`) is spawned per frame on a table grid line and travels along the lines (`0x443210`, list `[0x49ce38]`); decorative, **not reproduced**.
+
+## Behaviour (`0x444660`)
+- **Hover**: row under the pointer in `[+4]`; when it changes to a row, sound 30 (`mainmenu-move`).
+- **Click on a row** sets the selected row `[+0xc]`. Load page: the slot's `.info` screenshot is read (`0x4440d0`; sound 40 `loadsave-pic` when it could be read). Save page: the previous row's text is reloaded from its files (edits are discarded); the new row, when its slot is empty, gets the title `Quick Save` (row 0) or an empty string; an existing slot keeps its title, which can then be edited.
+- **LOAD** (button or Enter): needs a selected row whose slot is valid; sound 38 (`ingame-ano`); `0x41a850(slot)` -> `0x425d00` loads, success -> state 7, failure -> state `0x1c`. **SAVE**: needs a selected row (the title may be empty); sound 38; `0x41a9c0(title, slot)` -> `0x428bb0`, then state 7 (it plays `Sounds\Speech\01-game-saved.wav`).
+- **CANCEL / Esc**: sound 39 (`ingame-nie`), state 7 (in a mission) or `0x1c`.
+- **Typing** (save page, rows 1..9; row 0 is not editable): the characters typed this frame (`[0x6bee6c]`) are appended while the whole text stays under 195 px (`0x45ed50`); sound 32 (`save-type`). **Backspace** (`[0x6bed7a]`) removes the last character at once, then after 20 ticks every 4 ticks, each with sound 32. The selected row shows a `|` caret for 15 of every 30 ticks.
+- Tutorial: the oval hides items 1 and 2 (docs/pause.md); a network game too.
+- The "Quick Save" feature: a key flag (`[keys+0xa3]`, `0x4167a1..`) saves to slot 0 with the title `Quick Save` (after `0x445070`) and quick-loads `0x41a850(0)`. The key is not identified; **not implemented**.
+
+## Slots and files
+- Row = slot 0..9 = file `savegame\savegame_<stem>.data` / `.info`, stem by `0x41f060`: for n < 10 `"0"` then `"%d"` of `n + 0x30`, otherwise `"%d"` of `n/10 + 0x30` then `"%d"` of `n%10 + 0x30`, i.e. slot 3 is **`051`**, slot 10 would be `4948` (read literally, the format is `%d` on the ASCII code; no real save file exists to confirm, `slot_stem`). The same helper returns 0 above 99.
+- Slot reader `0x443ca0`: opens `.data`, sums its bytes (`0x436ba0`, wrapping `u32`, 0 when the file is missing), opens `.info`: if missing, the row shows the defaults (`Empty Savegame...`, `No Time`, `No Date`, not loadable). Otherwise it reads `u16,u16`, the stored `u32` (**the checksum of the `.data`, not a time stamp**), then the first three strings as title, time, date. Equal checksum -> valid; different -> the title becomes `savegame is damaged!!!` (time and date stay) and the row is not loadable.
+- `.info` screenshot (`0x4440d0`): after the three strings a fourth is skipped, then `u32 [0x517aec]` = pixel format (1 = RGB555, 2 = RGB565; a thumbnail whose format differs from the display's is converted), then 160x120 `u16`. A version-1 header (first word 1) stores it transposed; ours writes version 2 (`SaveInfo`).
+- Screenshot grab `0x445070`: every 4th pixel of every 4th row of the **top-left 640x480** of the screen (a bigger window therefore gets only its corner); taken when the Esc menu opens (before the oval is drawn). We take it from the first drawn frame of the save page, which shows the same game frame.
+- Save writes `.data` (compressed state), then computes the checksum and writes `.info` (`0x428bb0` -> `0x42be20`: strings `strftime("%X")`, `"%b %d, %Y"`, `"%a %H:%M"` of the local time).
+
+## OpenSOW
+- Files go to `$OPENSOW_SAVE_DIR`, else `~/Library/Application Support/OpenSOW/Savegame` (macOS) / `~/.local/share/opensow/Savegame`; the install's own `Savegame` folder is only read as a fallback, never written (AGENTS.md rules). Times use UTC.
+- The `.data` stream is the real container (Huffman, `save::huff_encode`) holding the real head (`StateHead`: version words and the level number) followed by our marker `"OpenSOW1"` and the level name. The object records (units, buildings, ...) are not written because their field meanings are open (docs/savegame.md), so **loading restarts the saved mission**; a genuine stream (number only) loads as `M<nn>`.
+- Headless: `opensow-game --screenshot x.png --size WxH --screen load|save [--level M03] [--row N] [--type TEXT] [--hover N] [--confirm]` (set `OPENSOW_SAVE_DIR`).
+
+## Not decoded / open
+Real state write and read (`0x42a400` field meanings), `0x425d00` post-load fixups, the spark effect, the quick-save key, how GDI font metrics compare to our bitmap font for the 195 px limit.

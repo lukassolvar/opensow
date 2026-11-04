@@ -24,6 +24,7 @@
   `[obj+0x54]` = top sprite index, draw `0x479a80`. Sprite arrays: tops blue `0x575770` / green `0x57b530` (150 slots per top), chassis blue `0x593b30` / green `0x59b830` (200 per chassis).
 - Name lists are MFC CStringArrays filled at `0x423ecd` / `0x424563` (tops, in the load order above) and `0x424175` (chassis); loop at `0x424070` loads `_blue`, `_gren`, `.po1`, `.po2`.
 - Method that worked: find who writes a field (jump-table scan) and who reads it in the draw routine, then join the two through the field offset.
+- `0x4774c0` free cell near the destination (+ flood `0x4726f0`) = `freecell.rs`; `0x46fa40` networked chassis step = `netwalk.rs` (docs/pathfinding.md); both emulation-verified.
 - `0x436230` range ring list builder (offsets `0x65bbd8`, index `0x6b3a18`, neighbours `0x6b3c70`); consumer `0x47b140` (ground target search). Ported in `rings.rs`, emulation-verified.
 - Aircraft: objects in `0x5ba910` (3 sides x 30); ctor `0x467ee0`, update `0x467b50` (+ per-type `0x467450` carryall, `0x467600` fighter), death `0x467850`, spawns `0x468240`, carryall squad `0x468960` (calls unit creation `0x43a420`), draw `0x467240`. Bullet ctor `0x411dc0(type, strength, x1, y1, x2, y2, side)`. Ported in `aircraft.rs`.
 

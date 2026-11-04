@@ -464,6 +464,124 @@ impl State {
     }
 }
 
+/// Number of rows in the load / save list.
+pub const LIST_ROWS: usize = 10;
+
+/// The file stem of slot `n` as the exe builds it (`0x41f060`, used as `savegame\savegame_<stem>.data` / `.info`).
+/// The exe formats the digit characters with `"%d"` after adding 0x30, so slot 3 is `051`, not `03` (read literally from the
+/// code; no real save file was available to confirm it). Slots above 99 become 0.
+pub fn slot_stem(n: usize) -> String {
+    let n = if n <= 99 { n } else { 0 };
+    if n < 10 {
+        format!("0{}", 0x30 + n)
+    } else {
+        format!("{}{}", 0x30 + n / 10, 0x30 + n % 10)
+    }
+}
+
+/// `savegame\savegame_<stem>.data` / `.info` for slot `n`.
+pub fn slot_file(n: usize, ext: &str) -> String {
+    format!("savegame\\savegame_{}.{ext}", slot_stem(n))
+}
+
+/// The load menu's integrity value (`0x436ba0`): the wrapping sum of every byte of the `.data` file. The `.info` stores it
+/// and the menu shows "savegame is damaged!!!" when the two differ.
+pub fn data_checksum(data: &[u8]) -> u32 {
+    data.iter().fold(0u32, |a, &b| a.wrapping_add(b as u32))
+}
+
+/// Appends an MFC `CString` the way `CArchive` writes it.
+pub fn put_mfc_string(out: &mut Vec<u8>, s: &str) {
+    let b = s.as_bytes();
+    if b.len() < 0xff {
+        out.push(b.len() as u8);
+    } else if b.len() < 0xffff {
+        out.push(0xff);
+        out.extend((b.len() as u16).to_le_bytes());
+    } else {
+        out.push(0xff);
+        out.extend(0xffffu16.to_le_bytes());
+        out.extend((b.len() as u32).to_le_bytes());
+    }
+    out.extend(b);
+}
+
+/// `[0x517aec]` when the screenshot is RGB565 (1 = RGB555); the load menu converts a thumbnail whose format differs.
+pub const PIXEL_565: u32 = 2;
+
+/// RGB565 pixel of an 8-bit colour.
+pub fn rgb565(r: u8, g: u8, b: u8) -> u16 {
+    ((r as u16 >> 3) << 11) | ((g as u16 >> 2) << 5) | (b as u16 >> 3)
+}
+
+/// Converts a stored thumbnail pixel to RGB565 (`0x4440d0`: format 1 = RGB555 is widened, anything else is kept).
+pub fn thumb_to_565(px: u16, format: u32) -> u16 {
+    if format == 1 {
+        ((px & 0xffe0) << 1) | (px & 0x1f)
+    } else {
+        px
+    }
+}
+
+/// Unpacks RGB565 to 8-bit channels.
+pub fn rgb_of_565(px: u16) -> (u8, u8, u8) {
+    let (r, g, b) = ((px >> 11) as u8, (px >> 5 & 0x3f) as u8, (px & 0x1f) as u8);
+    (r << 3 | r >> 2, g << 2 | g >> 4, b << 3 | b >> 2)
+}
+
+/// The thumbnail grab of `0x445070`: every fourth pixel of every fourth row of the screen's top-left 640x480 (so a bigger
+/// window shows only its top-left corner). `pixels` is row-major `0xRRGGBB`; a smaller screen leaves the rest black.
+pub fn grab_thumbnail(pixels: &[u32], w: usize, h: usize) -> Vec<u16> {
+    let mut out = vec![0u16; THUMB_W * THUMB_H];
+    for ty in 0..THUMB_H {
+        for tx in 0..THUMB_W {
+            let (x, y) = (tx * 4, ty * 4);
+            if x < w && y < h {
+                let p = pixels[y * w + x];
+                out[ty * THUMB_W + tx] = rgb565((p >> 16) as u8, (p >> 8) as u8, p as u8);
+            }
+        }
+    }
+    out
+}
+
+impl SaveInfo {
+    /// The `.info` file as `0x42be20` writes it.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut o = Vec::with_capacity(THUMB_W * THUMB_H * 2 + 64);
+        o.extend(INFO_VERSION.0.to_le_bytes());
+        o.extend(INFO_VERSION.1.to_le_bytes());
+        o.extend(self.stamp.to_le_bytes());
+        for s in [&self.name, &self.time, &self.date, &self.weekday] {
+            put_mfc_string(&mut o, s);
+        }
+        o.extend(self.extra.to_le_bytes());
+        for i in 0..THUMB_W * THUMB_H {
+            o.extend(self.thumbnail.get(i).copied().unwrap_or(0).to_le_bytes());
+        }
+        o
+    }
+}
+
+impl StateHead {
+    /// The scalar prefix of the state stream as `0x42a400` writes it.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut o = Vec::new();
+        o.extend(STATE_VERSION.0.to_le_bytes());
+        o.extend(STATE_VERSION.1.to_le_bytes());
+        for v in [self.level, self.rng_index, self.v_5baafc] {
+            o.extend(v.to_le_bytes());
+        }
+        o.push(self.flag_49a339 as u8);
+        for v in [self.v_5baad8, self.v_5baadc, self.v_5baac4, self.v_5baac8] {
+            o.extend(v.to_le_bytes());
+        }
+        o.push(self.flag_5baa99 as u8);
+        o.extend(self.v_89cf50.to_le_bytes());
+        o
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -645,5 +763,46 @@ mod tests {
         assert_eq!(st.decals.len(), 1);
         assert!(State::parse(&f[..f.len() - 1], 1).is_err());
         assert!(State::parse(&f, 2).is_err());
+    }
+
+    #[test]
+    fn slot_names_follow_the_exe() {
+        assert_eq!(slot_stem(0), "048");
+        assert_eq!(slot_stem(9), "057");
+        assert_eq!(slot_stem(10), "4948");
+        assert_eq!(slot_stem(100), "048", "above 99 the exe uses 0");
+        assert_eq!(slot_file(3, "info"), "savegame\\savegame_051.info");
+    }
+
+    #[test]
+    fn checksum_is_a_byte_sum() {
+        assert_eq!(data_checksum(&[]), 0);
+        assert_eq!(data_checksum(&[1, 2, 255]), 258);
+        assert_eq!(data_checksum(&vec![255u8; 0x2000]), 255 * 0x2000);
+    }
+
+    #[test]
+    fn info_and_head_round_trip() {
+        let thumb: Vec<u16> = (0..THUMB_W * THUMB_H).map(|i| i as u16).collect();
+        let info = SaveInfo { stamp: 77, name: "Quick Save".into(), time: "12:00:01".into(), date: "Nov 02, 2026".into(), weekday: "Mon 12:00".into(), extra: PIXEL_565, thumbnail: thumb };
+        assert_eq!(SaveInfo::parse(&info.to_bytes()).unwrap(), info);
+        let head = StateHead { level: 3, rng_index: 9, v_5baafc: 1, flag_49a339: true, v_5baad8: 2, v_5baadc: 3, v_5baac4: 4, v_5baac8: 5, flag_5baa99: false, v_89cf50: 6, len: 0 };
+        let b = head.to_bytes();
+        let back = StateHead::parse(&b).unwrap();
+        assert_eq!(StateHead { len: 0, ..back.clone() }, head);
+        assert_eq!(back.len, b.len());
+    }
+
+    #[test]
+    fn thumbnail_grab_and_formats() {
+        let px: Vec<u32> = (0..640 * 480).map(|i| if i % 640 == 4 && i / 640 == 8 { 0xff0000 } else { 0 }).collect();
+        let t = grab_thumbnail(&px, 640, 480);
+        assert_eq!(t[2 * THUMB_W + 1], 0xf800, "pixel (4, 8) is thumbnail (1, 2)");
+        assert_eq!(t.iter().filter(|&&v| v != 0).count(), 1);
+        assert_eq!(rgb_of_565(0xf800), (255, 0, 0));
+        assert_eq!(rgb_of_565(0x001f), (0, 0, 255));
+        // 555 red 31 -> 565 red 31 stays the top five bits
+        assert_eq!(thumb_to_565(0x7c00, 1), 0xf800);
+        assert_eq!(thumb_to_565(0xf800, PIXEL_565), 0xf800);
     }
 }

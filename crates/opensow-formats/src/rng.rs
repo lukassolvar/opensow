@@ -16,6 +16,11 @@ pub struct GameRng {
 }
 
 impl GameRng {
+    /// Puts the table position back (the only state a savegame keeps; `index()` reads it).
+    pub fn set_index(&mut self, i: usize) {
+        self.index = i % self.table.len().max(1);
+    }
+
     /// Reads `generic.file`; `None` when it is too short.
     pub fn from_file(data: &[u8]) -> Option<GameRng> {
         if data.len() < TABLE_LEN * 2 {

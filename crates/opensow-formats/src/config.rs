@@ -2,7 +2,8 @@
 //! `0x452c30`, saver `0x453310`; `CPassedLevels` vtable `0x48fe98`, `Serialize` `0x456ac0`). Both are MFC `CArchive` streams
 //! whose first words are `u16 version = 1, u16 magic = 0x1d6c`. Notes: docs/config.md.
 //!
-//! * `State of War_1.cfg` (next to the exe; `State of War Warmonger` has its own name) holds one [`Options`] record.
+//! * `State of War_1.cfg` (next to the exe; `State of War Warmonger` has its own name) holds one [`Options`] record followed by
+//!   the audio object's [`Audio`] record (both written by `0x453310`, read by `0x452c30`): a [`SettingsFile`].
 //! * `Savegame\player.cfg` holds the [`PassedLevels`] record, written as a 313-byte obfuscated block.
 
 use crate::{Error, Reader, Result};
@@ -35,15 +36,27 @@ pub struct Options {
 }
 
 impl Default for Options {
-    /// The constructor `0x452a90`'s defaults for the fields it sets; the rest start at zero.
+    /// The constructor `0x452a90`'s defaults for the fields it sets; the rest start at zero. The game's first run uses
+    /// [`Options::first_run`] instead.
     fn default() -> Options {
         Options { flag_a: false, flag_b: false, flag_c: false, flag_d: false, detail: 0, scroll_a: 0, scroll_b: 0, width: 0x780, height: 0x438, language: 0 }
     }
 }
 
 impl Options {
+    /// What the loader `0x452c30` stores when `State of War_1.cfg` is missing or unreadable (`0x452fd1..0x453000`): radar and
+    /// quake on, clouds off (detail 0), hardware cursor off, vblank wait on, mouse scroll speed 3, keys scroll speed 5,
+    /// size 1024 x 768 (not the constructor's 1920 x 1080), language unchanged (0).
+    pub fn first_run() -> Options {
+        Options { flag_a: true, flag_b: true, flag_c: false, flag_d: true, detail: 0, scroll_a: 3, scroll_b: 5, width: 0x400, height: 0x300, language: 0 }
+    }
+
     pub fn parse(data: &[u8]) -> Result<Options> {
-        let mut r = Reader::new(data);
+        Options::read(&mut Reader::new(data))
+    }
+
+    /// Reads the record at the reader's position (the settings file continues with [`Audio`]).
+    pub fn read(r: &mut Reader) -> Result<Options> {
         let head = (r.u16("version")?, r.u16("magic")?);
         if head != HEADER {
             return Err(Error::Invalid(format!("options header {head:?}")));
@@ -73,6 +86,78 @@ impl Options {
     /// Maximum number of smoke/cloud objects for a detail level (`0x453060`: 0 -> none, 1..=4 -> 13, 32, 45, 70).
     pub fn cloud_cap(&self) -> usize {
         [0, 13, 32, 45, 70].get(self.detail as usize).copied().unwrap_or(0)
+    }
+}
+
+/// The audio object `0x6b3d38`'s part of the settings file (`Serialize` `0x407ff0`, constructor defaults `0x408510`): header
+/// `u16 1, u16 0x6121`, then six `u32`: the music, speech and effect volumes (`+0x50/+0x54/+0x58`, clamped to 0..=100 when
+/// loaded), and the music, speech and effect switches (`+0x5c/+0x5d/+0x5e`, any non-zero value is on).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Audio {
+    pub music_volume: u32,
+    pub voice_volume: u32,
+    pub fx_volume: u32,
+    pub music_on: bool,
+    pub voice_on: bool,
+    pub fx_on: bool,
+}
+
+pub const AUDIO_HEADER: (u16, u16) = (1, 0x6121);
+
+impl Default for Audio {
+    /// `0x408510`: all volumes 100, music, speech and effects on (also what the first run uses).
+    fn default() -> Audio {
+        Audio { music_volume: 100, voice_volume: 100, fx_volume: 100, music_on: true, voice_on: true, fx_on: true }
+    }
+}
+
+impl Audio {
+    pub fn read(r: &mut Reader) -> Result<Audio> {
+        let head = (r.u16("audio version")?, r.u16("audio magic")?);
+        if head != AUDIO_HEADER {
+            return Err(Error::Invalid(format!("audio header {head:?}")));
+        }
+        let mut vol = |what| r.i32(what).map(|v| v.clamp(0, 100) as u32);
+        let (music_volume, voice_volume, fx_volume) = (vol("music volume")?, vol("voice volume")?, vol("fx volume")?);
+        let (music_on, voice_on, fx_on) = (r.u32("music switch")? != 0, r.u32("voice switch")? != 0, r.u32("fx switch")? != 0);
+        Ok(Audio { music_volume, voice_volume, fx_volume, music_on, voice_on, fx_on })
+    }
+
+    pub fn write(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend(AUDIO_HEADER.0.to_le_bytes());
+        out.extend(AUDIO_HEADER.1.to_le_bytes());
+        for v in [self.music_volume, self.voice_volume, self.fx_volume, self.music_on as u32, self.voice_on as u32, self.fx_on as u32] {
+            out.extend(v.to_le_bytes());
+        }
+        out
+    }
+}
+
+/// The whole `State of War_1.cfg`: the [`Options`] record, then the [`Audio`] record (`0x453310` / `0x452c30`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingsFile {
+    pub options: Options,
+    pub audio: Audio,
+}
+
+impl SettingsFile {
+    /// Missing or unreadable file: `0x452fd1` stores [`Options::first_run`] and `0x408510` the [`Audio`] defaults.
+    pub fn first_run() -> SettingsFile {
+        SettingsFile { options: Options::first_run(), audio: Audio::default() }
+    }
+
+    pub fn parse(data: &[u8]) -> Result<SettingsFile> {
+        let mut r = Reader::new(data);
+        let options = Options::read(&mut r)?;
+        let audio = Audio::read(&mut r)?;
+        Ok(SettingsFile { options, audio })
+    }
+
+    pub fn write(&self) -> Vec<u8> {
+        let mut out = self.options.write();
+        out.extend(self.audio.write());
+        out
     }
 }
 
@@ -195,6 +280,30 @@ mod tests {
         let mut bad = bytes.clone();
         bad[2] = 0;
         assert!(Options::parse(&bad).is_err());
+    }
+
+    #[test]
+    fn first_run_values_and_the_audio_record() {
+        let f = SettingsFile::first_run();
+        let o = &f.options;
+        assert_eq!((o.flag_a, o.flag_b, o.flag_c, o.flag_d, o.detail, o.scroll_a, o.scroll_b, o.width, o.height), (true, true, false, true, 0, 3, 5, 1024, 768));
+        let bytes = f.write();
+        assert_eq!(bytes.len(), 32 + 4 + 24);
+        assert_eq!(&bytes[32..36], &[1, 0, 0x21, 0x61]);
+        assert_eq!(SettingsFile::parse(&bytes).unwrap(), f);
+        // volumes are clamped on load, any non-zero switch is on
+        let mut raw = bytes.clone();
+        raw[36..40].copy_from_slice(&(-7i32).to_le_bytes());
+        raw[40..44].copy_from_slice(&250u32.to_le_bytes());
+        raw[48..52].copy_from_slice(&0u32.to_le_bytes());
+        raw[52..56].copy_from_slice(&0x100u32.to_le_bytes());
+        let g = SettingsFile::parse(&raw).unwrap();
+        assert_eq!((g.audio.music_volume, g.audio.voice_volume, g.audio.music_on, g.audio.voice_on), (0, 100, false, true));
+        // the options part alone (older files / the `cfg` tool) still parses; the audio part is required by the whole file
+        assert!(SettingsFile::parse(&bytes[..32]).is_err());
+        let mut bad = bytes;
+        bad[34] = 0;
+        assert!(SettingsFile::parse(&bad).is_err());
     }
 
     #[test]

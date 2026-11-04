@@ -16,7 +16,7 @@
 
 use crate::facing::turn_step;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WalkParams {
     /// Number of animation phases (0 = not animated).
     pub phases: u32,
@@ -83,7 +83,7 @@ pub fn phase_after(params: WalkParams, ticks: u32) -> u32 {
     ((ticks + params.period) / (params.period + 1)) % params.phases
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChassisAnim {
     params: WalkParams,
     steps: u32,
@@ -104,12 +104,17 @@ impl ChassisAnim {
     }
 
     /// One game tick. `moving` = the unit's position differs from the one the chassis remembers.
-    pub fn tick(&mut self, moving: bool) {
+    /// Returns true when the facing took a turn step this tick: the exe then hands the chassis's *target* facing to the
+    /// weapon top (`0x479980`, called right after every `0x46a190` turn step in `0x46f4a0` / `0x46f550`), see
+    /// [`crate::aim::TopAim::set_target_facing`].
+    pub fn tick(&mut self, moving: bool) -> bool {
+        let mut turned = false;
         if self.facing != self.target {
             self.turn_counter -= 1;
             if self.turn_counter < 0 {
                 self.turn_counter = self.params.turn_delay as i32;
                 self.facing = turn_step(self.facing, self.target, self.steps);
+                turned = true;
             }
         }
         if self.facing == self.target {
@@ -124,6 +129,7 @@ impl ChassisAnim {
                 }
             }
         }
+        turned
     }
 
     pub fn frame(&self) -> u32 {

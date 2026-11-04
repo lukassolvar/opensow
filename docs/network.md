@@ -1,5 +1,7 @@
 # Multiplayer
 
+The menu screens (connection, sessions, lobby, the lobby packet) are in docs/multiplayer-menus.md.
+
 Code: `crates/opensow-formats/src/net.rs`; exe checks: `scripts/verify_net.py` (emulates the exe's own writers and readers, 200 random packages, header selectors). The exe imports no socket library: sessions use **DirectPlay 4A** (`IDirectPlay4A` through COM, strings at `0x48fbe8..0x48fd78`: "State of War session", "Player1/Player2", "Can't send network message"). Maps for it are `data\levels\*.net` (docs/levels.md). The `sfml-network` DLLs in the install are not imported.
 
 ## Bit streams

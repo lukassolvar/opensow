@@ -53,6 +53,7 @@ static SEQ_W1: [FireStep; 1] = [s(0, -1, 0, 2)];
 static SEQ_W2: [FireStep; 4] = [s(0, -1, 0, 1), s(0, -1, 1, 1), s(0, -1, 2, 1), s(0, -1, 3, 1)];
 static SEQ_W4: [FireStep; 3] = [s(0, 0, 0, 1), s(1, 0, -1, 1), s(2, 1, -1, 1)];
 
+static SEQ_I: [FireStep; 1] = [s(0, -1, 0, 1)];
 static SEQ_T4: [FireStep; 3] = [s(0, 0, 0, 1), s(1, 1, -1, 1), s(2, 2, -1, 1)];
 static SEQ_T3: [FireStep; 2] = [s(0, -1, 0, 1), s(0, -1, -1, 1)];
 static SEQ_T5: [FireStep; 3] = [s(0, -1, 0, 1), s(0, -1, 1, 1), s(0, -1, 2, 1)];
@@ -79,6 +80,8 @@ pub fn fire_sequence(kind: i32) -> Option<FireSequence> {
         12 => seq!(None, 8, SEQ_F3),
         13 | 14 => seq!(None, 10, SEQ_F1),
         15 => seq!(None, 4, SEQ_S3),
+        // the Advancer: one step, `[top+0x210]` = 4 (case 0x47a8af)
+        40 => seq!(None, 4, SEQ_I),
         41 => seq!(None, 4, SEQ_W1),
         42 => seq!(None, 4, SEQ_W2),
         43 => seq!(None, 8, SEQ_W2),
@@ -183,7 +186,7 @@ mod tests {
 
     #[test]
     fn unknown_kinds_have_no_sequence() {
-        assert!(fire_sequence(40).is_none());
+        assert!(fire_sequence(40).is_some()); // the Advancer gun top
         assert!(fire_sequence(100).is_none());
     }
 }

@@ -185,6 +185,23 @@ impl Wave {
     /// A wave runs from the cell up to 6 steps ahead on the route back to the unit; the unit steps to the neighbour with the
     /// smallest stamp. Diagonal corners of the unit's cell are closed where a single obstacle fills both orthogonal cells.
     pub fn local_step(&mut self, stat: &[u32], stat_base: u32, own: u32, route: &[(i32, i32)], at: (i32, i32)) -> LocalStep {
+        self.local_core(stat, stat_base, own, route, at, None)
+    }
+
+    /// The second-step search of `0x475c30` (ground) / `0x4732f0` (Advancer): the same code as [`Wave::local_step`], run over
+    /// the **second step cell grid** (`self` = `0x63ac38`, base `[0x49a370]`; air `0x64ac38`, `[0x49a378]`) to plan the cell
+    /// *after* the step cell. `at` is the centre cell of the first step cell, `first` / `first_base` the first step grid
+    /// (`0x61ac38`, `[0x49a36c]`; air `0x62ac38`, `[0x49a374]`). Differences from `local_step`: when the look-ahead cell is next
+    /// to `at` it is taken if it is free in the second grid **and** the first step grid (the static grid is not asked) and
+    /// otherwise there is no step: the ground routine (`air == false`) just fails, the Advancer's `0x4732f0` (`air == true`)
+    /// also sets `stop` like `0x476870` / `0x473f10` do. Only the networked movement `0x46fa40` -> `0x472f50` calls it
+    /// (docs/pathfinding.md).
+    #[allow(clippy::too_many_arguments)]
+    pub fn local_step_second(&mut self, stat: &[u32], stat_base: u32, own: u32, route: &[(i32, i32)], at: (i32, i32), first: &[u32], first_base: u32, air: bool) -> LocalStep {
+        self.local_core(stat, stat_base, own, route, at, Some((first, first_base, air)))
+    }
+
+    fn local_core(&mut self, stat: &[u32], stat_base: u32, own: u32, route: &[(i32, i32)], at: (i32, i32), second: Option<(&[u32], u32, bool)>) -> LocalStep {
         let none = LocalStep::default();
         if route.len() <= 1 {
             return none;
@@ -201,6 +218,12 @@ impl Wave {
         }
         if (l.0 - at.0).abs() <= 1 && (l.1 - at.1).abs() <= 1 {
             // next to the look-ahead cell: step there when it is free
+            if let Some((first, first_base, air)) = second {
+                if self.cells[li] < self.base && first[li] < first_base {
+                    return LocalStep { next: Some(l), path: Vec::new(), stop: false };
+                }
+                return LocalStep { stop: air, ..none };
+            }
             if self.cells[li] < self.base && s_at_l < stat_base {
                 return LocalStep { next: Some(l), path: Vec::new(), stop: false };
             }
@@ -286,12 +309,191 @@ impl Wave {
     }
 }
 
+/// What the target scan `0x472a90` makes of an occupied cell value (decided by the handle bits, `0x43aa80..0x43aab0`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Seen {
+    /// Not a hostile object (an own object, or neither unit nor building).
+    Ignore,
+    Unit,
+    /// A building whose type (`0x43aaa0`) is 3 or 6: the turret class.
+    Turret,
+    Building,
+}
+
+/// The nearest hostile objects found by [`find_targets`]: the first handle of each class the wave met (0 = none).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Targets {
+    pub unit: u32,
+    pub turret: u32,
+    pub building: u32,
+}
+
+/// The exe's reachability scan (`0x472a90`, docs/ai.md): a wave from cell `start` over the static grid `cells`
+/// (`x * 128 + y`, terrain `0xFFFFFD`, objects are handles `>= 0x400000`). Free cells (below `*base`) are stamped and
+/// expanded in the order x-1, x+1, y-1, y+1; an object cell is *not* expanded: `classify` says what it is, and the first
+/// unit, turret and other building met are returned. The wave stops after a generation of more than 8000 cells or when
+/// the stamp passes `*base + 8000`; the start cell is restored and `*base` moves past the stamps (stamp + 2).
+/// Cells outside the grid count as terrain (the exe reads the border cells around the map, which are terrain).
+pub fn find_targets(cells: &mut [u32], base: &mut u32, dims: (i32, i32), start: (i32, i32), classify: impl Fn(u32) -> Seen) -> Targets {
+    const OBJECT: u32 = 0x400000;
+    let b = *base;
+    let (w, h) = dims;
+    let at = |x: i32, y: i32| -> Option<usize> { ((0..SIDE).contains(&x) && (0..SIDE).contains(&y)).then(|| (x * SIDE + y) as usize) };
+    let mut found = Targets::default();
+    let Some(si) = at(start.0, start.1) else { return found };
+    let saved = cells[si];
+    cells[si] = b;
+    let mut stamp = b + 1;
+    let (mut cur, mut next): (Vec<(i32, i32)>, Vec<(i32, i32)>) = (vec![start], Vec::new());
+    loop {
+        for &(x, y) in &cur {
+            let Some(i) = at(x, y) else { continue };
+            let v = cells[i];
+            if v >= OBJECT {
+                match classify(v) {
+                    Seen::Unit if found.unit == 0 => found.unit = v,
+                    Seen::Turret if found.turret == 0 => found.turret = v,
+                    Seen::Building if found.building == 0 => found.building = v,
+                    _ => {}
+                }
+                continue;
+            }
+            // x-1, x+1, y-1, y+1 with the exe's (weak) bounds tests
+            for (dx, dy, inside) in [(-1, 0, x > -1), (1, 0, x < w), (0, -1, y > -1), (0, 1, y < h)] {
+                let Some(j) = at(x + dx, y + dy) else { continue };
+                let n = cells[j];
+                if n == BLOCKED || !inside {
+                    continue;
+                }
+                if n < b || n >= OBJECT {
+                    next.push((x + dx, y + dy));
+                }
+                if n < b {
+                    cells[j] = stamp;
+                }
+            }
+        }
+        stamp += 1;
+        if next.len() > 0x1f40 || stamp > b + MAX_SPAN || next.is_empty() {
+            break;
+        }
+        cur = std::mem::take(&mut next);
+    }
+    cells[si] = saved;
+    *base = stamp + 2;
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn open(w: i32, h: i32) -> Wave {
         Wave::new(|x, y| x < 1 || y < 1 || x >= w - 1 || y >= h - 1)
+    }
+
+    #[test]
+    fn air_chase_frees_the_strip_three_cells_before_the_block() {
+        // target (20, 20), range 2; handle cells at (20, 15) (y - 5: outside the block, inside the air strip) and (22, 22)
+        let handle = 0x3000009;
+        let fresh = || {
+            let mut cells = vec![0u32; 128 * 128];
+            for x in 0..40usize {
+                for y in 0..40usize {
+                    if x < 1 || y < 1 || x >= 39 || y >= 39 {
+                        cells[x * 128 + y] = BLOCKED;
+                    }
+                }
+            }
+            cells[20 * 128 + 15] = handle;
+            cells[22 * 128 + 22] = handle;
+            cells
+        };
+        let (mut ground, mut air) = (fresh(), fresh());
+        let (mut b0, mut b1) = (1u32, 1u32);
+        let g = approach(&mut ground, &mut b0, (40, 40), (5, 20), (20, 20), handle, 2).unwrap();
+        let a = approach_air(&mut air, &mut b1, (40, 40), (5, 20), (20, 20), handle, 2).unwrap();
+        // the ground chase restores everything; the air chase leaves (20, 15) cleared and (22, 22) in place
+        assert_eq!((ground[20 * 128 + 15], ground[22 * 128 + 22]), (handle, handle));
+        assert_eq!((air[20 * 128 + 15], air[22 * 128 + 22]), (0, handle));
+        assert_eq!(g, a, "the destination is the same on open ground");
+        // a ring of the target's own cells: both chases free what they must to arrive, and restore the block afterwards
+        let mut walled = fresh();
+        for (dx, dy) in [(-1i32, -1i32), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)] {
+            walled[((20 + dx) * 128 + 20 + dy) as usize] = handle;
+        }
+        let mut walled_air = walled.clone();
+        let (mut b2, mut b3) = (1u32, 1u32);
+        assert!(approach(&mut walled, &mut b2, (40, 40), (5, 20), (20, 20), handle, 2).is_some());
+        assert!(approach_air(&mut walled_air, &mut b3, (40, 40), (5, 20), (20, 20), handle, 2).is_some());
+        assert_eq!(walled_air[21 * 128 + 21], handle, "the block is restored, only the strip stays cleared");
+    }
+
+    /// Open 40 x 40 grids with a blocked border for the second-step search tests.
+    fn open_grid() -> Vec<u32> {
+        let mut cells = vec![0u32; 128 * 128];
+        for x in 0..40usize {
+            for y in 0..40usize {
+                if x < 1 || y < 1 || x >= 39 || y >= 39 {
+                    cells[x * 128 + y] = BLOCKED;
+                }
+            }
+        }
+        cells
+    }
+
+    #[test]
+    fn second_step_search_plans_around_second_grid_stamps() {
+        // unit at (10, 10) heading east along y = 10 to (16, 10); the route lists the unit's cell first
+        let route: Vec<(i32, i32)> = (10..=16).map(|x| (x, 10)).collect();
+        let (stat, first) = (open_grid(), open_grid());
+        let mut free = Wave { cells: open_grid(), base: 1 };
+        let r = free.local_step_second(&stat, 1, 0x3100001, &route, (10, 10), &first, 1, false);
+        assert!(r.next.is_some() && !r.stop);
+        assert_eq!(r.path.last(), Some(&(16, 10)), "the local route runs from the step cell to the look-ahead cell");
+        // a reservation in the second grid on the straight way: the route bends around it
+        let mut cells = open_grid();
+        cells[12 * 128 + 10] = 0x3200001;
+        let mut w = Wave { cells, base: 1 };
+        let r = w.local_step_second(&stat, 1, 0x3100001, &route, (10, 10), &first, 1, false);
+        assert!(r.next.is_some());
+        assert!(!r.path.contains(&(12, 10)), "{:?}", r.path);
+        // the first step grid is not consulted by the wave itself: a stamp only there does not bend the route
+        let mut first2 = open_grid();
+        first2[12 * 128 + 10] = 0x3200001;
+        let mut w = Wave { cells: open_grid(), base: 1 };
+        assert!(w.local_step_second(&stat, 1, 0x3100001, &route, (10, 10), &first2, 1, false).path.contains(&(12, 10)));
+    }
+
+    #[test]
+    fn second_step_next_to_the_unit_asks_both_step_grids() {
+        // the look-ahead cell (11, 10) is next to the unit's cell (10, 10)
+        let route = [(10, 10), (11, 10)];
+        let stat = open_grid();
+        let mut w = Wave { cells: open_grid(), base: 1 };
+        let ok = w.local_step_second(&stat, 1, 7, &route, (10, 10), &open_grid(), 1, false);
+        assert_eq!((ok.next, ok.stop, ok.path.is_empty()), (Some((11, 10)), false, true));
+        // taken in the first step grid: no step, and (unlike 0x476870) no stop request
+        let mut taken = open_grid();
+        taken[11 * 128 + 10] = 0x3200001;
+        let mut w = Wave { cells: open_grid(), base: 1 };
+        assert_eq!(w.local_step_second(&stat, 1, 7, &route, (10, 10), &taken, 1, false), LocalStep::default());
+        // the Advancer's twin 0x4732f0 asks for the stop as well
+        let mut w = Wave { cells: open_grid(), base: 1 };
+        assert!(w.local_step_second(&stat, 1, 7, &route, (10, 10), &taken, 1, true).stop);
+        // taken in the second grid
+        let mut cells = open_grid();
+        cells[11 * 128 + 10] = 0x3200001;
+        let mut w = Wave { cells, base: 1 };
+        assert_eq!(w.local_step_second(&stat, 1, 7, &route, (10, 10), &open_grid(), 1, false), LocalStep::default());
+        // a stamp of the current search generation in the *static* grid only (value >= its base, < 0x1fffff) is not asked
+        // here, while 0x476870 would stop
+        let mut stat2 = open_grid();
+        stat2[11 * 128 + 10] = 5;
+        let mut w = Wave { cells: open_grid(), base: 1 };
+        assert_eq!(w.local_step_second(&stat2, 1, 7, &route, (10, 10), &open_grid(), 1, false).next, Some((11, 10)));
+        let mut w = Wave { cells: open_grid(), base: 1 };
+        assert!(w.local_step(&stat2, 1, 7, &route, (10, 10)).stop);
     }
 
     #[test]
@@ -418,6 +620,21 @@ mod tests {
 /// cells) and restored afterwards, like the unit's cell. Returns `None` when the target cannot be reached; `base` moves
 /// past the stamps.
 pub fn approach(cells: &mut [u32], base: &mut u32, dims: (i32, i32), unit: (i32, i32), target: (i32, i32), handle: u32, range: i32) -> Option<(i32, i32)> {
+    approach_shifted(cells, base, dims, unit, target, handle, range, 0)
+}
+
+/// The chase search for a target of handle type 4 (an Advancer, `0x478200`): the same search as [`approach`] over the air
+/// grid (`0x60ac38`, base `[0x49a368]`), with one quirk of the exe's unrolled code: for every cell of the 7 x 7 block that
+/// is saved and restored, the cell *three places earlier in the linear index* (`x * 128 + y - 3`) is the one that is freed
+/// when it holds the target's handle. So the strip y-6..y beside the block is freed (and never restored: a handle there
+/// stays cleared) while handle cells at y+1..y+3 are not freed at all (docs/pathfinding.md). Only walkers' handles would
+/// show it and the air grid holds none besides other Advancers, so real games rarely see the quirk.
+pub fn approach_air(cells: &mut [u32], base: &mut u32, dims: (i32, i32), unit: (i32, i32), target: (i32, i32), handle: u32, range: i32) -> Option<(i32, i32)> {
+    approach_shifted(cells, base, dims, unit, target, handle, range, 3)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn approach_shifted(cells: &mut [u32], base: &mut u32, dims: (i32, i32), unit: (i32, i32), target: (i32, i32), handle: u32, range: i32, free_shift: i32) -> Option<(i32, i32)> {
     let b = *base;
     let (w, h) = dims;
     let at = |x: i32, y: i32| (x * SIDE + y) as usize;
@@ -430,8 +647,10 @@ pub fn approach(cells: &mut [u32], base: &mut u32, dims: (i32, i32), unit: (i32,
             if x > -1 && x < w && y > -1 && y < h {
                 let i = at(x, y);
                 saved.push((i, cells[i]));
-                if cells[i] == handle {
-                    cells[i] = 0;
+                // the cell that is freed: the saved one (ground chase) or three cells before it (air chase)
+                let j = i as i32 - free_shift;
+                if j >= 0 && (j as usize) < cells.len() && cells[j as usize] == handle {
+                    cells[j as usize] = 0;
                 }
             }
         }
