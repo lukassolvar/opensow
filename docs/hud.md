@@ -32,7 +32,7 @@ Sprite arrays (loader `0x424800..0x4255..`, `0x45dab0(name, array, count)`): rad
   asteroid; 62x50, hot (31,26)). At level start the stock is added in the order kinds 30, 34, 31, 33, 32 (`0x41d894..`: the
   header order); later arrivals append, a pill at 0 stock is removed and the others move up. Pill n rests at x = 0x1f (31)
   (starts at -19 and slides at speed 5), y = 0x3c + 0x33 n (**60 + 51 n**); click rectangle (-30,-26)..(28,23).
-- Stock count in `panel2nu` digits (blit top-left) at the pill's x, y+12: one digit x+12, two digits x+10 / x+15, three
+- Stock count in `panel2nu` digits (file `__extras\\panel2nu.ps6`, with the `__` prefix) (blit top-left) at the pill's x, y+12: one digit x+12, two digits x+10 / x+15, three
   x+7 / x+12 / x+17, every digit shifted 1 px left when the ones digit is not 1 (`0x4543a2..0x4544e9`).
 ## Turret tabs (`0x4551f0..0x455500` build, `0x454e60` per tick)
 - Up to five widgets, `ikony` frame 25+tier-1 (91x42, hot (46,21)), added in tier order for every tier whose flag
@@ -53,12 +53,12 @@ Sprite arrays (loader `0x424800..0x4255..`, `0x45dab0(name, array, count)`): rad
 - New entry: text, x = 10 - text width, y = -0x2a (-42, relative to the bottom edge), life 0x1e0 = 480; inserted at the
   front of the list (`0x4038f0`); every existing entry gets `+0x14` (20) px of pending push (`0x4032b5`). Per tick:
   x grows 3 px up to 10 (slide in from the left); then life--, and pending push moves y down by a table value
-  (`[0x552ba8 + [0x517b10+i*4]]`, filled at run time: speed not decoded, `play.rs` assumes 1 px/tick); an entry is removed
+  (`[0x552ba8 + [0x517b10+i*4]]` = row 30 of the step table `0x5524a0` (60 bytes per row, written only by the table builder `0x436e01`): `steps_at(30, i)`, i.e. 30 px per second; `play.rs::message_pose` uses it); an entry is removed
   when its life ends or y > 0 (bottom edge). Drawn newest last at (x, y + H) with GDI text colour (255,243,148) and shadow
   (74,4,0) at +2,+2 (`0x466f40` args 0xff,0xf3,0x94 / 0x4a,4,0).
 ## Info box (`0x43b3c0` draw, `0x43dfd0` mode switch, `0x43cb30` tick, `0x43cf20` page text; `infobox.rs` / `formats::infobox`)
 - Shown for the **selected own building** (`0x455b3b`: building with the player's selected flag) and for the **hovered
-  icon** (`0x454d30` -> `0x43cde0`: tab, air pill, production slot icon; the kind = the icon's kind, a locked slot shows
+  production slot icon** (`0x454d30` -> `0x43cde0(slot index, kind, locked)`: only the slot loop `0x454ba0` stores the slot index in `[ebp-0x10]`; the turret tab loop `0x454b56` and the air pill loop `0x454cf0` only set the hovered id `[hud+4]`, the index stays -1 and `0x43cde0` hides the box - confirmed by footage of the original: **no info box for turret tabs or air pills**; the kind = the slot's unit kind, a locked slot shows
   "No Info Available" typed instead, see mode 3). Not for selected units. The widget (`+0x8a0`) rests at x = -65 (right anchored) and y = 99
   with hot (65,99): the 130x173 frame fills the top-right corner over the radar; hidden at y = -91, slide 13 px/tick.
 - Modes (`[+0x24]`): 0 hidden; 1 sliding in, static `infobox` frame 2 (entering from 0/6 plays sound 51); 2 blue static
@@ -88,8 +88,11 @@ Sprite arrays (loader `0x424800..0x4255..`, `0x45dab0(name, array, count)`): rad
 ## Which building is shown (`0x455ab0`)
 The first of the player's own buildings with the selected flag; if none, the building under the pointer (`0x418da0`, the map cell
 grid), whoever owns it. Its slots (all kinds with slot data: factories, air base, gold mine, research lab, wind) and its info page
-are shown; bars skip neutral owners and kinds 105-107, buying needs an own building. `play.rs` lets a click select any building
-and shows the hovered one while nothing is selected (`shown_building`).
+are shown; bars skip neutral owners and kinds 105-107, buying needs an own building. **Only the selected own building gets the
+info page**: `0x455b3b` (the selected branch) calls `0x43ccc0` / `0x43dfd0(1)` / `0x43cf20`, the hover branch (`0x455b90`) hides the
+box (`0x43dfd0(6)`) and only fills the slots. So pointing at an enemy building shows its production without clicking and without the
+info box; clicking an enemy building selects nothing (`0x417b9a` tests `[b+0x8c] == player`). `play.rs`: `selected_building` (info box) and
+`hovered_building`; `shown_building` = selected, else hovered (slots, bars).
 
 ## Production slot icons (selected building; draw `0x4541b0` loop `0x4542a6`, set-up `0x455c10..0x455d91`, click `0x454ba0`)
 - Up to five `ikony` icons (frame = the slot's kind, hot (28,30), click rect x -26..27, y -29..26) in a column at x = W-28,

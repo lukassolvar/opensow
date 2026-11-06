@@ -55,8 +55,9 @@ pub fn huff_decode(data: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Compresses like the exe does (a plain Huffman tree; tie-breaking differs, so the bytes are not identical to the
-/// exe's output but decode the same). Used by the tests.
+/// Compresses like the exe's `CHuffcomp::Compress` (`0x439240`): the same tree, node order, code bits and word packing, so the
+/// bytes are identical to the exe's (the exe's tie-breaking, a scan with strict `<` over the node slots, picks the lowest
+/// `(frequency, node index)` pair, which is what this sort does; `huffman_tree_matches_a_literal_port_of_the_exes_scan` checks it).
 pub fn huff_encode(data: &[u8]) -> Vec<u8> {
     let mut freq = [0u32; 256];
     for &b in data {
@@ -181,11 +182,16 @@ pub struct StateHead {
     pub level: u32,
     /// `[0x71c0f4]`: index into the lockstep random table (docs/rng, `rng.rs`).
     pub rng_index: u32,
+    /// `[0x5baafc]`: set to 1 by the new-game reset `0x422b00`, read nowhere else (`0x43a640` / `0x43ab40` only index the building
+    /// slot table `0x5bab00` through this neighbouring address). Meaning not known.
     pub v_5baafc: u32,
     /// `[0x49a339] == 1`.
     pub flag_49a339: bool,
+    /// `[0x5baad8]`: the black radar toggle (docs/hud.md).
     pub v_5baad8: u32,
+    /// `[0x5baadc]`: tick accumulator of the radar update `0x454610` (adds the frame's ticks `[0x552494]` each frame).
     pub v_5baadc: u32,
+    /// `[0x5baac4]`, `[0x5baac8]`: the mission countdown's minutes and seconds (docs/ai.md).
     pub v_5baac4: u32,
     pub v_5baac8: u32,
     /// `[0x5baa99] == 1`.
@@ -235,39 +241,70 @@ pub const PLAYER_BLOCK: [usize; 4] = [1000, 300, 500, 30];
 /// Section tags the exe writes (as MFC strings) after each group of objects and checks on load.
 pub const TAGS: [&str; 5] = ["P2v3", "aS2n", "Ua63", "B17u", "Checksum"];
 
-/// The map object (`0x459960`, global `0x6bf980`): the level path, the 128-wide cell layers and a list of entries.
+/// The map object (`0x459960`, global `0x6bf980`, class size `0x4c0cc`): the version tag, player 0's scroll position, the
+/// 128-wide cell layers, per-player camera records and the sprite list. A shipped `.map` is the same stream with no camera
+/// records and no items (docs/formats.md), so `MapState::parse` reads level files too.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MapState {
-    /// `0x71cec8`, the level path as the loader got it.
-    pub level: String,
-    /// `[+0x20]`, `[+0x2c]`.
-    pub v20: u32,
-    pub v2c: u32,
-    /// `[+0x40]` columns (inner loop) and `[+0x44]` rows (outer loop); cell `(i, j)` is stored at index `j * 128 + i`.
+    /// The version tag, `"VER7"` (the CString at `0x71cec8`; the loader shows "Wrong map version!!!" when it differs).
+    pub version: String,
+    /// Player 0's scroll position in pixels, `[+0x20]` and `[+0x2c]` (the other players' are reset to 0 on load).
+    pub scroll_x: u32,
+    pub scroll_y: u32,
+    /// `[+0x40]` columns (inner loop) and `[+0x44]` rows (outer loop); cell `(x, y)` is stored at memory index `x * 128 + y`.
     pub width: u32,
     pub height: u32,
     pub cells: Vec<MapCell>,
-    /// Three per-player records: `(flag +4+k, [+8+4k], [+0x14+4k], [+0x54+4k], [+0x48+4k], [+0x60+4k], [+0x6c+4k])`.
-    pub players: Vec<(bool, [u32; 6])>,
+    /// The three per-player camera records; empty in level files (marker byte 0).
+    pub cameras: Vec<CameraState>,
     pub items: Vec<Object>,
 }
 
-/// One map cell, in the order the exe writes it: `u16 [+0xcc]`, `u32 [+0x170cc]`, `u32 [+0x180cc]`,
-/// `u8 [+0x280cc]`, `u8 [+0x2c0cc]`, `u8 [+0x300cc]`, `u32 [+0x340cc]` (indices `j * 128 + i`).
+/// One map cell, in the order the exe writes it (17 bytes). Offsets are in the map object; see `map.rs` for the file view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MapCell {
-    pub tile: u16,
-    pub a: u32,
-    pub b: u32,
-    pub c: [u8; 3],
-    pub d: u32,
+    /// `[+0xcc]`: `(x << 8) | y`, written by the level editor and never read by the game.
+    pub coord: u16,
+    /// `[+0x80cc]`: the walkers' obstacle grid. `0xFFFFFD` terrain, a building's handle where it stands, else 0. The pathfinder
+    /// copies it into the wave and unit grids (`0x458230`, `0x4582a0`, `0x458360`, `0x458420`).
+    pub ground: u32,
+    /// `[+0x180cc]`: the air layer's terrain (`0xFFFFFD` on the outer ring and no-fly areas); copied by `0x458190`, `0x4580d0`, `0x458010`.
+    pub air: u32,
+    /// `[+0x280cc]`: always 0 (its only writer, `0x436130`, ANDs it with a mask).
+    pub reserved: u8,
+    /// `[+0x2c0cc]`: no scorch decal, flying piece or smoke puff lands on the cell (`map::Cell::no_marks`).
+    pub no_marks: u8,
+    /// `[+0x300cc]`: buildings cannot be placed here; a footprint sets it and its destruction clears it (`map::Cell::no_build`).
+    pub no_build: u8,
+    /// `[+0x340cc]`: the handle of the building covering the cell (mouse picking, damage, the "near an own building" test of placement).
+    pub building: u32,
+}
+
+/// A player's camera record (`0x459960` writes `bool +4+k`, then six `u32`; all in pixels or ticks):
+/// the smooth scroll `0x4588c0(x, y, k)` aims the view at `target` (the view's top-left, clamped to the map minus the screen)
+/// until `0x458bb0` arrives, and the screen shake (`0x458620`, docs/options.md "QUAKE") keeps its epicentre, remaining ticks and
+/// step timer here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CameraState {
+    /// `+4+k`: a scroll-to target is active.
+    pub scroll_to: bool,
+    /// `+8+4k`, `+0x14+4k`.
+    pub target_x: u32,
+    pub target_y: u32,
+    /// `+0x54+4k`: shake ticks left (half the duration given to `0x458620`).
+    pub quake_left: u32,
+    /// `+0x48+4k`: shake step divider, reset to 1 whenever it runs out.
+    pub quake_timer: u32,
+    /// `+0x60+4k`, `+0x6c+4k`: the epicentre.
+    pub quake_x: u32,
+    pub quake_y: u32,
 }
 
 impl MapState {
     pub fn parse(r: &mut Reader) -> Result<MapState> {
-        let level = mfc_string(r, "level path")?;
-        let v20 = r.u32("+0x20")?;
-        let v2c = r.u32("+0x2c")?;
+        let version = mfc_string(r, "map version")?;
+        let scroll_x = r.u32("+0x20")?;
+        let scroll_y = r.u32("+0x2c")?;
         let width = r.u32("width")?;
         let height = r.u32("height")?;
         if width > 128 || height > 128 {
@@ -276,24 +313,30 @@ impl MapState {
         let mut cells = Vec::with_capacity((width * height) as usize);
         for _ in 0..width * height {
             cells.push(MapCell {
-                tile: r.u16("tile")?,
-                a: r.u32("cell a")?,
-                b: r.u32("cell b")?,
-                c: [r.u8("cell c0")?, r.u8("cell c1")?, r.u8("cell c2")?],
-                d: r.u32("cell d")?,
+                coord: r.u16("coord")?,
+                ground: r.u32("ground")?,
+                air: r.u32("air")?,
+                reserved: r.u8("reserved")?,
+                no_marks: r.u8("no marks")?,
+                no_build: r.u8("no build")?,
+                building: r.u32("building")?,
             });
         }
-        if r.u8("marker")? != 1 || r.u32("player count")? != 3 {
-            return Err(Error::Invalid("map block marker".into()));
-        }
-        let mut players = Vec::new();
-        for _ in 0..3 {
-            let flag = r.u8("player flag")? != 0;
-            let mut v = [0u32; 6];
-            for x in &mut v {
-                *x = r.u32("player word")?;
+        // The load code reads this byte and only a 1 means "player records follow"; a level file has 0 and goes straight on
+        // to the item count (it then clears the three records).
+        let mut cameras = Vec::new();
+        if r.u8("camera marker")? == 1 {
+            if r.u32("player count")? != 3 {
+                return Err(Error::Invalid("map block marker".into()));
             }
-            players.push((flag, v));
+            for _ in 0..3 {
+                let scroll_to = r.u8("scroll flag")? != 0;
+                let mut v = [0u32; 6];
+                for x in &mut v {
+                    *x = r.u32("camera word")?;
+                }
+                cameras.push(CameraState { scroll_to, target_x: v[0], target_y: v[1], quake_left: v[2], quake_timer: v[3], quake_x: v[4], quake_y: v[5] });
+            }
         }
         let n = r.u32("map item count")?;
         if n > 1 << 20 {
@@ -303,7 +346,44 @@ impl MapState {
         for _ in 0..n {
             items.push(Object::parse(r, Class::MapItem)?);
         }
-        Ok(MapState { level, v20, v2c, width, height, cells, players, items })
+        Ok(MapState { version, scroll_x, scroll_y, width, height, cells, cameras, items })
+    }
+
+    /// The stream the exe writes (`0x459960`, store branch). `None` only for a camera list that is neither empty nor three
+    /// records; a state with cameras writes the savegame form (marker 1, `u32 3`), without them the level-file form (marker 0).
+    pub fn to_bytes(&self) -> Option<Vec<u8>> {
+        if !self.cameras.is_empty() && self.cameras.len() != 3 {
+            return None;
+        }
+        let mut out = Vec::new();
+        put_mfc_string(&mut out, &self.version);
+        for v in [self.scroll_x, self.scroll_y, self.width, self.height] {
+            out.extend(v.to_le_bytes());
+        }
+        for c in &self.cells {
+            out.extend(c.coord.to_le_bytes());
+            out.extend(c.ground.to_le_bytes());
+            out.extend(c.air.to_le_bytes());
+            out.extend([c.reserved, c.no_marks, c.no_build]);
+            out.extend(c.building.to_le_bytes());
+        }
+        if self.cameras.is_empty() {
+            out.push(0);
+        } else {
+            out.push(1);
+            out.extend(3u32.to_le_bytes());
+            for c in &self.cameras {
+                out.push(c.scroll_to as u8);
+                for v in [c.target_x, c.target_y, c.quake_left, c.quake_timer, c.quake_x, c.quake_y] {
+                    out.extend(v.to_le_bytes());
+                }
+            }
+        }
+        out.extend((self.items.len() as u32).to_le_bytes());
+        for it in &self.items {
+            it.write(&mut out);
+        }
+        Some(out)
     }
 }
 
@@ -323,7 +403,9 @@ pub struct State {
     pub players: Vec<Object>,
     pub stocks: Vec<Object>,
     pub params: Vec<Object>,
-    /// The 313 filler bytes of `0x456ac0` (random bytes around a checksum of the object).
+    /// The campaign record `0x456ac0` writes (`CPassedLevels`): the 4-byte record header (version 1, magic `0x1d6c`) and 313 bytes
+    /// (random bytes around a checksum and the 50 obfuscated level states), exactly as `config::PassedLevels::write` makes them
+    /// and `PassedLevels::parse` reads them. Kept as bytes so a stream is reproduced exactly.
     pub signature: Vec<u8>,
     pub speech: Vec<Object>,
     /// 128x128 decal flags, index `x * 128 + y`.
@@ -337,8 +419,9 @@ pub struct State {
     pub clouds: Vec<Object>,
 }
 
-/// Length of the `0x456ac0` block: 79 + 20 random bytes, 1 balancing byte, 50 x 2 and 113.
-pub const SIGNATURE_LEN: usize = 79 + 20 + 1 + 100 + 113;
+/// Length of the `0x456ac0` record: header (4) + 79 + 20 random bytes, 1 balancing byte, 50 x 2 and 113 (found by
+/// `scripts/verify_save_state.py`: the earlier notes counted 313 bytes and left the record header out).
+pub const SIGNATURE_LEN: usize = 4 + 79 + 20 + 1 + 100 + 113;
 
 fn tag(r: &mut Reader, want: &str) -> Result<()> {
     let got = mfc_string(r, "tag")?;
@@ -362,6 +445,16 @@ fn slots(r: &mut Reader, n: usize, class: Class) -> Result<(u32, Vec<(usize, Obj
 impl State {
     /// `speech_objects` is `[0x575720] + 1` (a run-time global that is not saved; 1 for a single-player game).
     pub fn parse(data: &[u8], speech_objects: usize) -> Result<State> {
+        let (state, used) = State::parse_prefix(data, speech_objects)?;
+        if used != data.len() {
+            return Err(Error::Invalid(format!("{} bytes after the checksum tag", data.len() - used)));
+        }
+        Ok(state)
+    }
+
+    /// Like [`State::parse`] but allows bytes after the `Checksum` tag (the exe's loader never reads them, so a file can carry
+    /// an extension there, see `saveui.rs`); also returns the length of the stream.
+    pub fn parse_prefix(data: &[u8], speech_objects: usize) -> Result<(State, usize)> {
         let head = StateHead::parse(data)?;
         let mut r = Reader::at(data, head.len);
         let mut player_words = Vec::new();
@@ -439,10 +532,8 @@ impl State {
             clouds.push(Object::parse(&mut r, Class::Cloud)?);
         }
         tag(&mut r, TAGS[4])?;
-        if r.remaining() != 0 {
-            return Err(Error::Invalid(format!("{} bytes after the checksum tag", r.remaining())));
-        }
-        Ok(State {
+        let used = data.len() - r.remaining();
+        Ok((State {
             head,
             player_words,
             player_arrays,
@@ -460,7 +551,94 @@ impl State {
             squads,
             decals,
             clouds,
-        })
+        }, used))
+    }
+}
+
+fn put_slots(out: &mut Vec<u8>, n: usize, group: &(u32, Vec<(usize, Object)>)) {
+    out.extend(group.0.to_le_bytes());
+    let mut it = group.1.iter().peekable();
+    for i in 0..n {
+        match it.peek() {
+            Some((idx, _)) if *idx == i => {
+                out.push(1);
+                it.next().unwrap().1.write(out);
+            }
+            _ => out.push(0),
+        }
+    }
+}
+
+impl State {
+    /// The decompressed stream the exe's store branch (`0x42a400`) writes: the inverse of [`State::parse`]. `None` when the
+    /// state cannot be written (a camera list that is not 3 long, or a slot index out of range).
+    pub fn to_bytes(&self) -> Option<Vec<u8>> {
+        let mut out = self.head.to_bytes();
+        for p in 0..3 {
+            for w in self.player_words[p] {
+                out.extend(w.to_le_bytes());
+            }
+            for (a, n) in self.player_arrays[p].iter().zip(PLAYER_BLOCK) {
+                let mut a = a.clone();
+                a.resize(n, 0);
+                out.extend(a);
+            }
+        }
+        for pair in &self.lists {
+            for l in pair {
+                out.extend((l.len() as u32).to_le_bytes());
+                for v in l {
+                    out.extend(v.to_le_bytes());
+                }
+            }
+        }
+        out.extend(self.map.to_bytes()?);
+        for o in self.players.iter().chain(&self.stocks).chain(&self.params) {
+            o.write(&mut out);
+        }
+        out.extend(&self.signature);
+        put_mfc_string(&mut out, TAGS[0]);
+        for o in &self.speech {
+            o.write(&mut out);
+        }
+        put_mfc_string(&mut out, TAGS[1]);
+        let mut flags = self.decal_flags.clone();
+        flags.resize(128 * 128, 0);
+        out.extend(flags);
+        for g in &self.units {
+            if g.1.iter().any(|x| x.0 >= SLOTS[0]) {
+                return None;
+            }
+            put_slots(&mut out, SLOTS[0], g);
+        }
+        put_mfc_string(&mut out, TAGS[2]);
+        for g in &self.buildings {
+            if g.1.iter().any(|x| x.0 >= SLOTS[1]) {
+                return None;
+            }
+            put_slots(&mut out, SLOTS[1], g);
+        }
+        put_mfc_string(&mut out, TAGS[3]);
+        for g in &self.bullets {
+            if g.1.iter().any(|x| x.0 >= SLOTS[2]) {
+                return None;
+            }
+            put_slots(&mut out, SLOTS[2], g);
+        }
+        for g in &self.squads {
+            if g.1.iter().any(|x| x.0 >= SLOTS[3]) {
+                return None;
+            }
+            put_slots(&mut out, SLOTS[3], g);
+        }
+        for list in [&self.decals, &self.clouds] {
+            out.extend((list.len() as u32).to_le_bytes());
+            for o in list.iter() {
+                o.write(&mut out);
+            }
+        }
+        put_mfc_string(&mut out, TAGS[4]);
+        Some(out)
     }
 }
 
@@ -585,6 +763,78 @@ impl StateHead {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exe's merge loop (`0x439550..0x43960c`) ported literally: slots `A` (second smallest) and `B` (smallest) are tracked while
+    /// scanning all nodes with a non-zero weight; a new node gets `(left = B, right = A)`.
+    fn exe_tree(freq: &[u32; 256]) -> Vec<(u8, u16, u16)> {
+        let mut w: Vec<u32> = Vec::new();
+        let mut nodes: Vec<(u8, u16, u16)> = Vec::new();
+        for (sym, &f) in freq.iter().enumerate() {
+            if f > 0 {
+                w.push(f);
+                nodes.push((sym as u8, 0xffff, 0xffff));
+            }
+        }
+        loop {
+            // the sentinel is node 0x1ff with weight 0xffffffff
+            let (mut a, mut b) = (usize::MAX, usize::MAX);
+            let wt = |i: usize, w: &Vec<u32>| if i == usize::MAX { u32::MAX } else { w[i] };
+            for i in 0..w.len() {
+                if w[i] == 0 {
+                    continue;
+                }
+                if w[i] < wt(b, &w) {
+                    a = b;
+                    b = i;
+                } else if w[i] < wt(a, &w) {
+                    a = i;
+                }
+            }
+            if a == usize::MAX {
+                break;
+            }
+            let sum = w[a] + w[b];
+            w[a] = 0;
+            w[b] = 0;
+            w.push(sum);
+            nodes.push((0, b as u16, a as u16));
+        }
+        nodes
+    }
+
+    #[test]
+    fn huffman_tree_matches_a_literal_port_of_the_exes_scan() {
+        let mut seed = 99u32;
+        for round in 0..200 {
+            // few distinct weights so that ties are everywhere
+            let mut data = Vec::new();
+            for _ in 0..(5 + round % 40) {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                let sym = ((seed >> 16) % (3 + round as u32 % 30)) as u8;
+                for _ in 0..1 + (seed >> 8) % 3 {
+                    data.push(sym);
+                }
+            }
+            let mut freq = [0u32; 256];
+            for &b in &data {
+                freq[b as usize] += 1;
+            }
+            if freq.iter().filter(|&&f| f > 0).count() < 2 {
+                continue;
+            }
+            let tree = exe_tree(&freq);
+            let enc = huff_encode(&data);
+            // the encoder's stream: u32 length, u16 root, then nodes from the root down to 0
+            let root = u16::from_le_bytes([enc[4], enc[5]]) as usize;
+            assert_eq!(root + 1, tree.len(), "round {round}");
+            for (k, i) in (0..=root).rev().enumerate() {
+                let o = 6 + 5 * k;
+                let got = (enc[o], u16::from_le_bytes([enc[o + 1], enc[o + 2]]), u16::from_le_bytes([enc[o + 3], enc[o + 4]]));
+                assert_eq!(got, tree[i], "round {round} node {i}");
+            }
+            assert_eq!(huff_decode(&enc).unwrap(), data);
+        }
+    }
 
     #[test]
     fn huffman_round_trip() {
@@ -761,6 +1011,8 @@ mod tests {
         assert_eq!(st.stocks[0].get(2 << 16), Some(7));
         assert_eq!(st.speech[0].orders[0].strings, vec!["01-game-saved".to_string()]);
         assert_eq!(st.decals.len(), 1);
+        // the writer is the inverse of the walker, byte for byte
+        assert_eq!(st.to_bytes().unwrap(), f);
         assert!(State::parse(&f[..f.len() - 1], 1).is_err());
         assert!(State::parse(&f, 2).is_err());
     }

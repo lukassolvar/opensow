@@ -106,7 +106,8 @@ pub static EXTRAS: &[Extra] = &[
 /// The extra that owns the sprite array element at `addr` and the frame index of that element (`addr` may point into the
 /// array: the shell sprites use `gula2` frames 1 and 2 at `0x5e6694` / `0x5e6698`).
 pub fn extra_at(addr: u32) -> Option<(&'static Extra, usize)> {
-    EXTRAS.iter().find(|e| addr >= e.addr && addr < e.addr + 4 * e.slots as u32).map(|e| (e, ((addr - e.addr) / 4) as usize))
+    // the frame caps overlap (`sizer` has 9 slots and reaches into `plasma`): the array that starts closest below the address owns it
+    EXTRAS.iter().filter(|e| addr >= e.addr && addr < e.addr + 4 * e.slots as u32).max_by_key(|e| e.addr).map(|e| (e, ((addr - e.addr) / 4) as usize))
 }
 
 /// How a sprite is combined with the picture: the exe's software blitters, all exact (docs/effects.md; emulation-checked by
@@ -150,6 +151,7 @@ impl Blit {
     }
 
     /// One RGB565 pixel: `dst` combined with the sprite pixel `src`.
+    #[inline(always)]
     pub fn apply565(self, dst: u16, src: u16) -> u16 {
         let (dr, dg, db) = ((dst >> 11) as i32, (dst >> 5 & 63) as i32, (dst & 31) as i32);
         let (sr, sg, sb) = ((src >> 11) as i32, (src >> 5 & 63) as i32, (src & 31) as i32);
@@ -268,6 +270,11 @@ pub struct BulletAnim {
 }
 
 impl BulletAnim {
+    /// `[frame, count, countdown, delay]` as `new` takes them (`[bullet+0x2670..0x267c]`, kept by a savegame).
+    pub fn parts(&self) -> [i32; 4] {
+        [self.frame, self.count, self.countdown, self.delay]
+    }
+
     pub fn new(anim: [i32; 4]) -> BulletAnim {
         BulletAnim { frame: anim[0], count: anim[1], countdown: anim[2], delay: anim[3] }
     }
@@ -439,20 +446,40 @@ pub fn smoke_puff(variant: u8, extra: u8) -> AnimSpec {
     AnimSpec { array: 0x5e6910 + 0x28 * variant as u32, from: 0, to: 9, period: 5, repeat: 5 + extra.min(12), mode: 8 }
 }
 
-/// Smoke puffs a landing bullet makes at random offsets of -10..9 px (impact function): types 17 and 18 always make two (when
-/// the ground cell is free); types 13 to 16 depend on a lockstep roll `random(3)`: on 1, types 15 and 16 make three; on 0
-/// or 2, types 13 to 16 make one.
-pub fn impact_smoke(ty: u8, roll_of_three: u32) -> u8 {
+/// Smoke puffs a landing bullet makes, as `(lockstep, single)` counts, given the lockstep roll `random(3)` of the generic
+/// impact tail and whether the cell is free of terrain, buildings and the map's "no marks" layer (`marks_free`; the caller
+/// makes none at all on a blocked cell). Type 17 and 18 hits make two puffs behind the `marks_free` test (`0x40fc0a`,
+/// `0x40fe18`). In the generic tail (`0x4104da..0x4106fb`): on roll 1 a type 15/16 hit makes three puffs with offsets from the
+/// lockstep generator (`0x410510`, `0x41059b`, `0x410629`) and falls through to the single puff below, which every other
+/// hit of types 13 to 16 reaches directly (`0x4106ba`: ground free and no-marks clear, offsets from the visual generator).
+pub fn impact_smoke(ty: u8, roll_of_three: u32, marks_free: bool) -> (u8, u8) {
     match ty {
-        17 | 18 => 2,
-        15 | 16 if roll_of_three == 1 => 3,
-        13..=16 if roll_of_three != 1 => 1,
-        _ => 0,
+        17 | 18 => (0, 2 * marks_free as u8),
+        13..=16 => (if roll_of_three == 1 && ty >= 15 { 3 } else { 0 }, marks_free as u8),
+        _ => (0, 0),
     }
 }
 
 /// Puffs a destroyed ground unit makes (`0x46af25`, `0x46afb6`, `0x46b047`): three, at random offsets of -10..9 px.
 pub const UNIT_DEATH_PUFFS: u8 = 3;
+
+/// Steps a destroyed unit stays in its slot (`unit+0x90`, set to 430 at `0x46a5a9`). The dead unit (`unit+0x2c == 1`) re-stamps
+/// its cell in the unit grid with the terrain marker `0xFFFFFD` every step (`0x46dfeb` air, `0x46e004` ground), so the corpse
+/// blocks its cell, and `0x46b600` counts the timer down; the slot is freed when it goes below 0.
+pub const CORPSE_LIFE: i32 = 430;
+/// When the timer drops below this the final blasts go off, once (`0x46b649`, flag `unit+0x98`).
+pub const CORPSE_BLAST_BELOW: i32 = 30;
+/// The final blasts by death variant `unit+0x94` (`0x46b652`: variant 4 enters at `0x46b67a`, 3 at `0x46b6fe`, 2 at `0x46b782`,
+/// the chain falls through): `0x405240` blast sizes in order, each at `(x - 15 + rand(30), y - 15 + rand(30))`, the first
+/// lockstep draw for y, the second for x. Any other variant (the kinds without debris class) makes none.
+pub fn corpse_blasts(variant: u32) -> &'static [u8] {
+    match variant {
+        2 => &[2, 2],
+        3 => &[2, 2, 2],
+        4 => &[3, 2, 2, 2],
+        _ => &[],
+    }
+}
 
 /// Clouds ([`UNIT_CLOUD`]) a destroyed unit makes, the Advancer included (`0x46a693`, `a735`, `a84c`, `a8ee` and, for kind 40,
 /// `a980`, `aa22`, `aac4`, `ab66`). Each is drawn at `(x - 15 + rand(30), y - 15 + hover + rand(30))` with two lockstep draws,
@@ -472,8 +499,24 @@ pub struct Debris {
     pub spread: i32,
     /// Stored in the bullet at `+0x265c`.
     pub bullet_param: u32,
-    /// Loaded into a local that the code overwrites before it is read (`0x46ad04`): no effect.
+    /// The corpse's death variant, stored at `unit+0x94` (`0x46b0af`; 2, 3 or 4 by tier) and used by [`corpse_blasts`].
     pub wreck_param: u32,
+}
+
+/// A destroyed building's destruction animation (`0x409b60`, called every tick while the building's state `[b+0x104]` is 2).
+/// Each call runs [`DESTRUCTION_PASSES`] x ticks-this-frame passes. A pass counts the debris counter `[b+0x110]` (1 at the start) down;
+/// when it reaches 0 the animation counter `[b+0x10c]` (= `[b+0x108]`, [`destruction_bursts`]) is decremented, and if that left
+/// something the burst is thrown (docs/projectiles.md) and `[b+0x110]` is set to [`BURST_GAP`] + lockstep `rand(BURST_JITTER)`.
+/// When the animation counter reaches 0 instead, the animation ends (stats, then the capture or removal `0x43ab40`). So a building
+/// bursts four times (about 3 s), a turret once (about 0.75 s), and the building stays on the map, dead, until then.
+pub const DESTRUCTION_PASSES: i32 = 2;
+pub const BURST_GAP: i32 = 90;
+pub const BURST_JITTER: u32 = 15;
+
+/// `[b+0x108]`, set by the building constructor `0x40a330`: 5 for the buildings (kinds 100..=108, default `0x40a381`), 2 for the turrets
+/// (kinds 25..=29, cases 0..=2 of the byte table `0x40af64`, `0x40a93f`). Bursts thrown = this minus 1.
+pub fn destruction_bursts(kind_id: i32) -> i32 {
+    if (25..=29).contains(&kind_id) { 2 } else { 5 }
 }
 
 /// Strength of a flying piece (argument 2 of `0x411dc0`, pushed as `0x28` at `0x46ae04`). The generic impact tail (`0x410881`) calls
@@ -594,6 +637,41 @@ pub fn flame_trail(ty: u8) -> Option<AnimSpec> {
     SPAWNS.iter().find(|s| s.site == FLAME_TRAIL_SITE).map(|s| s.spec)
 }
 
+/// The blue streak of bullet type 27 (the special tier 1 and the walker 5W1, no sprite of their own in the draw function): the
+/// same per-step counter as the flamers (`0x411bc2: cmp eax, 0x1b`, interval 5) drops an AnimSprite `bodky_b` frames 4..6, period 1,
+/// repeated 3 times, additive (call site `0x411c2d`) at the bullet's position. Pushes: flag 1, repeat 3, to 6, from 4, array, period 1.
+pub const SPARK_TRAIL_SITE: u32 = 0x411c2d;
+
+/// The spark bullet type `ty` drops every `interval` path steps, see [`SPARK_TRAIL_SITE`].
+pub fn spark_trail(ty: u8) -> Option<AnimSpec> {
+    if ty != 27 {
+        return None;
+    }
+    SPAWNS.iter().find(|s| s.site == SPARK_TRAIL_SITE).map(|s| s.spec)
+}
+
+/// The beam of the Advancer's gun (bullet type 31, speed 600, no sprite in the draw function `0x410a30`): the flight step
+/// (`0x411b0c: cmp eax, 0x1f`) counts `[+0x264c]` down once per path step (the constructor starts it at 2 and the shared tail
+/// copies it to `[+0x2650]`, the reload) and drops an AnimSprite at the bullet's position: array `0x5e6b80 + 80 * [+0x268c]`
+/// (`0x411b6d..0x411b7c`), frames 0..1, period 1, repeated 15 times, additive (call site `0x411b8a`; pushes: flag 1, repeat 15,
+/// to 1, from 0, array, period 1). The constructor (`0x412240`, `[+0x268c] = 2 * (player != 0) + 1`) picks the colour: the
+/// local player's gun (player 0) draws `bodky_b` (blue), every other side `bodky_g` (green). Chained along the path they form
+/// the blue or green streak between the Advancer and its target; the landing step makes none.
+pub const GUN_TRAIL_SITE: u32 = 0x411b8a;
+/// `extras\bodky_r`, the first of the four colour arrays (red, blue, yellow, green) that follow each other 80 bytes apart.
+pub const BODKY_ARRAYS: u32 = 0x5e6b80;
+pub const BODKY_STRIDE: u32 = 80;
+
+/// The spark the Advancer gun's bullet (type 31) of `owner` (0 = player 0, anything else = the other sides) drops every
+/// `projectile::bullet_type(31).interval` path steps, see [`GUN_TRAIL_SITE`].
+pub fn gun_trail(ty: u8, owner: i32) -> Option<AnimSpec> {
+    if ty != 31 {
+        return None;
+    }
+    let colour = 2 * (owner != 0) as u32 + 1;
+    Some(AnimSpec { array: BODKY_ARRAYS + BODKY_STRIDE * colour, from: 0, to: 1, period: 1, repeat: 15, mode: 6 })
+}
+
 /// The smoke a flying shell leaves (flight step `0x411220`, branches `0x411513` type 1, `0x4115d1` type 24, `0x411695` type 25,
 /// `0x411759` type 3, `0x41181b` type 4): once per path step the counter `[+0x264c]` (the type's interval at the start: 8 for types
 /// 1, 3 and 4, 0 for the meteors, so those drop one at once) is decremented, and at 0 it reloads with [`Trail::reload`] and an
@@ -639,6 +717,7 @@ pub static SPAWNS: &[Spawn] = &[
     sp(0x411721, 0x5ea1c0, 0, 42, 1, "meteor_small trail: meteor_small_smoke"),
     spm(0x4117e3, 0x5e6788, 4, 32, 2, 14, "missile smoke, later frames"),
     spm(0x4118aa, 0x5e6788, 0, 32, 2, 14, "missile smoke, all frames"),
+    Spawn { site: SPARK_TRAIL_SITE, spec: AnimSpec { array: 0x5e6bd0, from: 4, to: 6, period: 1, repeat: 3, mode: 6 }, what: "bullet type 27 (1S, walker 5W1) trail: a bodky_b spark, every interval path steps" },
     sp(0x411952, 0x5e6230, 16, 22, 5, "flamer bullet (types 8, 9) trail puff: blast_verysmall tail frames"),
     sp(0x411ada, 0x71c548, 0, 14, 1, "menu light flash (bullet type 32)"),
     Spawn { site: 0x411c2d, spec: AnimSpec { array: 0x5e6bd0, from: 4, to: 6, period: 1, repeat: 3, mode: 6 }, what: "bodky_b spark (three passes)" },
@@ -694,6 +773,8 @@ mod tests {
         for (i, a) in EXTRAS.iter().enumerate() {
             assert!(EXTRAS[i + 1..].iter().all(|b| b.addr != a.addr), "{} shares its address", a.name);
         }
+        let (e, i) = extra_at(0x5e68d4).unwrap();
+        assert_eq!((e.name, i), ("__extras\\plasma", 0), "the plasma bullets are not frames of sizer");
         let (e, i) = extra_at(0x5e6694).unwrap();
         assert_eq!((e.name, i), ("__extras\\gula2", 1));
     }
@@ -749,10 +830,14 @@ mod tests {
     fn smoke_and_decals() {
         assert_eq!(smoke_puff(1, 0).array, 0x5e6938);
         assert_eq!(smoke_puff(0, 12).len(), 9 * 17);
-        assert_eq!(impact_smoke(15, 1), 3);
-        assert_eq!(impact_smoke(15, 0), 1);
-        assert_eq!(impact_smoke(13, 1), 0);
-        assert_eq!(impact_smoke(5, 2), 0);
+        assert_eq!(impact_smoke(15, 1, true), (3, 1));
+        assert_eq!(impact_smoke(16, 1, false), (3, 0), "the three lockstep puffs ignore the no-marks layer");
+        assert_eq!(impact_smoke(15, 0, true), (0, 1));
+        assert_eq!(impact_smoke(13, 1, true), (0, 1), "roll 1 only adds the three puffs for types 15 and 16");
+        assert_eq!(impact_smoke(14, 2, false), (0, 0));
+        assert_eq!(impact_smoke(5, 2, true), (0, 0));
+        assert_eq!(impact_smoke(17, 0, true), (0, 2));
+        assert_eq!(impact_smoke(18, 0, false), (0, 0));
         assert!(impact_leaves_decal(3) && !impact_leaves_decal(17) && !impact_leaves_decal(1));
         assert_eq!(Blit::of_routine(0x45df40), Blit::Darken);
     }

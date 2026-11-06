@@ -18,4 +18,4 @@ word 2 = **active slots** (`[bld+0x144]`), words 3-7 = **slot kinds**, words 8-1
 - Building update `0x40de60` also runs the smoke/animation counters, the HP-dependent damage animation and runs the slots. `0x40e3d0` is the Advancer's upgrade (not research): it adds the Advancer rate to `[bld+0x148]` and unlocks slot `[bld+0x144]` when the points reach that slot's target (docs/advancer-actions.md).
 
 ## Not decoded yet
-See docs/ai.md (economy, AI, missions) and docs/advancer-actions.md. Enemy factories now produce with the same rule as the player's; the 60-unit cap on enemy units is a placeholder.
+See docs/ai.md (economy, AI, missions) and docs/advancer-actions.md. Enemy factories now produce with the same rule as the player's; the only unit limit is the exe's 1000 unit slots per side (`0x43a420` fails at `cmp ecx, 0x3e8`; a corpse holds its slot for 430 steps, docs/effects.md), which the game now uses for both sides instead of the old 60-unit placeholder.

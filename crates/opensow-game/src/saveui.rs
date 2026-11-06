@@ -5,6 +5,7 @@
 //! original's (`savegame_<stem>.data` / `.info`, `opensow_formats::save`), but the `.data` stream only carries the level
 //! (the object records of the real state are not decoded far enough to write), so loading restarts that mission.
 
+use opensow_formats::savespark as spark;
 use crate::assets::{load_backdrop, Assets};
 use crate::ui::{self, Rect};
 use opensow_formats::lang::{self, LangFile};
@@ -111,23 +112,63 @@ impl Store {
     }
 }
 
-/// The decompressed state stream we write: the real head (`0x42a400`: version words and the level number, the other scalars 0)
-/// followed by our own marker and the level's name, which the head cannot hold (skirmish maps have no number).
-pub fn state_bytes(level: &str, snapshot: &[u8]) -> Vec<u8> {
+/// A save payload as `Play::snapshot` produces it and `Play::restore` takes it: `u32 n`, the `n` bytes of the original's state stream
+/// (`World::to_state`), then OpenSOW's own snapshot of the world (exact continuation, may be empty).
+pub fn pack_payload(stream: &[u8], ours: &[u8]) -> Vec<u8> {
+    let mut o = (stream.len() as u32).to_le_bytes().to_vec();
+    o.extend_from_slice(stream);
+    o.extend_from_slice(ours);
+    o
+}
+
+/// Splits a payload into `(original stream, our snapshot)`.
+pub fn unpack_payload(p: &[u8]) -> Option<(&[u8], &[u8])> {
+    let n = u32::from_le_bytes(p.get(..4)?.try_into().ok()?) as usize;
+    Some((p.get(4..4 + n)?, p.get(4 + n..)?))
+}
+
+/// The decompressed state stream we write: **the original's stream** (`World::to_state`, docs/savegame.md) and, after its
+/// `Checksum` tag, where the exe's loader never reads, an OpenSOW extension (`OpenSOW3`, the level's name and our world snapshot)
+/// so that OpenSOW continues exactly where it left off while the exe-layout part stays a valid savegame. An empty payload gives
+/// the old level-only form (head + `OpenSOW1`: the level restarts).
+pub fn state_bytes(level: &str, payload: &[u8]) -> Vec<u8> {
     let number = level.trim_start_matches(|c: char| !c.is_ascii_digit()).parse::<u32>().unwrap_or(0);
-    let head = StateHead { level: number, rng_index: 0, v_5baafc: 0, flag_49a339: false, v_5baad8: 0, v_5baadc: 0, v_5baac4: 0, v_5baac8: 0, flag_5baa99: false, v_89cf50: 0, len: 0 };
-    let mut o = head.to_bytes();
-    save::put_mfc_string(&mut o, if snapshot.is_empty() { "OpenSOW1" } else { "OpenSOW2" });
-    save::put_mfc_string(&mut o, level);
-    if !snapshot.is_empty() {
-        o.extend_from_slice(&(snapshot.len() as u32).to_le_bytes());
-        o.extend_from_slice(snapshot);
+    let Some((stream, ours)) = unpack_payload(payload).filter(|(s, _)| !s.is_empty()) else {
+        let head = StateHead { level: number, rng_index: 0, v_5baafc: 0, flag_49a339: false, v_5baad8: 0, v_5baadc: 0, v_5baac4: 0, v_5baac8: 0, flag_5baa99: false, v_89cf50: 0, len: 0 };
+        let mut o = head.to_bytes();
+        save::put_mfc_string(&mut o, "OpenSOW1");
+        save::put_mfc_string(&mut o, level);
+        return o;
+    };
+    let mut o = stream.to_vec();
+    if !ours.is_empty() {
+        save::put_mfc_string(&mut o, "OpenSOW3");
+        save::put_mfc_string(&mut o, level);
+        o.extend_from_slice(&(ours.len() as u32).to_le_bytes());
+        o.extend_from_slice(ours);
     }
     o
 }
 
-/// The game snapshot after the level name of one of our states (`OpenSOW2`); empty for anything else.
+/// The extension after a genuine stream: `(level name, our snapshot)`.
+fn extension(tail: &[u8]) -> Option<(String, Vec<u8>)> {
+    let mut r = opensow_formats::Reader::new(tail);
+    let tag = opensow_formats::saveobj::mfc_string(&mut r, "tag").ok()?;
+    let name = opensow_formats::saveobj::mfc_string(&mut r, "level").ok()?;
+    if tag != "OpenSOW3" {
+        return None;
+    }
+    let n = r.u32("length").ok()? as usize;
+    Some((name, r.bytes(n, "snapshot").ok()?.to_vec()))
+}
+
+/// The payload a state stream gives `Play::restore`: a genuine stream (ours or the original's) carries the stream and possibly
+/// our snapshot; a pre-bridge `OpenSOW2` file only its snapshot; anything else (level-only) gives an empty payload.
 pub fn snapshot_from_state(data: &[u8]) -> Vec<u8> {
+    if let Ok((_, used)) = opensow_formats::save::State::parse_prefix(data, 1) {
+        let ours = extension(&data[used..]).map(|e| e.1).unwrap_or_default();
+        return pack_payload(&data[..used], &ours);
+    }
     let Ok(head) = StateHead::parse(data) else { return Vec::new() };
     let Some(rest) = data.get(head.len..) else { return Vec::new() };
     let mut r = opensow_formats::Reader::new(rest);
@@ -137,13 +178,19 @@ pub fn snapshot_from_state(data: &[u8]) -> Vec<u8> {
     }
     let at = rest.len() - r.remaining();
     match rest.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize) {
-        Some(n) => rest.get(at + 4..at + 4 + n).map(<[u8]>::to_vec).unwrap_or_default(),
+        Some(n) => rest.get(at + 4..at + 4 + n).map(|s| pack_payload(&[], s)).unwrap_or_default(),
         None => Vec::new(),
     }
 }
 
 /// The level name out of a state stream: ours has it after the marker; a genuine one only has the number (`M01`...).
 pub fn level_from_state(data: &[u8]) -> Option<String> {
+    if let Ok((st, used)) = opensow_formats::save::State::parse_prefix(data, 1) {
+        if let Some((name, _)) = extension(&data[used..]).filter(|e| !e.0.is_empty()) {
+            return Some(name);
+        }
+        return (st.head.level > 0).then(|| format!("M{:02}", st.head.level));
+    }
     let head = StateHead::parse(data).ok()?;
     let mut r = opensow_formats::Reader::new(data.get(head.len..)?);
     if let (Ok(tag), Ok(name)) = (opensow_formats::saveobj::mfc_string(&mut r, "tag"), opensow_formats::saveobj::mfc_string(&mut r, "level")) {
@@ -261,6 +308,8 @@ pub struct SaveUi {
     bg_full: Option<crate::ui::Image>,
     frames: Vec<Frame>,
     fonts: std::rc::Rc<(opensow_formats::font::Font, opensow_formats::font::Font)>,
+    /// `font02_light` (font id 9): the face the exe measures a typed title with (`0x45ed50(text, -4, 9)`), whatever it draws with.
+    limit_font: Option<opensow_formats::font::Font>,
     big: std::rc::Rc<(opensow_formats::font::Font, opensow_formats::font::Font)>,
     /// Ticks (60 per second) for the caret blink.
     pub tick: u32,
@@ -271,7 +320,32 @@ pub struct SaveUi {
     texts: std::cell::RefCell<Vec<(String, i32, i32, (u8, u8, u8))>>,
     /// Effect ids for the game to play: 30 hover, 38 LOAD/SAVE, 39 CANCEL, 32 typing, 40 screenshot.
     pub sounds: Vec<u8>,
+    /// The decorative sparks running along the table lines (`0x443210`, bullet type 33; `opensow_formats::savespark`).
+    pub sparks: Vec<Spark>,
+    spark_frame: Option<Frame>,
+    spark_rng: u32,
 }
+
+/// One spark of the page: a type-33 bullet flying a grid segment, three or four segments in all.
+#[derive(Debug, Clone)]
+pub struct Spark {
+    prev: (i32, i32),
+    cur: (i32, i32),
+    /// `[bullet+0x268c]`: segments still to come after the current one is done (a negative value removes the spark).
+    left: i32,
+    path: opensow_formats::projectile::Path,
+    index: usize,
+}
+
+impl Spark {
+    /// Position on the 640x480 page.
+    pub fn pos(&self) -> (i32, i32) {
+        self.path.points.get(self.index).or(self.path.points.last()).copied().unwrap_or((self.cur.0 + CENTRE.0, self.cur.1 + CENTRE.1))
+    }
+}
+
+/// Page coordinates of a table vertex given relative to the screen centre (320, 240).
+const CENTRE: (i32, i32) = (320, 240);
 
 /// Natural rows kept on screen when the window is bigger than the page: the 480-row page plus a margin (a window of height `h`
 /// is zoomed by `h / 560`, like the campaign map).
@@ -292,14 +366,16 @@ impl SaveUi {
         let frames = assets.game.resolve("Data\\Sprites2\\Menu\\loadsave_b.tsp").and_then(|p| std::fs::read(p).ok()).and_then(|d| sprite::parse(&d, Kind::Color).ok()).unwrap_or_default();
         let mut ui = SaveUi::with_parts(mode, level, store, Texts::from(strings.as_ref()), frames, assets.font("medium"), assets.font("big"));
         ui.gdi = crate::gdi::Gdi::load();
+        ui.limit_font = assets.color_font("font02_light");
         ui.bg = load_backdrop(&assets.game, "Load");
         ui.bg_full = load_backdrop(&assets.game, "Load2");
+        ui.spark_frame = assets.art.load("extras\\heavylaser.ps6").and_then(|set| set.first().cloned());
         ui
     }
 
     pub fn with_parts(mode: Mode, level: &str, store: Store, text: Texts, frames: Vec<Frame>, fonts: std::rc::Rc<(opensow_formats::font::Font, opensow_formats::font::Font)>, big: std::rc::Rc<(opensow_formats::font::Font, opensow_formats::font::Font)>) -> SaveUi {
         let slots = (0..ROWS).map(|i| store.slot(i, &text)).collect();
-        SaveUi { mode, store, text, slots, hover: None, selected: None, hover_btn: None, thumb: vec![0; save::THUMB_W * save::THUMB_H], level: level.to_owned(), snapshot: Vec::new(), needs_capture: mode == Mode::Save, bg: None, bg_full: None, frames, fonts, big, tick: 0, canvas: vec![0; W * H], gdi: None, texts: Default::default(), sounds: Vec::new() }
+        SaveUi { mode, store, text, slots, hover: None, selected: None, hover_btn: None, thumb: vec![0; save::THUMB_W * save::THUMB_H], level: level.to_owned(), snapshot: Vec::new(), needs_capture: mode == Mode::Save, bg: None, bg_full: None, frames, fonts, big, limit_font: None, tick: 0, canvas: vec![0; W * H], gdi: None, texts: Default::default(), sounds: Vec::new(), sparks: Vec::new(), spark_frame: None, spark_rng: 0x2545_f491 }
     }
 
     /// The level a save stores (headless screenshots have no running mission).
@@ -466,7 +542,8 @@ impl SaveUi {
             return;
         }
         let joined = format!("{}{typed}", self.slots[row].title);
-        let width = self.gdi.as_ref().map_or_else(|| ui::text_width(&self.fonts, &joined, 1.0), |g| g.width(&joined));
+        // the exe measures with the bitmap face font02_light and spacing -4 (`0x444a25`: push 9, push -4, `0x45ed50`), not with the GDI face it draws
+        let width = self.limit_font.as_ref().map_or_else(|| self.gdi.as_ref().map_or_else(|| ui::text_width(&self.fonts, &joined, 1.0), |g| g.width(&joined)), |f| f.measure(&joined, -4));
         if width < MAX_TITLE_PX {
             self.slots[row].title = joined;
             self.sounds.push(32); // save-type
@@ -482,7 +559,69 @@ impl SaveUi {
     }
 
     pub fn update(&mut self, ticks: u32) {
+        let first = self.tick;
         self.tick = self.tick.wrapping_add(ticks);
+        // `0x444b79`: while fewer than ten sparks exist, `rand(10) == 5` (once per frame) starts one at a random vertex
+        if self.sparks.len() < spark::MAX_SPARKS && self.spark_random(10) == 5 {
+            let v = (spark::COLUMNS[self.spark_random(4) as usize], spark::ROW0 + spark::ROW_STEP * self.spark_random(11) as i32);
+            let left = 2 + self.spark_random(2) as i32;
+            if let Some(to) = self.spark_next(v, v) {
+                if let Some(s) = Self::spark_segment(v, to, 0, left) {
+                    self.sparks.push(s);
+                }
+            }
+        }
+        // `0x444cb1..0x444ea4`: every spark flies the steps of the elapsed ticks; at the end of its segment the next one starts
+        for k in (0..self.sparks.len()).rev() {
+            let steps: u32 = (0..ticks).map(|t| opensow_formats::projectile::steps_at(360, first.wrapping_add(t))).sum();
+            let s = &mut self.sparks[k];
+            s.index += steps as usize;
+            if s.index + 1 < s.path.points.len() {
+                continue;
+            }
+            let (prev, cur, left) = (s.prev, s.cur, s.left - 1);
+            if left < 0 {
+                self.sparks.remove(k);
+                continue;
+            }
+            match self.spark_next(prev, cur) {
+                Some(to) => match Self::spark_segment(cur, to, spark::SEGMENT_DELAY, left) {
+                    Some(n) => self.sparks[k] = n,
+                    None => {
+                        self.sparks.remove(k);
+                    }
+                },
+                None => {
+                    self.sparks.remove(k);
+                }
+            }
+        }
+    }
+
+    fn spark_random(&mut self, n: u32) -> u32 {
+        self.spark_rng ^= self.spark_rng << 13;
+        self.spark_rng ^= self.spark_rng >> 17;
+        self.spark_rng ^= self.spark_rng << 5;
+        self.spark_rng % n.max(1)
+    }
+
+    fn spark_next(&mut self, prev: (i32, i32), cur: (i32, i32)) -> Option<(i32, i32)> {
+        let mut rng = self.spark_rng;
+        let to = spark::next_vertex(prev, cur, |n| {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            rng % n.max(1)
+        });
+        self.spark_rng = rng;
+        to
+    }
+
+    /// A type-33 bullet flying from `cur` to `to` (`0x411dc0(0x21, delay, ...)`); coordinates relative to the page centre.
+    fn spark_segment(start: (i32, i32), to: (i32, i32), delay: u32, left: i32) -> Option<Spark> {
+        let path = opensow_formats::projectile::build_path(33, start.0 + CENTRE.0, start.1 + CENTRE.1, to.0 + CENTRE.0, to.1 + CENTRE.1, delay)?;
+        let index = path.first_step;
+        Some(Spark { prev: start, cur: to, left, path, index })
     }
 
     // ---- drawing ----
@@ -546,6 +685,13 @@ impl SaveUi {
                     let (r, g, b) = save::rgb_of_565(self.thumb[ty * save::THUMB_W + tx]);
                     canvas[(258 + ty) * W + 450 + tx] = pack(r, g, b);
                 }
+            }
+        }
+        // the sparks: the `heavylaser` frame, additive (bullet draw case 33, `0x410a30`)
+        if let Some(f) = &self.spark_frame {
+            for sp in &self.sparks {
+                let (x, y) = sp.pos();
+                ui::sprite_add(&mut canvas, W, H, f, x - f.hot_x as i32, y - f.hot_y as i32, 1.0, false);
             }
         }
         // title and buttons
@@ -621,6 +767,24 @@ mod tests {
 
     fn ui(mode: Mode, dir: &PathBuf) -> SaveUi {
         SaveUi::with_parts(mode, "M03", Store { write: dir.clone(), also: None }, texts(), Vec::new(), fonts(), fonts())
+    }
+
+    #[test]
+    fn sparks_are_born_run_along_the_lines_and_die() {
+        let dir = temp("sparks");
+        let mut u = ui(Mode::Load, &dir);
+        let (mut most, mut born) = (0, 0);
+        for _ in 0..20_000 {
+            let before = u.sparks.len();
+            u.update(1);
+            born += u.sparks.len().saturating_sub(before);
+            most = most.max(u.sparks.len());
+            for sp in &u.sparks {
+                let (x, y) = sp.pos();
+                assert!((0..=640).contains(&x) && (0..=560).contains(&y), "{x} {y}");
+            }
+        }
+        assert!(born > 20 && most <= opensow_formats::savespark::MAX_SPARKS, "born {born} most {most}");
     }
 
     #[test]

@@ -19,8 +19,7 @@ enum puts the walker factory last (108); all other buildings follow load order f
 
 ## Object words
 13 = hit points (buildings max ~13536), 14 = owner (0 player/blue, 1 enemy/green `_gren`, 2 neutral and capturable, usually at 50 % HP = word 18 of 50),
-16/17 = cell x/y, 18 = HP-percentage-like value, 3 = per-kind constant for buildings (use unknown).
-Words 5-12 and 15 are mostly zero; 15 is 1 on HQs.
+16/17 = cell x/y, 18 = hit-point percentage. **What the loader (`0x41db8d..0x41e002`) really does with the 18 words** (record words 1..18 after the tag 123, read in order into locals): `0x439e30(x = w16, y = w17, owner = w14, kind = w1)` creates the building; `0x40d870(w3, w8, w4, w9, w5, w10, w6, w11, w7, w12)` sets the five factory slots (kind, per-slot value; docs/production.md); w2 -> `[bld+0x144]` (active slots; for a windtrap, 107, the levels added to `[0x5baaa0 + owner*4]` by `0x40d9a0`); w15 -> `[bld+0x114]` (1 = headquarters flag, set by the constructor for kind 100 anyway); w18 = percent of the maximum hit points (`hp = min(max * w18 / 100, max)`, 100 when absent, **skipped for owner 2**: neutral buildings get exactly half their maximum, `0x43a003`). **Word 13 is read and never used** (the editor's own copy of the hit points; it drifts from the percentage by up to ~3 % on turrets), as are w5-w7 / w9-w12 on buildings without slots. `Object::start_hp` is the rule; the game used word 13 before. Word 3 is the first slot's kind (e.g. 16 = Gold Influx 1 on a gold mine), not a "per-kind constant".
 
 ## Markers = spawned units (decoded from the exe loader)
 Word layout: `224, unit kind, player index, x px, y px`. The loader (`0x41da00`) spawns each as a unit at cell `(x>>5, y>>5)`
@@ -33,7 +32,7 @@ Word layout: `224, unit kind, player index, x px, y px`. The loader (`0x41da00`)
   Max HP by kind: 180,400,550 | 180,360,450 | 180,360,500 | 240,430,600 | 210,400,550. Levels only ever place tier 1 and 2 (kinds 1,2,4,5,7,8,10,11,13,14).
 - **Kinds 41-45 = the five walker robots** (HP 1100, 900, 1000, 1100, 1200; tops `5W1..5W5` on `chW` legs); **kind 46** = a bare `chN` pod
   (1000 HP, hazard symbol; probably the "Rogon bomb"; 17 placed in campaign levels). Walkers and pods appear in campaign levels only.
-- Kinds 109-113 (HP 200) exist in the constructor but the loader never spawns them from files (HP 200; their tops are the turret sprites `tur_02,2AA,tur_03,tur_01,tur_05`, so probably turrets built at runtime).
+- Kinds 109-113 exist in the constructor but the loader never spawns them from files (building max HP 50, the constructor's default: index past the table bound `0x40a988`; their tops are the turret sprites `tur_02,2AA,tur_03,tur_01,tur_05`, so probably turrets built at runtime).
 - `Marker.kind` for 41-46 and 1-15 is validated only structurally (every shipped marker is one of these, `tests/real_data.rs`).
 
 ## Air forces

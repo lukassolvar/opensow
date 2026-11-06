@@ -101,24 +101,31 @@ fn every_placed_unit_kind_has_art_in_the_archive() {
 fn air_force_stock_matches_the_exes_loader_assumptions() {
     use opensow_formats::air::AirForce;
     let Some(game) = GameDir::locate() else { return };
-    // Campaign: the human starts with no air forces, the enemy's stock sits in side 1, side 2 is unused.
+    // Campaign: the stock sits in the player's words (5+3g, loader 0x41d88e -> block 0x70ba50), the enemy's words (6+3g) and the unread words (4+3g) are 0.
     for n in 1..=22 {
         let l = Level::parse(&read(&game, &format!("Data\\Levels\\M{n:02}.edt")).unwrap()).unwrap();
         for st in l.air_stock() {
             assert!(st.counts.iter().all(|&c| (0..=20).contains(&c)), "M{n:02} {:?}", st);
-            assert_eq!((st.counts[0], st.counts[2]), (0, 0), "M{n:02} {}", st.force.name());
+            assert_eq!((st.counts[1], st.counts[2]), (0, 0), "M{n:02} {}", st.force.name());
         }
+    }
+    // the loader reads word 5 (0x51797c) for block 0x70ba50 and word 6 (0x517980) for block 0x70c6b8, never word 4 (0x517978)
+    let code = Exe::open(&game).map(|e| e.at(0x41d88c, 0x40).to_vec());
+    if let Some(code) = code {
+        let has = |pat: &[u8]| code.windows(pat.len()).any(|w| w == pat);
+        assert!(has(&[0x39, 0x35, 0x7C, 0x79, 0x51, 0x00]) || has(&[0x83, 0x3D, 0x7C, 0x79, 0x51, 0x00]), "cmp [0x51797c]");
+        assert!(has(&[0xB9, 0x50, 0xBA, 0x70, 0x00]), "mov ecx, 0x70ba50");
     }
     // Spot checks against the shipped data.
     let m10 = Level::parse(&read(&game, "Data\\Levels\\M10.edt").unwrap()).unwrap().air_stock();
-    let side1 = |f: AirForce| m10.iter().find(|s| s.force == f).unwrap().counts[1];
+    let side1 = |f: AirForce| m10.iter().find(|s| s.force == f).unwrap().counts[0];
     assert_eq!([side1(AirForce::Bomber), side1(AirForce::Asteroid), side1(AirForce::Carryall), side1(AirForce::Tripler), side1(AirForce::Fighter)], [4, 0, 7, 4, 6]);
-    // Multiplayer: both players get the same stock.
+    // Multiplayer: both players get the same stock; the unread words stay 0.
     let dir = game.resolve("Data\\Levels").unwrap();
     for e in std::fs::read_dir(dir).unwrap().flatten() {
         if e.path().extension().map_or(false, |x| x.eq_ignore_ascii_case("net")) {
             for st in Level::parse(&std::fs::read(e.path()).unwrap()).unwrap().air_stock() {
-                assert_eq!(st.counts[1], st.counts[2], "{} {}", e.path().display(), st.force.name());
+                assert_eq!((st.counts[0], st.counts[2]), (st.counts[1], 0), "{} {}", e.path().display(), st.force.name());
             }
         }
     }
@@ -512,6 +519,8 @@ fn weapon_shots_match_the_exes_top_constructor() {
         let (f, _) = exe.top_case(jt[byte_table[kind - 1] as usize]);
         let want = weapon_shot(kind as i32).unwrap_or_else(|| panic!("no shot for kind {kind}"));
         assert_eq!((f[&0x34] as u8, f[&0x38] as u32), want, "kind {kind}");
+        // `[top+0x30]` = projectiles per table and shot (the spawner `0x47cf40` repeats its whole table loop that often): 1, only turret 5 has 6
+        assert_eq!(f.get(&0x30).copied(), Some(if kind == 113 { 6 } else { 1 }), "kind {kind} burst");
     }
 }
 
@@ -940,6 +949,31 @@ fn animation_spawn_sites_match_the_exes_calls() {
         }
         assert_eq!(exe.at(s.site, 1)[0], 0xE8, "site {:#x} is a call", s.site);
     }
+}
+
+#[test]
+fn the_advancer_gun_beam_matches_the_exes_flight_step_and_constructor() {
+    use opensow_formats::effects::{gun_trail, BODKY_ARRAYS, BODKY_STRIDE, GUN_TRAIL_SITE};
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    let has = |va: u32, pat: &[u8]| exe.at(va, pat.len()) == pat;
+    // flight step: `cmp eax, 0x1f`, then (after the counter) push flag 1, repeat 15, to 1; array = 0x5e6b80 + 80 * [+0x268c]; from 0
+    assert!(has(0x411b12, &[0x83, 0xF8, 0x1F]));
+    assert!(has(0x411b67, &[0x6A, 0x01, 0x6A, 0x0F, 0x6A, 0x01, 0x8D, 0x04, 0x80]), "flag, repeat 15, to 1, 5 * colour");
+    assert!(has(0x411b79, &[0xC1, 0xE0, 0x04, 0x05, 0x80, 0x6B, 0x5E, 0x00]), "<< 4, + bodky_r");
+    assert!(has(0x411b77, &[0x6A, 0x00]), "from 0");
+    assert!(has(0x411b82, &[0x6A, 0x01]), "period 1");
+    assert_eq!(exe.at(GUN_TRAIL_SITE, 1)[0], 0xE8, "call");
+    assert!(has(0x411b8f, &[0xC7, 0x47, 0x34, 6, 0, 0, 0]), "additive draw mode 6");
+    // constructor case: `setne al` on the player, `[+0x268c] = 2 * al + 1`, interval 2, speed 600
+    assert!(has(0x412258, &[0x0F, 0x95, 0xC0]));
+    assert!(has(0x412269, &[0x8D, 0x04, 0x45, 0x01, 0, 0, 0]) && has(0x412270, &[0x89, 0x86, 0x8C, 0x26, 0, 0]));
+    // the four colour arrays are 80 bytes apart: red, blue, yellow, green
+    let names: Vec<_> = (0..4).map(|c| opensow_formats::effects::extra_at(BODKY_ARRAYS + BODKY_STRIDE * c).map(|(e, o)| (e.name, o))).collect();
+    assert_eq!(names[1], Some(("extras\\bodky_b", 0)));
+    assert_eq!(names[3], Some(("extras\\bodky_g", 0)));
+    assert_eq!(gun_trail(31, 0).unwrap().array, BODKY_ARRAYS + BODKY_STRIDE);
+    assert_eq!(gun_trail(31, 1).unwrap().array, BODKY_ARRAYS + 3 * BODKY_STRIDE);
 }
 
 #[test]
@@ -1825,4 +1859,234 @@ fn the_frame_draw_order_stamps_the_mask_before_the_smoke_and_the_top_shadows() {
     // the top draw 0x46e9c0 uses the masked shade blit 0x462110, the chassis shadow 0x46e980 the unmasked 0x460f60
     assert_eq!(call_at(0x46ea2d), 0x462110);
     assert_eq!(call_at(0x46e9af), 0x460f60);
+}
+
+/// A shipped `.map` is the exe's own map-object stream (`0x459960`, level form): `save::MapState` reads it, writes the same
+/// bytes back, and its cell layers agree with the plain `map::Map` view. Pins the layer layout of docs/savegame.md.
+#[test]
+fn map_files_are_map_object_streams_that_round_trip() {
+    use opensow_formats::{save::MapState, Reader};
+    let Some(game) = GameDir::locate() else { return eprintln!("game not found, skipping") };
+    let dir = game.resolve("Data\\Levels").unwrap();
+    let mut checked = 0;
+    let mut no_marks_cells = Vec::new();
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        let p = e.path();
+        if p.extension().map_or(true, |x| !x.eq_ignore_ascii_case("map")) {
+            continue;
+        }
+        let name = p.file_name().unwrap().to_string_lossy().into_owned();
+        let data = std::fs::read(&p).unwrap();
+        let mut r = Reader::new(&data);
+        let st = MapState::parse(&mut r).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(r.remaining(), 0, "{name}: the stream is consumed whole");
+        assert_eq!(st.version, "VER7", "{name}");
+        assert!(st.cameras.is_empty() && st.items.is_empty(), "{name}");
+        assert_eq!(st.to_bytes().as_deref(), Some(&data[..]), "{name}: writer reproduces the file");
+        let map = Map::parse(&data).unwrap();
+        assert_eq!((map.a, map.b), (st.scroll_x, st.scroll_y), "{name}");
+        let w = st.width as usize;
+        for (i, c) in st.cells.iter().enumerate() {
+            let (x, y) = (i % w, i / w);
+            assert_eq!(c.coord, ((x as u16) << 8) | y as u16, "{name}: cell ({x},{y}) coordinate stamp");
+            let m = map.cell(x as u32, y as u32).unwrap();
+            assert_eq!((c.ground != 0, c.air != 0), (m.blocked, m.border), "{name}: ({x},{y})");
+            assert!(c.ground == 0 || c.ground == 0xFF_FFFD, "{name}: terrain marker");
+            assert_eq!(c.no_build != 0, m.no_build, "{name}");
+            assert_eq!(c.no_marks != 0, m.no_marks, "{name}");
+            assert!(c.reserved == 0 && c.building == 0 && c.no_build <= 1 && c.no_marks <= 1, "{name}: ({x},{y})");
+        }
+        no_marks_cells.push((name, st.cells.iter().filter(|c| c.no_marks != 0).count()));
+        checked += 1;
+    }
+    assert!(checked >= 23, "{checked} maps");
+    // only the second level has a no-marks area
+    for (name, n) in no_marks_cells {
+        assert_eq!(n, if name.eq_ignore_ascii_case("M02.map") { 497 } else { 0 }, "{name}");
+    }
+}
+
+
+#[test]
+fn unit_corpse_timer_and_final_blasts_match_the_exe() {
+    use opensow_formats::effects::{corpse_blasts, CORPSE_BLAST_BELOW, CORPSE_LIFE};
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    // 0x46a5a9: unit+0x90 = 430, +0x94 = -1, +0x98 = 0
+    assert!(exe.at(0x46a5a9, 10).starts_with(&[0xC7, 0x87, 0x90, 0, 0, 0]));
+    assert_eq!(u32::from_le_bytes(exe.at(0x46a5af, 4).try_into().unwrap()) as i32, CORPSE_LIFE);
+    // 0x46b649: cmp eax, 0x1e; jge (no blasts at or above 30)
+    assert_eq!(exe.at(0x46b649, 3), [0x83, 0xF8, CORPSE_BLAST_BELOW as u8]);
+    // the variant dispatch: sub 2 / je 0x46b782, sub 1 / je 0x46b6fe, sub 1 / jne exit, then the chain from 0x46b67a
+    assert_eq!(exe.at(0x46b65f, 3), [0x83, 0xE8, 0x02]);
+    assert_eq!(u32::from_le_bytes(exe.at(0x46b664, 4).try_into().unwrap()), 0x46b782 - 0x46b668);
+    assert_eq!(u32::from_le_bytes(exe.at(0x46b66d, 4).try_into().unwrap()), 0x46b6fe - 0x46b671);
+    // the four spawns, in chain order: `push size` right before `push y` (0x46b6c5, 0x46b749, 0x46b7cd, 0x46b851)
+    let sizes: Vec<u8> = [0x46b6c5u32, 0x46b749, 0x46b7cd, 0x46b851].iter().map(|&a| { let b = exe.at(a, 2); assert_eq!(b[0], 0x6A); b[1] }).collect();
+    for (variant, n) in [(4u32, 4usize), (3, 3), (2, 2)] {
+        assert_eq!(corpse_blasts(variant), &sizes[4 - n..], "variant {variant}");
+    }
+    assert!(corpse_blasts(0).is_empty() && corpse_blasts(5).is_empty());
+}
+
+#[test]
+fn top_offsets_match_the_exes_constructor() {
+    use opensow_formats::aim::top_dy;
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    let byte_table = exe.at(0x47ac70, 0x71).to_vec();
+    let cases = *byte_table.iter().max().unwrap() as usize + 1;
+    let jt: Vec<u32> = exe.at(0x47ac04, cases * 4).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+    let adj_idx = exe.at(0x47acf4, 0x2d).to_vec();
+    let adj_jt: Vec<u32> = exe.at(0x47ace4, 16).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+    for kind in (1..=15).chain(40..=45).chain(109..=113) {
+        let (f, _) = exe.top_case(jt[byte_table[kind as usize - 1] as usize]);
+        assert_eq!(f.get(&0x5c), None, "kind {kind}: the horizontal offset stays 0");
+        let adj = if kind <= 0x2c {
+            match adj_jt[adj_idx[kind as usize] as usize] { 0x47ab89 => -10, 0x47ab8f => -4, 0x47ab95 => -16, 0x47ab99 => 0, o => panic!("{o:x}") }
+        } else { 0 };
+        assert_eq!(top_dy(kind), f.get(&0x60).copied().unwrap_or(0) + adj, "kind {kind}");
+    }
+}
+
+#[test]
+fn a_bombers_bomb_takes_its_flight_direction_as_sprite_variant() {
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    // 0x4684e3 push 0x12 (type 18); call 0x411dc0; mov eax, [edi+0x34]; ...; mov [esi+0x268c], eax
+    assert_eq!(exe.at(0x4684e3, 2), [0x6A, 0x12]);
+    assert_eq!(exe.at(0x4684ea, 3), [0x8B, 0x47, 0x34]);
+    assert_eq!(exe.at(0x4684f2, 6), [0x89, 0x86, 0x8C, 0x26, 0, 0]);
+}
+
+#[test]
+fn turret_placement_test_reads_the_layers_documented_in_ai_md() {
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    let code = exe.at(0x408be0, 0x170).to_vec();
+    let has = |pat: &[u8]| code.windows(pat.len()).any(|w| w == pat);
+    // proximity scan over the building-handle grid 0x6f3a4c, rows x-2.. and columns y-2..
+    assert!(has(&[0x8D, 0x1C, 0x85, 0x4C, 0x3A, 0x6F, 0x00]), "building grid 0x6f3a4c");
+    assert!(has(&[0x83, 0xEF, 0x02]) && has(&[0x8D, 0x5E, 0xFE]), "x - 2 and y - 2");
+    assert!(has(&[0x83, 0xC0, 0x02]), "+ 2 beyond the footprint");
+    // editor flag [0x517ae9] forces the proximity condition
+    assert!(has(&[0x80, 0x3D, 0xE9, 0x7A, 0x51, 0x00, 0x00]));
+    // per cell: static grid 0x5eac38 subclass != 1, walker grid 0x6c7a4c == 0, no-build byte 0x6efa4c == 0, near == 1
+    assert!(has(&[0xFF, 0xB6, 0x38, 0xAC, 0x5E, 0x00]), "static grid 0x5eac38");
+    assert!(has(&[0x83, 0xB8, 0xFE, 0, 0, 0]) || has(&[0x83, 0xF8, 0x01]), "subclass == 1 test");
+    assert!(has(&[0x83, 0xBE, 0x4C, 0x7A, 0x6C, 0x00, 0x00]), "walker grid 0x6c7a4c");
+    assert!(has(&[0x80, 0x3F, 0x00]) && has(&[0x8D, 0xB8, 0x4C, 0xFA, 0x6E, 0x00]), "no-build layer 0x6efa4c");
+}
+
+#[test]
+fn building_start_hp_follows_the_exes_percentage_rule() {
+    use opensow_formats::advancer::building_max_hp;
+    let Some(game) = GameDir::locate() else { return };
+    let dir = game.resolve("Data\\Levels").unwrap();
+    let (mut n, mut off) = (0, Vec::new());
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        let path = e.path();
+        if !path.extension().map_or(false, |x| x.eq_ignore_ascii_case("edt") || x.eq_ignore_ascii_case("net")) {
+            continue;
+        }
+        for o in Level::parse(&std::fs::read(&path).unwrap()).unwrap().objects.iter().filter(|o| o.object_kind().is_building() || (25..=29).contains(&o.kind)) {
+            n += 1;
+            let want = o.start_hp(building_max_hp(o.kind));
+            if (want - o.hp()).abs() > 1 {
+                off.push((path.file_name().unwrap().to_string_lossy().to_string(), o.kind, o.hp(), want));
+            }
+        }
+    }
+    // word 13 is the editor's own copy and drifts from the percentage (turrets by up to ~3 %); the exe uses the percentage
+    assert!(n > 2000 && off.len() < n / 10, "{} of {n} differ", off.len());
+    for o in Level::parse(&std::fs::read(game.resolve("Data\\Levels\\M01.edt").unwrap()).unwrap()).unwrap().objects.iter().filter(|o| o.raw[14] == 2) {
+        assert_eq!(o.start_hp(13536), 6768, "neutral buildings start at half");
+    }
+}
+
+#[test]
+fn frame_sender_writes_the_command_queues_and_snapshot_in_the_documented_order() {
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    let code = exe.at(0x4296a0, 0xc00).to_vec();
+    // every `call 0x4528f0` in the command part (before 0x42a057): the width is the `push imm8` that precedes the value push
+    let widths = |from: u32, to: u32, target: u32| -> Vec<u8> {
+        let mut out = Vec::new();
+        for (i, w) in code.windows(5).enumerate() {
+            let at = 0x4296a0 + i as u32;
+            if at < from || at >= to || w[0] != 0xE8 {
+                continue;
+            }
+            if (at + 5).wrapping_add(i32::from_le_bytes(w[1..5].try_into().unwrap()) as u32) != target {
+                continue;
+            }
+            // the nearest `6A xx` before the call whose next instruction is a value push (FF /6, 50, or a register push)
+            let back = &code[i.saturating_sub(24)..i];
+            let n = (0..back.len().saturating_sub(2)).rev().find(|&j| back[j] == 0x6A && back[j + 1] <= 0x20 && matches!(back[j + 2], 0xFF | 0x50 | 0x51 | 0x52 | 0x53 | 0x56 | 0x57 | 0x6A)).map(|j| back[j + 1]);
+            // the release point pushes its width, then computes the value (`sar eax, 5`) before the second push: take the nearest push imm8
+            let n = n.or_else(|| (0..back.len().saturating_sub(1)).rev().find(|&j| back[j] == 0x6A && back[j + 1] <= 0x20).map(|j| back[j + 1]));
+            out.push(n.unwrap_or(255));
+        }
+        out
+    };
+    let want: Vec<u8> = vec![
+        1, 7, 7, 3, 12, 1, // PlaceSentry
+        1, 7, 7, 32, 1, // ReleasePoint
+        1, 7, 7, 9, 32, 1, // UnitGoto
+        1, 32, 9, 32, 1, // UnitAttack
+        1, 9, 32, 1, // UnitScatter
+        1, 32, 32, 1, 1, 32, 32, 1, 1, 32, 32, 1, // HDestroy, HRepair, HUpgrade
+        1, 14, 14, 8, 1, // UfoStrike
+        1, 32, 3, 1, // TechLevelUp
+    ];
+    let got = widths(0x4296a0, 0x42a057, 0x4528f0);
+    assert_eq!(got, want, "bit widths of the ten command queues");
+    // the host part: header selectors 7 (player), 4 (buildings), 3 (units), 6 (aircraft), 5 (bullets), in this order
+    let selectors: Vec<u8> = widths(0x42a057, 0x42a273, 0x4527c0);
+    assert_eq!(selectors.len(), 5);
+    let pos = |pat: &[u8]| code.windows(pat.len()).position(|w| w == pat).map(|p| 0x4296a0 + p as u32);
+    let (p4, p3, p6, p5) = (pos(&[0x6A, 0x04, 0x8D]), pos(&[0x6A, 0x03, 0x8D]), pos(&[0x6A, 0x06, 0x8D]), pos(&[0x6A, 0x05, 0x8D]));
+    assert!(p4 < p3 && p3 < p6 && p6 < p5, "{p4:?} {p3:?} {p6:?} {p5:?}");
+    // bullets of types 0x16, 0x20 and 0x21 are not sent: `cmp eax, 0x16 / 0x20 / 0x21` before the writer call
+    for t in [0x16u8, 0x20, 0x21] {
+        assert!(code.windows(3).any(|w| w == [0x83, 0xF8, t]), "type {t:#x}");
+    }
+}
+
+#[test]
+fn building_destruction_animation_lengths_match_the_exes_constructor() {
+    use opensow_formats::effects::destruction_bursts;
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    // 0x40a330 stores [b+0x108] = 5 first (0x40a381); the cases 0..=2 of the byte table 0x40af64 (indexed by kind - 25) end in
+    // 0x40a93f, which stores 2: the five turrets. Every building is another case.
+    let table = exe.at(0x40af64, 0x54).to_vec();
+    for kind in 25..=108 {
+        let case = table[(kind - 25) as usize];
+        if (25..=29).contains(&kind) || (100..=108).contains(&kind) {
+            let expect = if case <= 2 { 2 } else { 5 };
+            assert_eq!(destruction_bursts(kind), expect, "kind {kind}");
+        }
+    }
+    assert_eq!(exe.at(0x40a381, 10)[..6], [0xC7, 0x83, 0x08, 0x01, 0x00, 0x00]);
+    assert_eq!(exe.at(0x40a381, 10)[6], 5);
+    assert_eq!(exe.at(0x40a93f, 10)[6], 2);
+    // 0x409b60: two passes per tick (`add eax, eax`), debris counter reset 0x5a + rand(15)
+    assert_eq!(exe.at(0x409b91, 2), [0x03, 0xC0]);
+    assert_eq!(exe.at(0x409e7d, 3), [0x83, 0xC0, 0x5A]);
+}
+
+#[test]
+fn shot_spread_and_rounds_match_the_exes_top_constructor() {
+    use opensow_formats::aim::{rounds, spread};
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    let byte_table = exe.at(0x47ac70, 0x71).to_vec();
+    let cases = *byte_table.iter().max().unwrap() as usize + 1;
+    let jt: Vec<u32> = exe.at(0x47ac04, cases * 4).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+    for kind in (1..=15).chain(40..=45).chain(109..=113) {
+        let (f, _) = exe.top_case(jt[byte_table[kind - 1] as usize]);
+        assert_eq!(f.get(&0x20).copied(), Some(spread(kind as i32) as i32), "spread of kind {kind}");
+        assert_eq!(f.get(&0x30).copied(), Some(rounds(kind as i32) as i32), "rounds of kind {kind}");
+    }
 }

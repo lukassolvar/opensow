@@ -77,10 +77,12 @@ impl Sfx {
     }
 
     /// Play effect `id` at `(dx, dy)` pixels from the screen centre with the exe's pan and distance volume (`0x4075b0`: `sfx::pan`,
-    /// `sfx::volume`, master volume 100); too far away to be heard (about 667 px) it is dropped like the exe does.
-    pub fn play_at(&mut self, game: &GameDir, id: u8, speed: f32, dx: i32, dy: i32) {
+    /// `sfx::volume`); too far away to be heard (about 667 px) it is dropped like the exe does. `pan_dx` is the sound's x from the
+    /// **fixed** 320 px mark of the view (`0x406510` subtracts 0x140, not half the screen width: a sound in the middle of a wider
+    /// screen leans right, as in the original).
+    pub fn play_at(&mut self, game: &GameDir, id: u8, speed: f32, dx: i32, dy: i32, pan_dx: i32) {
         let Some(vol) = sfx::volume(self.fx_volume, Some((dx, dy))) else { return };
-        self.play_gains(game, id, speed, sfx::gains(vol, sfx::pan(dx)));
+        self.play_gains(game, id, speed, sfx::gains(vol, sfx::pan(pan_dx)));
     }
 
     fn play_gains(&mut self, game: &GameDir, id: u8, speed: f32, gains: (f32, f32)) {

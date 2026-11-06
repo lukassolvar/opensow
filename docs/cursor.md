@@ -15,7 +15,7 @@ The game hides the system cursor and draws its own sprite: `cursor.ps6` (in `spr
 | 7 | **destroy / capture** (red arrow) | `0x417cdd` |
 | 8 | **upgrade** (green arrow) | `0x417c8d` |
 | 9 | **rally point placement** (over free ground; the blocked arrow 1 over blocked ground), offset (-1, 0), docs/rally.md | `0x416fc6`, `0x417678` |
-| 10 | air-strike mode (`[+0x1e8]` set, offset 0,0); not drawn by OpenSOW | `0x416f80`, `0x41722c` |
+| 10 | air-strike mode (`[+0x1e8]` set, offset 0,0) over the map, the blocked arrow 1 instead over cells the air layer `0x60ac38` marks `0xfffffd` (`0x417257..0x41727b`); drawn by OpenSOW (`Pointer::AirStrike`) | `0x416f80`, `0x41727b` |
 | 0x0b..0x12 | scroll arrows at the screen edge (UL, UR, DR, DL, D, L, R, U), offsets in `Pointer::offset` | `0x416a9c..0x416b68` |
 
 ## With an Advancer selected, over a building (`0x417b8c..0x417d0a`)

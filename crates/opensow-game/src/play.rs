@@ -39,6 +39,8 @@ pub struct Play {
     /// Headless debugging (`--no-mask`): draw the smoke and the top shadows without the screen mask.
     pub debug_no_mask: bool,
     pub level: String,
+    /// The campaign record the savegame embeds (`0x456ac0`); the game sets it before a save.
+    pub progress: opensow_formats::config::PassedLevels,
     pub scene: Scene,
     pub world: World,
     pub view: View,
@@ -49,21 +51,36 @@ pub struct Play {
     pub cursor: (i32, i32),
     /// Scroll when the pointer touches a window edge (only once a real pointer position is known).
     pub edge_scroll: bool,
+    /// The system's cursor shows the pointer (`pointer_cursor`), so the frame does not draw it.
+    pub system_pointer: bool,
     keys: HashSet<&'static str>,
     time: f32,
     pub paused: bool,
+    /// Round-robin positions of Tab (`[pointer+0x2dc]`) and H / numpad + (`[pointer+0x2e0]`), docs/hotkeys.md.
+    tab_next: usize,
+    adv_next: usize,
+    /// Camera bookmarks of numpad 1-9 (`[pointer+0x2e4..0x328]`): the map pixel in the middle of the view.
+    pub bookmarks: [Option<(f32, f32)>; 9],
     fit: bool,
     /// Turret tier (1-5) waiting for a click on the map (keys 1-5).
     pub placing: Option<u32>,
     /// Rally point mode (`[pointer+0x1e9]`, `[pointer+0x1ec]`): the structure whose point the next map click sets.
     pub rallying: Option<usize>,
+    /// Dev tools: (unit kind, side) the next map click places (`devtools.rs`).
+    pub dev_spawn: Option<(i32, usize)>,
     /// Air force waiting for a click on the map (keys B / F / C / Y / M).
     pub strike: Option<opensow_formats::air::AirForce>,
     /// Interface sounds raised by clicks (effect ids), drained by the game.
     pub ui_sounds: Vec<u8>,
     /// Tutorial voice files `Tutorial\NN.wav` to play, and the step whose instruction is shown.
     pub tut_voices: Vec<u32>,
-    pub tut_text: Option<u32>,
+    /// The instruction panel of the shown step (docs/tutorial.md), `None` before the first text.
+    pub tut_panel: Option<crate::tutorial_panel::Panel>,
+    /// Font 2 (`medium`) whose widths wrap the text, and the GDI font that draws it (the campaign map's).
+    tut_font: Rc<(opensow_formats::font::Font, opensow_formats::font::Font)>,
+    tut_gdi: Option<crate::gdi::Gdi>,
+    /// Fonts 0 and 1 (`small_i`, `small_o`): the glyphs bytes >= 0x80 reach in the exe's width function.
+    tut_small: Rc<(opensow_formats::font::Font, opensow_formats::font::Font)>,
     /// The HUD scale of the last drawn frame (for hit tests of the tutorial panel).
     panel_ui: f32,
     /// How many of `world.log`'s messages have been spoken.
@@ -91,7 +108,7 @@ pub struct Play {
 }
 
 impl Play {
-    pub fn new(assets: &mut Assets, level: &str, settings: &Settings) -> Result<Play, String> {
+    pub fn new(assets: &mut Assets, level: &str, settings: &Settings, carry_counter: usize) -> Result<Play, String> {
         let mut scene = Scene::load(&assets.game, level, 0, None)?;
         let lvl = scene.level.as_ref().ok_or("level has no script (.edt)")?;
         let mut world = World::from_level(&scene.map, lvl);
@@ -111,11 +128,24 @@ impl Play {
                 if let Some(tables) = assets.art.fire_tables(t.top) {
                     world.turret_muzzles.insert(n + 84, tables);
                 }
+                if let Some(tables) = assets.art.fire_tables_ref(t.top) {
+                    world.turret_muzzles.insert(sim::REFERENCE_KEY + n + 84, tables);
+                }
+            }
+        }
+        // the ground units' and walkers' shots start at their tops' `.po1` points (kind -> tables, next to the turrets')
+        for kind in (1..=15).chain(41..=45) {
+            if let Some(tables) = unit_art(kind).and_then(|a| a.top).and_then(|t| assets.art.fire_tables(t)) {
+                world.turret_muzzles.insert(kind, tables);
+            }
+            if let Some(tables) = unit_art(kind).and_then(|a| a.top).and_then(|t| assets.art.fire_tables_ref(t)) {
+                world.turret_muzzles.insert(sim::REFERENCE_KEY + kind, tables);
             }
         }
         // Units are drawn by the game from the simulation; the loader's static unit sprites go away.
         scene.placed.retain(|p| matches!(p.source, Source::Object(_)));
         let mut play = Play {
+            progress: opensow_formats::config::PassedLevels::initial(),
             debug_no_mask: false,
             level: level.to_owned(),
             scene,
@@ -126,15 +156,23 @@ impl Play {
             drag: None,
             cursor: (0, 0),
             edge_scroll: false,
+            system_pointer: false,
             keys: HashSet::new(),
             time: 0.0,
             paused: false,
+            tab_next: 0,
+            adv_next: 0,
+            bookmarks: [None; 9],
             fit: true,
             placing: None,
             rallying: None,
+            dev_spawn: None,
             ui_sounds: Vec::new(),
             tut_voices: Vec::new(),
-            tut_text: None,
+            tut_panel: None,
+            tut_font: assets.font("medium"),
+            tut_gdi: crate::gdi::Gdi::load(),
+            tut_small: assets.font("small"),
             panel_ui: 1.0,
             heard: 0,
             strike: None,
@@ -151,7 +189,9 @@ impl Play {
             label_font: crate::gdi::Gdi::load_sized(11.0, 1.0),
             lang: assets.game.resolve("Data\\Language\\langEN.txt").and_then(|p| std::fs::read(p).ok()).and_then(|d| opensow_formats::lang::LangFile::parse(&d).ok()),
         };
-        play.world.mission_no = level.trim_start_matches(['M', 'm']).parse().ok();
+        play.world.set_mission(level.trim_start_matches(['M', 'm']).parse().ok());
+        play.world.carry_counter = carry_counter; // `[0x89cf50]` survives from mission to mission
+        play.world.start_airlift();
         // the tutorial (M00) runs its own script and has no computer opponent
         if level.eq_ignore_ascii_case("M00") {
             play.world.start_tutorial();
@@ -162,22 +202,33 @@ impl Play {
         Ok(play)
     }
 
-    /// What a savegame stores: the camera (three `f32`) and the world's snapshot.
+    /// What a savegame stores (`saveui::pack_payload`): the original's state stream of the running mission (`World::to_state`,
+    /// docs/savegame.md) and OpenSOW's own snapshot (the camera as three `f32` and the world as JSON) for an exact continuation.
     pub fn snapshot(&mut self) -> Vec<u8> {
-        let mut o = Vec::new();
+        let mut ours = Vec::new();
         for v in [self.view.x, self.view.y, self.view.zoom] {
-            o.extend_from_slice(&v.to_le_bytes());
+            ours.extend_from_slice(&v.to_le_bytes());
         }
-        o.extend(self.world.snapshot());
-        o
+        ours.extend(self.world.snapshot());
+        let number = self.level.trim_start_matches(|c: char| !c.is_ascii_digit()).parse::<u32>().unwrap_or(0);
+        let state = self.world.to_state(number, &self.progress.clone(), (self.view.x.max(0.0) as i32, self.view.y.max(0.0) as i32));
+        crate::saveui::pack_payload(&state.to_bytes().unwrap_or_default(), &ours)
     }
 
-    /// Continues a saved game in this freshly started play of the same level (`Play::snapshot`).
+    /// Continues a saved game in this freshly started play of the same level (`Play::snapshot`): our own snapshot when the save
+    /// has one, else the original's stream is applied (`World::apply_state`).
     pub fn restore(&mut self, data: &[u8]) -> Result<(), String> {
-        let (cam, world) = data.split_at_checked(12).ok_or("snapshot too short")?;
-        let f = |i: usize| f32::from_le_bytes([cam[i], cam[i + 1], cam[i + 2], cam[i + 3]]);
-        self.world.restore(world)?;
-        self.view = View { x: f(0), y: f(4), zoom: f(8) };
+        let (stream, ours) = crate::saveui::unpack_payload(data).ok_or("snapshot too short")?;
+        if ours.is_empty() {
+            let state = opensow_formats::save::State::parse(stream, 1).map_err(|e| e.to_string())?;
+            self.world.apply_state(&state)?;
+            self.view = View { x: state.map.scroll_x as f32, y: state.map.scroll_y as f32, zoom: self.view.zoom };
+        } else {
+            let (cam, world) = ours.split_at_checked(12).ok_or("snapshot too short")?;
+            let f = |i: usize| f32::from_le_bytes([cam[i], cam[i + 1], cam[i + 2], cam[i + 3]]);
+            self.world.restore(world)?;
+            self.view = View { x: f(0), y: f(4), zoom: f(8) };
+        }
         self.fit = false;
         self.heard = self.world.log.len();
         self.sel_building = None;
@@ -221,18 +272,14 @@ impl Play {
     }
 
     pub fn left_down(&mut self, x: i32, y: i32) {
-        if self.world.tutorial.as_ref().is_some_and(|t| t.arrow) {
-            let (w, h) = self.viewport;
-            let ui = self.panel_ui;
-            let (px, py, pw, ph) = self.tutorial_panel(w, h, ui);
-            let a = (28.0 * ui) as i32; // arrow button: square at the panel's bottom right
-            if x >= px + pw - a && x < px + pw && y >= py + ph - a && y < py + ph {
-                self.world.tutorial_arrow_clicked();
-                self.ui_sounds.push(50);
-                return;
-            }
+        if self.world.tutorial.as_ref().is_some_and(|t| t.arrow) && self.tutorial_arrow_at(x, y) {
+            self.world.tutorial_arrow_clicked();
+            self.ui_sounds.push(crate::tutorial_panel::CLICK_SOUND); // `0x456410` plays `[+0x58]`
+            return;
         }
-        if let Some(hit) = self.hud.as_ref().and_then(|l| l.hit(x, y)) {
+        // a disabled air pill is not a click target (`0x454d02`): the click goes on to the map
+        let locked = self.hud.as_ref().is_some_and(|l| l.pills_locked);
+        if let Some(hit) = self.hud.as_ref().and_then(|l| l.hit(x, y)).filter(|h| !(locked && matches!(h, Hit::Air(_)))) {
             self.hud_click(hit, x, y);
             return;
         }
@@ -249,18 +296,29 @@ impl Play {
         for e in events {
             match e {
                 sim::TutEvent::Step(n) => {
-                    self.tut_text = Some(n);
+                    if let Some(text) = self.lang.as_ref().and_then(|l| l.get(sim::tutorial_text_index(n))) {
+                        let (small, medium) = (&self.tut_small, &self.tut_font.0);
+                        let wrapped = crate::tutorial_panel::wrap(text.trim(), &|s, spacing| crate::tutorial_panel::byte_width(small, medium, s, spacing));
+                        self.tut_panel = Some(crate::tutorial_panel::Panel::new(wrapped));
+                    }
                     self.tut_voices.push(n);
                 }
                 sim::TutEvent::Arrow => self.ui_sounds.push(29),
             }
         }
+        // one panel tick: the coin spins, the arrow slides in while it waits and spins under the pointer
+        let up = self.world.tutorial.as_ref().is_some_and(|t| t.arrow);
+        let hover = up && self.tutorial_arrow_at(self.cursor.0, self.cursor.1);
+        if let Some(p) = self.tut_panel.as_mut() {
+            p.tick(up, hover);
+        }
     }
 
-    /// Where the tutorial panel's text box and arrow button are on screen (unscaled original pixels from the bottom left).
-    fn tutorial_panel(&self, w: usize, h: usize, ui: f32) -> (i32, i32, i32, i32) {
-        let u = |v: f32| (v * ui).round() as i32;
-        (u(8.0), h as i32 - u(300.0), u(320.0), u(110.0))
+    /// Whether window pixel `(x, y)` is on the tutorial's arrow button (it exists only while it waits for a click).
+    fn tutorial_arrow_at(&self, x: i32, y: i32) -> bool {
+        let (_, h) = self.viewport;
+        let ui = self.panel_ui.max(1.0);
+        self.tut_panel.as_ref().is_some_and(|p| p.on_arrow((x as f32 / ui) as i32, ((y - h as i32) as f32 / ui) as i32))
     }
 
     /// Centres the camera on a map pixel.
@@ -276,9 +334,24 @@ impl Play {
         self.radar_black
     }
 
-    /// The building whose info and slots are shown: the clicked one.
-    fn shown_building(&self) -> Option<usize> {
+    /// The selected (clicked) own building: the only one that gets the info box page (`0x455b3b`).
+    fn selected_building(&self) -> Option<usize> {
         self.sel_building.filter(|i| self.world.structures.get(*i).is_some_and(|b| b.alive()))
+    }
+
+    /// The building under the pointer, whoever owns it (`0x418da0` in `0x455ab0`); none while the pointer is on the HUD or outside.
+    fn hovered_building(&self) -> Option<usize> {
+        if !self.edge_scroll || self.hud.as_ref().is_some_and(|l| l.hit(self.cursor.0, self.cursor.1).is_some()) {
+            return None;
+        }
+        let (mx, my) = self.to_map(self.cursor.0, self.cursor.1);
+        self.world.structure_at(mx, my).filter(|&i| self.world.structures[i].alive())
+    }
+
+    /// The building whose production slots are shown (`0x455ab0`): the selected own building, else the one under the pointer
+    /// (an enemy's too: hovering shows its production without the info box page, which only the selected building gets).
+    fn shown_building(&self) -> Option<usize> {
+        self.selected_building().or_else(|| self.hovered_building())
     }
 
     fn radar_look(&mut self, x: i32, y: i32) {
@@ -324,6 +397,103 @@ impl Play {
         }
     }
 
+    /// Turret keys 1-5 (`0x415d7c..0x415edd`): with the turret available and `200 * tier` credits the selection is dropped, the
+    /// air-strike and rally modes end and the next map click places the turret; otherwise nothing happens.
+    pub fn turret_key(&mut self, tier: u32) {
+        if !self.world.turret_flags[0][tier as usize - 1] || self.world.credits[0] < 200 * tier as i32 {
+            return;
+        }
+        self.world.clear_selection();
+        self.sel_building = None;
+        self.strike = None;
+        self.rallying = None;
+        self.placing = Some(tier);
+    }
+
+    /// Selects `i` alone (`0x43ad60`).
+    fn select_only(&mut self, i: usize) {
+        self.world.clear_selection();
+        self.sel_building = None;
+        self.world.units[i].selected = true;
+    }
+
+    /// Tab (`0x41622d`): steps round the player's units to the next live one, selects it alone and centres the view on it (`0x418150`).
+    pub fn select_next_unit(&mut self) {
+        let own: Vec<usize> = (0..self.world.units.len()).filter(|&i| self.world.units[i].player == 0).collect();
+        for _ in 0..=own.len() {
+            if own.is_empty() {
+                return;
+            }
+            self.tab_next = (self.tab_next + 1) % own.len();
+            let i = own[self.tab_next];
+            if self.world.units[i].hp > 0 {
+                self.select_only(i);
+                self.centre_on_selection();
+                return;
+            }
+        }
+    }
+
+    /// H and numpad + (`0x415f98`): the same round robin over the player's Advancers (kind 40); no camera move.
+    pub fn select_next_advancer(&mut self) {
+        let own: Vec<usize> = (0..self.world.units.len()).filter(|&i| self.world.units[i].player == 0 && self.world.units[i].kind == 40).collect();
+        if own.is_empty() {
+            return;
+        }
+        self.adv_next = (self.adv_next + 1) % own.len();
+        let i = own[self.adv_next];
+        if self.world.units[i].hp > 0 {
+            self.select_only(i);
+        }
+    }
+
+    /// Numpad `*` (`all`), `/` (anti-air units only) and `-` (all others) (`0x4162b1`, `0x416369`, `0x416427`): every own unit strictly
+    /// inside the view that is not an Advancer gets the selected flag, every other one loses it. `anti_air`: None = both kinds.
+    pub fn select_visible(&mut self, anti_air: Option<bool>) {
+        let (w, h) = self.viewport;
+        let (x0, y0) = (self.view.x, self.view.y);
+        let (x1, y1) = (x0 + w as f32 / self.view.zoom, y0 + h as f32 / self.view.zoom);
+        self.sel_building = None;
+        for u in self.world.units.iter_mut().filter(|u| u.player == 0) {
+            let class = anti_air.map_or(true, |a| crate::sim::is_anti_air(u.kind) == a);
+            u.selected = class && u.kind != 40 && u.x > x0 && u.x < x1 && u.y > y0 && u.y < y1;
+        }
+    }
+
+    /// Numpad Enter (`0x418150`): centres the view on the middle of the box round the selected units.
+    pub fn centre_on_selection(&mut self) {
+        let mut it = self.world.units.iter().filter(|u| u.selected);
+        let Some(f) = it.next() else { return };
+        let b = it.fold((f.x, f.y, f.x, f.y), |b, u| (b.0.min(u.x), b.1.min(u.y), b.2.max(u.x), b.3.max(u.y)));
+        self.look_at((b.0 + b.2) / 2.0, (b.1 + b.3) / 2.0);
+    }
+
+    /// Backspace (`0x4161b9`): the view goes to the player's (last) headquarters (building kind 100); the selection stays.
+    pub fn look_at_hq(&mut self) {
+        let hq = self.world.structures.iter().rev().find(|s| s.owner == Owner::Player && s.kind_id == 100 && s.hp > 0).map(|s| s.center());
+        if let Some((x, y)) = hq {
+            self.look_at(x as f32, y as f32);
+        }
+    }
+
+    /// Space / numpad 0 (`0x416177`): jumps to where the last message event happened, while a message line is shown.
+    pub fn look_at_event(&mut self) {
+        if let Some((x, y)) = self.world.event_position() {
+            self.look_at(x as f32, y as f32);
+        }
+    }
+
+    /// Numpad 1-9 (`0x416564..0x416674`): the view jumps to the bookmark; with a shift key held (`0x4166ac..0x416763`) the bookmark
+    /// is set to the middle of the current view instead.
+    pub fn bookmark(&mut self, n: usize, set: bool) {
+        if set {
+            let (w, h) = self.viewport;
+            self.bookmarks[n] = Some((self.view.x + w as f32 / self.view.zoom / 2.0, self.view.y + h as f32 / self.view.zoom / 2.0));
+        } else if let Some((x, y)) = self.bookmarks[n] {
+            self.look_at(x, y);
+        }
+    }
+
     /// The rally button or the R key (`0x416cf9`, `0x416769`): the selected own factory becomes the target of the next map click.
     /// Returns whether the mode is on (false: no own factory is selected).
     pub fn arm_rally(&mut self) -> bool {
@@ -347,8 +517,21 @@ impl Play {
             }
         } else {
             let p = self.to_map(x, y);
-            if let Some(force) = self.strike.take() {
-                self.world.launch_strike(0, force, p.0, p.1);
+            if let Some((kind, side)) = self.dev_spawn {
+                if crate::devtools::is_structure(kind) {
+                    // turrets and buildings: the clicked cell is the footprint's top-left cell (the mission's own placement shows it likewise)
+                    self.world.dev_place_structure(kind, side, (p.0.div_euclid(CELL), p.1.div_euclid(CELL)));
+                } else if self.world.add_unit_near(kind, side as i32, p.0, p.1).is_some() {
+                    self.ui_sounds.push(60);
+                }
+                return;
+            }
+            if let Some(force) = self.strike {
+                // `0x417028`: a click on an air-blocked cell launches nothing and the mode stays armed
+                if !self.world.is_air_blocked(p.0.div_euclid(CELL), p.1.div_euclid(CELL)) {
+                    self.strike = None;
+                    self.world.launch_strike(0, force, p.0, p.1);
+                }
                 return;
             }
             if let Some(tier) = self.placing.take() {
@@ -417,9 +600,10 @@ impl Play {
                     }
                 }
                 _ => {
-                    // nothing selected: a click on a building shows its info box and slots (any owner)
+                    // nothing selected: a click on an own building shows its info box and slots; only the own building gets the
+                    // selected flag (`0x417b9a`: `[b+0x8c] == player`), an enemy's slots show on hover alone
                     if !selected {
-                        if let Some(t) = self.world.structure_by_art(p.0, p.1) {
+                        if let Some(t) = self.world.structure_by_art(p.0, p.1).filter(|&t| self.world.structures[t].owner == Owner::Player) {
                             self.sel_building = Some(t);
                         } else {
                             self.sel_building = None;
@@ -482,10 +666,11 @@ impl Play {
             self.placing = None;
             self.strike = None;
             self.rallying = None;
+            self.dev_spawn = None;
             return;
         }
         let (mx, my) = self.to_map(x, y);
-        if self.placing.take().is_some() | self.strike.take().is_some() | self.rallying.take().is_some() {
+        if self.placing.take().is_some() | self.strike.take().is_some() | self.rallying.take().is_some() | self.dev_spawn.take().is_some() {
             return;
         }
         if self.world.player_units().any(|u| u.selected && u.kind == 40) && self.world.structure_at(mx, my).is_some_and(|t| self.world.structures[t].owner == Owner::Player) {
@@ -512,6 +697,10 @@ impl Play {
             return Pointer::Arrow;
         }
         let (mx, my) = self.to_map(x, y);
+        // air-strike mode (`0x417257..0x41727b`): the blocked arrow over cells the air layer `0x60ac38` marks 0xfffffd, else type 10
+        if self.strike.is_some() {
+            return if self.world.is_air_blocked(mx.div_euclid(CELL), my.div_euclid(CELL)) { Pointer::Blocked } else { Pointer::AirStrike };
+        }
         // rally point mode (`0x41763b`): the placement pointer over free ground, the blocked arrow elsewhere
         if self.rallying.is_some() {
             return if self.world.is_blocked(mx.div_euclid(CELL), my.div_euclid(CELL)) { Pointer::Blocked } else { Pointer::Rally };
@@ -559,6 +748,33 @@ impl Play {
         ui::sprite(buf, w, h, f, x, y, ui);
     }
 
+    /// The pointer as an image for the system's cursor (so the compositor moves it at the mouse's own rate instead of once per
+    /// frame): `(key, hotspot, width, height, RGBA)` of the same `cursor.ps6` frame [`draw_pointer`] draws, scaled by `ui`. `key`
+    /// changes whenever the picture does.
+    pub fn pointer_cursor(&self, assets: &mut Assets, ui: f32) -> Option<((usize, u32), (i32, i32), u32, u32, Vec<u8>)> {
+        let set = assets.art.load(opensow_formats::cursor::SPRITE)?;
+        let p = self.pointer();
+        let index = p.frame(opensow_formats::cursor::phase_at(self.world.tick));
+        let f = set.get(index)?;
+        let (ox, oy) = p.offset();
+        let (dw, dh) = (((f.width as f32 * ui).round() as u32).max(1), ((f.height as f32 * ui).round() as u32).max(1));
+        let mut rgba = vec![0u8; (dw * dh * 4) as usize];
+        for y in 0..dh {
+            let sy = ((y as f32 / ui) as usize).min(f.height as usize - 1);
+            for x in 0..dw {
+                let sx = ((x as f32 / ui) as usize).min(f.width as usize - 1);
+                let i = sy * f.width as usize + sx;
+                if f.mask[i] {
+                    let [r, g, b] = opensow_formats::sprite::rgb565_to_rgb8(f.pixels[i]);
+                    let o = ((y * dw + x) * 4) as usize;
+                    rgba[o..o + 4].copy_from_slice(&[r, g, b, 255]);
+                }
+            }
+        }
+        let hot = ((((ox + f.hot_x as i32) as f32 * ui).round() as i32).clamp(0, dw as i32 - 1), (((oy + f.hot_y as i32) as f32 * ui).round() as i32).clamp(0, dh as i32 - 1));
+        Some(((index, (ui * 100.0) as u32), hot, dw, dh, rgba))
+    }
+
     /// Zoom never goes out far enough to show anything beyond the map (no black bars).
     pub fn limit_zoom(&mut self, w: usize, h: usize) {
         let fill = (w as f32 / self.scene.bg_w as f32).max(h as f32 / self.scene.bg_h as f32);
@@ -594,13 +810,13 @@ impl Play {
             self.hud_hover = hover;
         }
         // the info box shows the hovered icon, else the shown building (`0x454d30` -> `0x43cde0`, `0x455b3b`)
+        // only a production slot icon opens it: the hover loops of the turret tabs (`0x454b56`) and the air pills (`0x454cf0`) set just
+        // the hovered id `[hud+4]` and leave the slot index `[ebp-0x10]` at -1, which `0x43cde0` answers by hiding the box
         let hovered_kind = match hover {
-            Some(Hit::Turret(t)) => Some(24 + t as i32),
-            Some(Hit::Air(f)) => Some(f.code()),
             Some(Hit::Slot(i) | Hit::SlotBuy(i)) => self.shown_building().and_then(|b| self.world.structures.get(b)).and_then(|b| b.slots.get(i)).map(|sl| sl.kind),
             _ => None,
         };
-        let selected_kind = self.shown_building().and_then(|b| self.world.structures.get(b)).filter(|b| b.alive()).map(|b| b.kind_id);
+        let selected_kind = self.selected_building().and_then(|b| self.world.structures.get(b)).filter(|b| b.alive()).map(|b| b.kind_id);
         let locked = matches!(hover, Some(Hit::Slot(i) | Hit::SlotBuy(i)) if self.shown_building().and_then(|b| self.world.structures.get(b)).is_some_and(|b| i >= b.active));
         self.infobox.show(hovered_kind.or(selected_kind), locked);
         // the map moves `2 * ticks * speed` px per step (`0x457f80` doubles the delta; the speed is the options menu's KEYS
@@ -654,9 +870,12 @@ impl Play {
         self.time += dt;
         let tick = 1.0 / settings.ticks_per_second as f32;
         let mut n = 0;
-        while self.time >= tick && n < 8 {
+        // the dev tools' speed-up needs more steps per frame (8 at the normal 60 ticks/s)
+        let cap = (settings.ticks_per_second as usize * 8 / 60).max(8);
+        while self.time >= tick && n < cap {
             self.time -= tick;
             self.world.step();
+            self.world.sky_step(settings.cloud_detail);
             // the screen shake nudges the camera by twice the step per tick (`0x458930` -> `0x457f80`)
             let (vw, vh) = ((w as f32 / self.view.zoom) as i32, (h as f32 / self.view.zoom) as i32);
             if let Some((dx, dy)) = self.world.quake_step(settings.quake_on, (self.view.x as i32, self.view.y as i32), (vw, vh)) {
@@ -669,7 +888,7 @@ impl Play {
             self.infobox.tick(self.info_text.as_ref().map(|t| &t.1), total, &desc);
             n += 1;
         }
-        if n == 8 {
+        if n == cap {
             self.time = 0.0;
         }
     }
@@ -699,8 +918,25 @@ impl Play {
             self.centre_on_player(w, h);
             self.fit = false;
         }
-        // destroyed buildings and turrets disappear
-        let dead: HashSet<usize> = self.world.structures.iter().filter(|s| !s.alive()).map(|s| s.object).collect();
+        // structures made during the game (placed turrets, `object == usize::MAX`) get a scene object, so they have art like the level's
+        let fresh: Vec<usize> = (0..self.world.structures.len()).filter(|&i| self.world.structures[i].object == usize::MAX && self.world.structures[i].alive()).collect();
+        if !fresh.is_empty() {
+            for i in fresh {
+                let st = &self.world.structures[i];
+                let mut raw = [0i32; 19];
+                raw[14] = if st.owner == Owner::Player { 0 } else { 1 };
+                raw[13] = st.hp;
+                let obj = opensow_formats::level::Object { kind: st.kind_id, cell_x: st.cell.0, cell_y: st.cell.1, raw };
+                let Some(level) = self.scene.level.as_mut() else { break };
+                let index = level.objects.len();
+                level.objects.push(obj.clone());
+                self.scene.placed.extend(assets.art.place(index, &obj));
+                self.world.structures[i].object = index;
+            }
+            self.scene.placed.sort_by_key(|p| (p.sort_y, p.layer));
+        }
+        // destroyed buildings and turrets disappear when their destruction animation ends (they stay, dead, while it runs: `Structure::dying`)
+        let dead: HashSet<usize> = self.world.structures.iter().filter(|s| !s.present()).map(|s| s.object).collect();
         if !dead.is_empty() {
             self.scene.placed.retain(|p| !matches!(p.source, Source::Object(i) if dead.contains(&i)));
         }
@@ -720,7 +956,7 @@ impl Play {
                 p.frame = frame.min(p.set.len() - 1);
             }
         }
-        let overlays = Overlays { blocked: false, grid: false, objects: false, markers: false, sprites: true, muzzles: false, walk: None, fire: None, foreground: false };
+        let overlays = Overlays { blocked: false, grid: false, objects: false, markers: false, sprites: true, muzzles: false, walk: None, fire: None, foreground: false, minimap: false };
         render(&self.scene, &self.view, overlays, buf, w, h);
         for d in &self.world.decals {
             if let Some((set, i)) = Self::extra_frame(assets, opensow_formats::effects::DECAL_ARRAY, d.frame as usize) {
@@ -736,7 +972,7 @@ impl Play {
             let Some(set) = seq.flash_set.and_then(|f| assets.art.load(&format!("units\\{}_fire.ps6", FLASH_SETS[f as usize]))) else { continue };
             let Some(pl) = self.scene.placed.iter().find(|p| matches!(p.source, Source::Object(i) if i == st.object) && p.layer == 1) else { continue };
             if let Some(fr) = set.get(fi as usize) {
-                blit(buf, w, h, &self.view, fr, pl.ax, pl.ay, false);
+                blit_blend(buf, w, h, &self.view, fr, pl.ax, pl.ay, Blit::Additive);
             }
         }
 
@@ -760,8 +996,16 @@ impl Play {
             }
         }
         // bullets and effects are drawn inside `draw_units`, between the ground units and the hovering Advancers
+        self.draw_aircraft_shadows(assets, buf, w, h);
         self.draw_units(assets, settings, buf, w, h);
-        self.draw_aircraft(buf, w, h);
+        self.draw_aircraft(assets, buf, w, h);
+        // the clouds themselves: additive (`0x414700`), over everything in the world and under the HUD (after the aircraft and bullets)
+        for c in &self.world.sky.clouds {
+            if let Some((set, i)) = Self::extra_frame(assets, opensow_formats::clouds::ARRAY, c.picture as usize) {
+                let (x, y) = c.body_pos();
+                blit_blend(buf, w, h, &self.view, &set[i], x, y, Blit::Additive);
+            }
+        }
         if self.sel_building.is_some_and(|i| !self.world.structures.get(i).is_some_and(|b| b.alive())) {
             self.sel_building = None;
         }
@@ -784,6 +1028,7 @@ impl Play {
         };
         let mut layout = Layout::new(w, h, hs, &inputs);
         layout.radar_on = settings.radar_on;
+        layout.pills_locked = self.world.strike_lock > 0;
         self.hud = Some(layout);
         self.prepare_info(assets);
         self.panel_ui = hs;
@@ -798,13 +1043,13 @@ impl Play {
                 }
             }
         }
-        if self.edge_scroll {
+        if self.edge_scroll && !self.system_pointer {
             self.draw_pointer(assets, buf, w, h, hs);
         }
     }
 
     fn draw_ranges(&self, buf: &mut [u32], w: usize, h: usize) {
-        for u in self.world.units.iter().filter(|u| u.selected) {
+        for u in self.world.units.iter().filter(|u| u.selected && u.player == 0) {
             let Some((min, max)) = sim::weapon_range(u.kind) else { continue };
             if sim::is_anti_air(u.kind) {
                 continue;
@@ -932,7 +1177,8 @@ impl Play {
                 blit(buf, w, h, &view, &top[frame.min(top.len() - 1)], ax, ay, false);
                 if let (Some(f), Some(set)) = (flash, &sp.flash) {
                     if let Some(fr) = set.get(f as usize) {
-                        blit(buf, w, h, &view, fr, ax, ay, false);
+                        // the muzzle flash is added to the picture (`0x479a20` -> `0x45cde0`), its black stays invisible
+                        blit_blend(buf, w, h, &view, fr, ax, ay, Blit::Additive);
                     }
                 }
             } else if let Some(top) = &sp.top {
@@ -943,47 +1189,33 @@ impl Play {
             self.finish_ground(&mut fg_row, buf, w, h);
             self.draw_air_pass(assets, &order, &screen_mask, buf, w, h);
         }
-        // overlays above all sprites: selection and health (the health bar only for one selected unit)
-        let single = self.world.units.iter().filter(|u| u.selected && u.player == 0).count() == 1;
-        for u in &self.world.units {
-            let (sx, sy) = view.to_screen(u.x, u.sprite_y());
-            let r = (16.0 * view.zoom) as i32;
-            if u.selected {
-                for (a, b, c, d) in [(sx - r, sy - r, sx - r + 5, sy - r + 1), (sx - r, sy - r, sx - r + 1, sy - r + 5), (sx + r - 5, sy - r, sx + r, sy - r + 1), (sx + r - 1, sy - r, sx + r, sy - r + 5), (sx - r, sy + r - 1, sx - r + 5, sy + r), (sx - r, sy + r - 5, sx - r + 1, sy + r), (sx + r - 5, sy + r - 1, sx + r, sy + r), (sx + r - 1, sy + r - 5, sx + r, sy + r)] {
-                    rect(buf, w, h, a, b, c, d, (90, 255, 120), 255);
-                }
-            }
-            if settings.hp_bars && u.selected && single {
-                let (bw, top) = (2 * r, sy - r - 4);
-                let fill = (bw as i64 * u.hp.max(0) as i64 / u.max_hp.max(1) as i64) as i32;
-                health_line(buf, w, h, sx - r, top, bw, fill);
+        // a selected unit's health bar (`0x46a420` -> `0x437140`): every unit with the local selection flag (a box also takes enemy units), centred on it, 25 px above its ground point (23 for
+        // the Advancer, which hovers: its sprite height is added), `max_hp / 16` px wide (`max_hp / 20` for the Advancer, `[unit+0x38]`).
+        // The original has no selection frame, so none is drawn.
+        if settings.hp_bars {
+            for u in self.world.units.iter().filter(|u| u.selected && u.hp > 0) {
+                let (scale, dy) = if u.kind == 40 { (20, -23) } else { (16, -25) };
+                health_bar(buf, w, h, &view, u.x as i32, u.sprite_y().round() as i32 + dy, u.hp, u.max_hp, scale);
             }
         }
         // a building's health bar (`0x409400` -> `0x437140`): only while it is selected (clicked) or under the pointer
         let (mx, my) = self.to_map(self.cursor.0, self.cursor.1);
         let hovered = if self.edge_scroll && self.hud.as_ref().is_none_or(|l| l.hit(self.cursor.0, self.cursor.1).is_none()) { self.world.structure_at(mx, my) } else { None };
-        for t in [self.shown_building(), hovered].into_iter().flatten().collect::<std::collections::BTreeSet<_>>() {
+        for t in [self.selected_building(), hovered].into_iter().flatten().collect::<std::collections::BTreeSet<_>>() {
             let s = &self.world.structures[t];
             // width = max / scale (scale 144 for buildings, 72 for turrets, `0x40a981..0x40aa01`), centred on the footprint, at its top edge
             let scale = if matches!(s.kind, ObjectKind::Turret(_)) { 72 } else { 144 };
             let (fw, _) = s.size();
             let (cx, top) = (s.cell.0 * CELL + fw * CELL / 2, s.cell.1 * CELL);
             let (sx, sy) = view.to_screen(cx as f32, top as f32);
-            let bw = ((s.max_hp / scale).max(1) as f32 * view.zoom) as i32;
-            let fill = (((s.hp.max(0) / scale) as f32) * view.zoom) as i32;
-            let col = if s.hp > s.max_hp / 2 { (98, 149, 66) } else if s.hp > s.max_hp / 4 { (181, 178, 25) } else { (197, 69, 8) };
-            let (x0, y0) = (sx - bw / 2, sy);
-            rect(buf, w, h, x0 - 1, y0 - 1, x0 + bw + 1, y0 + 5, (20, 20, 20), 255);
-            rect(buf, w, h, x0, y0, x0 + bw, y0 + 4, (60, 60, 60), 255);
-            rect(buf, w, h, x0, y0, x0 + fill, y0 + 4, col, 255);
-            rect(buf, w, h, x0, y0, x0 + fill, y0 + 1, (col.0.saturating_add(90), col.1.saturating_add(70), col.2.saturating_add(60)), 255);
+            health_bar(buf, w, h, &view, cx, top, s.hp, s.max_hp, scale);
             // protected buildings (`[b+0x114]`) also get the string 146 (index 145) "SATELLITE PROTECTION" (`0x40952c..0x409650`): GDI text
             // (white, black shadow +2,+2) whose left edge is 46 px left of the footprint's middle, its top 6 px above the bar's first row
             // for the selected building (`0x40958a`) and 10 px for one that is only under the pointer (`0x40962c`)
             if s.protected {
                 if let Some(text) = self.lang.as_ref().and_then(|l| l.get(opensow_formats::strings::SATELLITE_PROTECTION)) {
                     let z = view.zoom;
-                    let lift = if self.shown_building() == Some(t) { 11.0 } else { 15.0 }; // the exe: 6 / 10; 5 px higher so the GDI stand-in does not cover the bar
+                    let lift = if self.selected_building() == Some(t) { 11.0 } else { 15.0 }; // the exe: 6 / 10; 5 px higher so the GDI stand-in does not cover the bar
                     let (tx, ty) = (sx as f32 - 46.0 * z, sy as f32 - lift * z);
                     let text = text.trim();
                     if let Some(g) = &self.label_font {
@@ -1000,23 +1232,80 @@ impl Play {
     }
 
     /// Frame `index` of the effect sprite array at exe address `array` (an element of one of `effects::EXTRAS`).
+    /// The turret placement marks (`0x4156b0`, drawn with the additive blit `0x45cde0`): while a turret is armed and the pointer is on the map, every cell of its footprint
+    /// (top-left = the cell under the pointer) gets a tile of `extras\\sizer`, frame 0 (`0x5e68c8`) where it may stand, frame 1
+    /// (`0x5e68cc`) where not. A click only builds when all cells are good (`[pointer+0x1e0]`, `0x4172cb`).
+    fn draw_placement(&self, assets: &mut Assets, buf: &mut [u32], w: usize, h: usize) {
+        let Some(tier) = self.placing else { return };
+        if self.hud.as_ref().is_some_and(|l| l.hit(self.cursor.0, self.cursor.1).is_some()) {
+            return;
+        }
+        let (mx, my) = self.to_map(self.cursor.0, self.cursor.1);
+        let cell = (mx.div_euclid(CELL), my.div_euclid(CELL));
+        let (fw, _) = opensow_formats::buildings::footprint(24 + tier as i32).map_or((1, 1), |(a, b, _)| (a, b));
+        for (i, ok) in self.world.turret_cells(0, tier, cell).into_iter().enumerate() {
+            let (x, y) = (cell.0 + i as i32 % fw, cell.1 + i as i32 / fw);
+            if let Some((set, k)) = Self::extra_frame(assets, if ok { 0x5e68c8 } else { 0x5e68cc }, 0) {
+                blit_blend(buf, w, h, &self.view, &set[k], x * CELL + CELL / 2, y * CELL + CELL / 2, Blit::Additive);
+            }
+        }
+    }
+
     fn extra_frame(assets: &mut Assets, array: u32, index: usize) -> Option<(Set, usize)> {
-        let (extra, offset) = extra_at(array)?;
+        // the exe reads the pointer at `array + 4 * index`, which can lie in the next array (the bomb's `+ 20 * [+0x268c]` is `bomba_r`)
+        let (extra, i) = extra_at(array.wrapping_add(4 * index as u32))?;
         let set = assets.art.load(&format!("{}.ps6", extra.name))?;
-        let i = offset + index;
         (i < set.len()).then_some((set, i))
     }
 
-    /// Aircraft (placeholder shapes), drawn after the units.
-    fn draw_aircraft(&self, buf: &mut [u32], w: usize, h: usize) {
-        // air forces: a shadow on the ground and a body at the flight altitude (placeholder shapes; the art is not wired yet)
+    /// The sprite (array address, frame index) an aircraft is drawn with (`0x467240` / `0x4673a0`): bomber `bomber_l/r` frame +
+    /// 10 * direction, carryall `carryAll`, tripler `tripler`, fighter `fighter`; the asteroid has none.
+    fn aircraft_sprite(a: &opensow_formats::aircraft::Aircraft) -> Option<u32> {
+        use opensow_formats::air::AirForce as F;
+        Some(match a.force {
+            F::Bomber => 0x5e9d38 + 4 * (a.frame + 10 * a.right as i32) as u32,
+            F::Carryall => 0x5ea288 + 4 * a.frame as u32,
+            F::Tripler => 0x5ea328 + 4 * a.frame as u32,
+            F::Fighter => 0x5ea3a4,
+            F::Asteroid => return None,
+        })
+    }
+
+    /// The aircraft shadows (`0x4673a0` through `0x460f60`, one pass before the units): the body sprite as a stencil on the
+    /// ground point, without the altitude.
+    fn draw_aircraft_shadows(&self, assets: &mut Assets, buf: &mut [u32], w: usize, h: usize) {
         for a in &self.world.aircraft {
-            let (gx, gy) = self.view.to_screen(a.x as f32, a.y as f32);
-            let (ax, ay) = self.view.to_screen(a.x as f32, (a.y - a.altitude) as f32);
-            let r = ((14.0 * self.view.zoom) as i32).max(3);
-            rect(buf, w, h, gx - r, gy - r / 3, gx + r, gy + r / 3, (0, 0, 0), 90);
-            let c = if a.side == 0 { (90, 140, 255) } else { (120, 220, 120) };
-            rect(buf, w, h, ax - r, ay - r / 2, ax + r, ay + r / 2, c, 255);
+            let Some(addr) = Self::aircraft_sprite(a) else { continue };
+            if let Some((set, i)) = Self::extra_frame(assets, addr, 0) {
+                blit_blend(buf, w, h, &self.view, &set[i], a.x + a.off_x, a.y + a.off_y, Blit::Shade);
+            }
+        }
+    }
+
+    /// The aircraft bodies (`0x467240`), from the smallest y down (the exe repeatedly picks the undrawn one with the smallest y,
+    /// `0x4202f0`): the plain sprite at the flight altitude; a carryall also has its landing glow (`carryAll_down`, drawn first,
+    /// 3 px up, while it is in the last frame and not yet over the target) and its additive exhaust (`carryAll_rear`).
+    fn draw_aircraft(&self, assets: &mut Assets, buf: &mut [u32], w: usize, h: usize) {
+        use opensow_formats::air::AirForce as F;
+        let mut order: Vec<&opensow_formats::aircraft::Aircraft> = self.world.aircraft.iter().collect();
+        order.sort_by_key(|a| a.y);
+        for a in order {
+            let Some(addr) = Self::aircraft_sprite(a) else { continue };
+            let (x, y) = (a.x + a.off_x, a.y + a.off_y - a.altitude);
+            let tx = a.target.0;
+            if a.force == F::Carryall && a.frame == 4 && (a.x < tx - 1 || a.x > tx + 1) {
+                if let Some((set, i)) = Self::extra_frame(assets, 0x5ea2d8, a.down_frame as usize) {
+                    blit_blend(buf, w, h, &self.view, &set[i], x, y - 3, Blit::Additive);
+                }
+            }
+            if let Some((set, i)) = Self::extra_frame(assets, addr, 0) {
+                blit_blend(buf, w, h, &self.view, &set[i], x, y, Blit::Plain);
+            }
+            if a.force == F::Carryall && (a.x < tx - 2 || a.x > tx + 15) {
+                if let Some((set, i)) = Self::extra_frame(assets, 0x5ea300, a.rear_frame as usize) {
+                    blit_blend(buf, w, h, &self.view, &set[i], x, y, Blit::Additive);
+                }
+            }
         }
     }
 
@@ -1026,6 +1315,13 @@ impl Play {
         // the exe's screen mask (docs/effects.md): the smoke puffs (draw mode 8, `0x45b5e0`) and the darkening smoke (`0x45f4d0`: the
         // wrecks' smoke columns, mode 14) are drawn only where no building's mask frame and no foreground tile was stamped
         let masked = |routine: u32| matches!(routine, 0x45b5e0 | 0x45f4d0);
+        // the clouds' shadows (`0x414730`, darkening and masked like the missile smoke) come right before the shots (`0x420095`)
+        for c in &self.world.sky.clouds {
+            if let Some((set, i)) = Self::extra_frame(assets, opensow_formats::clouds::ARRAY, c.picture as usize) {
+                let (x, y) = c.shadow_pos();
+                blit_blend_masked(buf, w, h, &self.view, &set[i], x, y, Blit::of_routine(0x45f4d0), Some(screen_mask));
+            }
+        }
         for e in self.world.effects.iter().filter(|e| e.spec.mode != PUFF_MODE) {
             let Some(frame) = e.spec.frame_at(e.age) else { continue };
             if let Some((set, i)) = Self::extra_frame(assets, e.spec.array, frame) {
@@ -1080,7 +1376,7 @@ impl Play {
                     FrameRule::Fixed(n) => n as usize,
                     FrameRule::Anim(o) => anim + o as usize,
                     FrameRule::Facing => b.facing as usize,
-                    FrameRule::Variant268c(_) | FrameRule::Variant2680(_) => anim,
+                    FrameRule::Variant268c(n) | FrameRule::Variant2680(n) => anim + n as usize * b.variant as usize,
                 };
                 if matches!(b.bullet_type, 15 | 16) {
                     continue; // drawn above
@@ -1179,11 +1475,11 @@ impl Play {
             ui::text(buf, w, h, &font, &text, w as i32 / 2 + u(2.0), u(13.0) + u(2.0), ui, (0, 0, 0), (0, 0, 0));
             ui::text(buf, w, h, &font, &text, w as i32 / 2, u(13.0), ui, (255, 255, 255), (0, 0, 0));
         }
-        // messages (`0x4036a0` draw, `0x404820` add, `0x4047a0` update, see `message_pose`): text colour (255,243,148),
+        // messages (`MESSAGES` holds the exe's 1-based string numbers, `LangFile::get` is 0-based; `0x4036a0` draw, `0x404820` add, `0x4047a0` update, see `message_pose`): text colour (255,243,148),
         // shadow (74,4,0) at +2,+2
         let births: Vec<u32> = self.world.log.iter().map(|&(t, _)| t as u32).collect();
         for (k, &(t, id)) in self.world.log.iter().enumerate() {
-            let Some(text) = opensow_formats::messages::lang_index(id).and_then(|i| self.lang.as_ref().and_then(|l| l.get(i))) else { continue };
+            let Some(text) = opensow_formats::messages::lang_index(id).and_then(|i| self.lang.as_ref().and_then(|l| l.get(i - 1))) else { continue };
             let text = text.trim();
             let tw = ui::text_width(&font, text, 1.0);
             let Some((x, y)) = message_pose(t as u32, tw, &births[k + 1..], self.world.tick as u32) else { continue };
@@ -1191,31 +1487,9 @@ impl Play {
             ui::text(buf, w, h, &font, text, u(x as f32) + u(2.0), y + u(2.0), ui, (74, 4, 0), (74, 4, 0));
             ui::text(buf, w, h, &font, text, u(x as f32), y, ui, (255, 243, 148), (0, 0, 0));
         }
-        // the tutorial's instruction panel: the step's text word-wrapped to 300 px, the arrow button while it waits for a click
-        if let (Some(step), true) = (self.tut_text, self.world.tutorial.is_some()) {
-            if let Some(text) = self.lang.as_ref().and_then(|l| l.get(sim::tutorial_text_index(step))) {
-                let (px, py, pw, ph) = self.tutorial_panel(w, h, ui);
-                ui::dim_sub(buf, w, h, ui::Rect { x: px, y: py, w: pw, h: ph }, 40);
-                let text = text.trim().trim_start_matches(['i', '!']).trim();
-                let (mut line, mut y) = (String::new(), py + u(8.0));
-                for word in text.split_whitespace() {
-                    let next = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
-                    if ui::text_width(&font, &next, ui) > pw - u(16.0) && !line.is_empty() {
-                        ui::text(buf, w, h, &font, &line, px + u(8.0), y, ui, (255, 255, 255), (0, 0, 0));
-                        y += u(14.0);
-                        line = word.to_string();
-                    } else {
-                        line = next;
-                    }
-                }
-                ui::text(buf, w, h, &font, &line, px + u(8.0), y, ui, (255, 255, 255), (0, 0, 0));
-                if self.world.tutorial.as_ref().is_some_and(|t| t.arrow) {
-                    let a = u(28.0);
-                    let r = ui::Rect { x: px + pw - a, y: py + ph - a, w: a, h: a };
-                    ui::fill(buf, w, h, r, (40, 120, 40), 220);
-                    ui::text(buf, w, h, &font, ">", r.x + a / 2 - u(3.0), r.y + a / 2 - u(6.0), ui, (255, 255, 255), (0, 0, 0));
-                }
-            }
+        // the tutorial's instruction panel (`0x430fd0`): the dark box, the text lines, the spinning coin and the arrow button
+        if let (Some(panel), true) = (&self.tut_panel, self.world.tutorial.is_some()) {
+            self.draw_tutorial_panel(panel, assets, buf, w, h, ui);
         }
         // the hint box of missions 1 and 6 (`0x4303e0`): darkened box around the screen middle, white text (0xffffff)
         if let Some(hint) = self.world.hint {
@@ -1226,6 +1500,7 @@ impl Play {
                 ui::text(buf, w, h, &font, text.trim(), cx - u(hint.text_dx as f32), cy - u(7.0), ui, (255, 255, 255), (0, 0, 0));
             }
         }
+        self.draw_placement(assets, buf, w, h);
         if let Some(layout) = &self.hud {
             let state = hud::State { scene: &self.scene, view: &self.view, world: &self.world, placing: self.placing, strike: self.strike, hover: self.hud_hover, building: self.shown_building(), radar_black: self.radar_black };
             hud::draw(layout, &state, assets, buf, w, h);
@@ -1236,6 +1511,38 @@ impl Play {
         }
         if self.paused {
             self.draw_pause(assets, buf, w, h);
+        }
+    }
+
+    /// The instruction panel (docs/tutorial.md). Everything hangs from the bottom edge in the original's pixels, times `ui`.
+    fn draw_tutorial_panel(&self, panel: &crate::tutorial_panel::Panel, assets: &mut Assets, buf: &mut [u32], w: usize, h: usize, ui: f32) {
+        let u = |v: i32| (v as f32 * ui).round() as i32;
+        let bottom = h as i32;
+        if panel.text.lines.is_empty() || panel.text.width == 0 {
+            return;
+        }
+        let (x0, y0, x1, y1) = panel.box_rect();
+        ui::dim_sub(buf, w, h, ui::Rect { x: u(x0), y: bottom + u(y0), w: u(x1) - u(x0), h: u(y1) - u(y0) }, 32);
+        let font = assets.font("medium");
+        for (k, line) in panel.text.lines.iter().enumerate() {
+            let y = bottom + u(panel.line_y(k));
+            match &self.tut_gdi {
+                Some(g) => g.draw_px(buf, w, h, line, u(crate::tutorial_panel::TEXT_X) as f32, y as f32, ui),
+                None => ui::text(buf, w, h, &font, line, u(crate::tutorial_panel::TEXT_X), y, ui, (255, 255, 255), (0, 0, 0)),
+            }
+        }
+        let gfx = assets.art.load("extras\\tutorialgfx.ps6");
+        let place = |buf: &mut [u32], frame: usize, x: i32, y: i32| {
+            if let Some(f) = gfx.as_ref().and_then(|g| g.get(frame)) {
+                ui::sprite(buf, w, h, f, u(x) - (f.hot_x as f32 * ui).round() as i32, bottom + u(y) - (f.hot_y as f32 * ui).round() as i32, ui);
+            }
+        };
+        if let Some(frame) = panel.coin_frame() {
+            let (cx, cy) = panel.coin_pos();
+            place(buf, frame, cx, cy);
+        }
+        if self.world.tutorial.as_ref().is_some_and(|t| t.arrow) {
+            place(buf, panel.arrow_frame(), panel.arrow_x, panel.arrow_y());
         }
     }
 
@@ -1289,9 +1596,35 @@ pub fn message_pose(born: u32, width: i32, newer: &[u32], now: u32) -> Option<(i
 }
 
 /// The original's health bar: a thin pale-green line over a dark one, no frame; the lost part is dark.
-fn health_line(buf: &mut [u32], w: usize, h: usize, x: i32, y: i32, width: i32, fill: i32) {
-    rect(buf, w, h, x, y, x + width, y + 3, (10, 30, 10), 255);
-    rect(buf, w, h, x, y, x + fill, y + 2, (170, 230, 150), 255);
+/// The exe's health bar (`0x437140`, RGB565 values): a 1 px frame (`0x0001`) around `max / scale` x 3 px, the filled part
+/// `hp / scale` px in three shades (top row light, bottom row dark) and the rest `0x0066`; green while `hp > max / 2`, yellow
+/// above `max / 4`, else red. Centred on `x`, its top frame row at `y` (map pixels); the game's zoom scales every exe pixel.
+fn health_bar(buf: &mut [u32], w: usize, h: usize, view: &View, x: i32, y: i32, hp: i32, max: i32, scale: i32) {
+    use opensow_formats::sprite::rgb565_to_rgb8;
+    const GREEN: [u16; 3] = [0xd7f3, 0x64a8, 0x3323];
+    const YELLOW: [u16; 3] = [0xff94, 0xb583, 0x7b60];
+    const RED: [u16; 3] = [0xfd32, 0xc221, 0x8060];
+    const FRAME: u16 = 0x0001;
+    const EMPTY: u16 = 0x0066;
+    let width = max / scale;
+    let fill = hp.max(0) / scale;
+    let rows = if hp > max / 2 { GREEN } else if hp > max / 4 { YELLOW } else { RED };
+    let (sx, sy) = view.to_screen((x - width / 2) as f32, y as f32);
+    let z = view.zoom;
+    let px = |n: i32| (n as f32 * z).round() as i32;
+    let fill_rect = |buf: &mut [u32], x0: i32, x1: i32, row: i32, c: u16| {
+        let [r, g, b] = rgb565_to_rgb8(c);
+        rect(buf, w, h, sx + px(x0), sy + px(row), sx + px(x1), sy + px(row + 1), (r, g, b), 255);
+    };
+    fill_rect(buf, -1, width + 1, 0, FRAME);
+    for (i, &c) in rows.iter().enumerate() {
+        let row = 1 + i as i32;
+        fill_rect(buf, -1, 0, row, FRAME);
+        fill_rect(buf, width, width + 1, row, FRAME);
+        fill_rect(buf, 0, fill.min(width), row, c);
+        fill_rect(buf, fill.min(width), width, row, EMPTY);
+    }
+    fill_rect(buf, -1, width + 1, 4, FRAME);
 }
 
 #[cfg(test)]

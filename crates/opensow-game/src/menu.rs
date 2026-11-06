@@ -50,11 +50,13 @@ pub struct Settings {
     /// Options RADAR / QUAKE switches (`+8` / `+9`).
     pub radar_on: bool,
     pub quake_on: bool,
+    /// Options CLOUDS detail 0..=4 (0 = no clouds, the first-run default).
+    pub cloud_detail: u32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { ticks_per_second: crate::sim::TICKS_PER_SECOND, hp_bars: true, show_range: false, starter_squad: true, scroll_keys: 5, scroll_mouse: 3, radar_on: true, quake_on: true }
+        Settings { ticks_per_second: crate::sim::TICKS_PER_SECOND, hp_bars: true, show_range: false, starter_squad: false, scroll_keys: 5, scroll_mouse: 3, radar_on: true, quake_on: true, cloud_detail: 0 }
     }
 }
 
@@ -179,7 +181,12 @@ pub fn draw(screen: &Screen, buttons: &[Button], hover: Option<usize>, assets: &
             let (frame, lift) = if hot { (&assets.buttons[si], 0) } else { (&assets.buttons[6 + si], 175) };
             let sc = h as f32 / 1080.0;
             let (fw, fh) = ((frame.width as f32 * sc) as i32, (frame.height as f32 * sc) as i32);
-            ui::sprite_lit(buf, w, h, frame, b.rect.x + (b.rect.w - fw) / 2, b.rect.y + (b.rect.h - fh) / 2, sc, lift);
+            let (fx, fy) = (b.rect.x + (b.rect.w - fw) / 2, b.rect.y + (b.rect.h - fh) / 2);
+            if hot {
+                ui::sprite_glow(buf, w, h, frame, fx, fy, sc);
+            } else {
+                ui::sprite_lit(buf, w, h, frame, fx, fy, sc, lift);
+            }
         } else {
             if hot {
                 ui::fill(buf, w, h, b.rect, (60, 220, 90), 70);

@@ -8,6 +8,7 @@
   * 0x451540 / 0x451920 (CNetMessage2 key and mouse writers) build random input packages; `opensow netpkg` must decode them.
   * 0x4500d0 / 0x44fe00 (the readers) must give the same values on those packages.
   * 0x4527c0 (header field writer) must set exactly the bits of `net::HEADER_FIELDS`.
+  * 0x40a2d0, 0x4128f0, 0x4688d0, 0x46c5c0 (the state-sync writers) run on random objects must decode to the same fields with `opensow netsync` (`formats::netsync`).
 """
 import random, struct, subprocess, sys
 import pefile
@@ -78,5 +79,92 @@ for sel, (at, n) in enumerate(FIELDS):
         others = [i for i, bit in enumerate(bits) if bit and not at <= i < at + n]
         if got != v or others:
             bad += 1; print("MISMATCH header field", sel, v, got, others)
+# state-sync writers (docs/network.md "State sync"): run the exe's own writers on random objects, decode with `opensow netsync`
+OBJ2 = 0x62000000
+mu.mem_map(OBJ2, 0x10000)
+EXTRA = list(mu.mem_read(0x412A48, 31))  # the exe's byte table: per type - 1, which extra follows (0 handle, 1 delay, 2 speed, 3 variant, 4 variant 2, 5 none)
+def put(base_, off, v):
+    mu.mem_write(base_ + off, struct.pack("<I", v & 0xFFFFFFFF))
+def message_bits():
+    n = u32(OBJ + 0x4E2C)
+    return bytes(mu.mem_read(OBJ + 0xC, (n + 7) // 8)), n
+def run_writer(func, name):
+    mu.mem_write(OBJ, b"\0" * 0x5000)
+    call(func, [OBJ2, OBJ])
+    data, n = message_bits()
+    return subprocess.check_output([opensow, "netsync", name, data.hex(), str(n)], text=True).split("\n")
+for case in range(150):
+    mu.mem_write(OBJ2, b"\0" * 0x10000)
+    r32 = lambda: rnd.randrange(1 << 32)
+    # building: kind 7 bits, word 32, x y 8 bits, owner 2 bits (values wider than the field are cut by the writer)
+    vals = [r32() for _ in range(5)]
+    for off, v in zip((0x94, 0x90, 4, 8, 0x8C), vals):
+        put(OBJ2, off, v)
+    got = run_writer(0x40A2D0, "building")
+    want = "%d %d %d %d %d" % (vals[0] & 127, vals[1], vals[2] & 255, vals[3] & 255, vals[4] & 3)
+    if got[0] != want or got[1] != "bits left 0":
+        bad += 1; print("MISMATCH building", got, want)
+    # bullet
+    ty = rnd.randrange(1, 32)
+    v = {o: r32() for o in (0x266C, 0x269C, 0x26A0, 0x26A4, 0x26A8, 0x2698, 0x2660, 0x26B0, 0x26B4, 0x2680, 0x2688, 0x268C, 0x2664, 0x26AC)}
+    mu.mem_write(OBJ2, b"\0" * 0x10000)
+    put(OBJ2, 0x2658, ty)
+    for o, x in v.items():
+        put(OBJ2, o, x)
+    flag = rnd.randrange(2)
+    mu.mem_write(OBJ2 + 0x26C0, bytes([flag]))
+    got = run_writer(0x4128F0, "bullet")
+    xi = EXTRA[ty - 1]
+    xo = {0: (0x2688, 32), 1: (0x26AC, 5), 2: (0x2664, 8), 3: (0x2680, 7), 4: (0x268C, 2)}
+    xv = (v[xo[xi][0]] & ((1 << xo[xi][1]) - 1)) if xi in xo else 0
+    want = "%d %d %d %d %d %d %d %d %d %d %d %d %d" % (ty, v[0x266C] & 3, v[0x269C] & 4095, v[0x26A0] & 4095, v[0x26A4] & 4095, v[0x26A8] & 4095, v[0x2698] & 65535, v[0x2660] & 65535, v[0x26B0], v[0x26B4] & 63, xi, xv, flag if 19 <= ty <= 21 else -1)
+    if got[0] != want or got[1] != "bits left 0":
+        bad += 1; print("MISMATCH bullet", ty, got, want)
+    # air squad
+    mu.mem_write(OBJ2, b"\0" * 0x10000)
+    offs = (0x28, 0x1C, 0xC, 0x10, 0x98, 0x9C, 0x20, 0xA0, 0xA4)
+    bitsw = (8, 16, 16, 16, 16, 16, 2, 32, 6)
+    vals = [r32() for _ in offs]
+    for o, x in zip(offs, vals):
+        put(OBJ2, o, x)
+    got = run_writer(0x4688D0, "air")
+    want = " ".join(str(x & ((1 << b) - 1)) for x, b in zip(vals, bitsw))
+    if got[0] != want or got[1] != "bits left 0":
+        bad += 1; print("MISMATCH air", got, want)
+    # unit with and without chassis / top
+    mu.mem_write(OBJ2, b"\0" * 0x10000)
+    CH, TOP = OBJ2 + 0x2000, OBJ2 + 0x4000
+    kind = rnd.choice([1, 7, 15, 40, 41, 46, 109, 110, 111, 112, 113, 0x6C, 0x72])
+    handle, player = r32(), rnd.randrange(4)
+    ux, uy = rnd.randrange(4096), rnd.randrange(4096)
+    home = (rnd.randrange(128), rnd.randrange(128))
+    has_ch, has_top = rnd.randrange(2), rnd.randrange(2)
+    put(OBJ2, 0x40, kind); put(OBJ2, 0x3C, handle); put(OBJ2, 0x44, player)
+    put(OBJ2, 0x14, ux); put(OBJ2, 0x18, uy); put(OBJ2, 0xC, home[0]); put(OBJ2, 0x10, home[1]); put(OBJ2, 0x68, r32())
+    put(OBJ2, 8, CH if has_ch else 0); put(OBJ2, 4, TOP if has_top else 0)
+    c = [rnd.randrange(0, 128) for _ in range(6)]  # [+0x64 .. +0x78]
+    for i, o in enumerate((0x64, 0x68, 0x6C, 0x70, 0x74, 0x78)):
+        put(CH, o, c[i])
+    goalx, goaly = rnd.randrange(4096), rnd.randrange(4096)
+    put(CH, 0x5C, goalx); put(CH, 0x60, goaly)
+    w168, w16c, e0 = r32(), r32(), rnd.randrange(4)
+    put(CH, 0x168, w168); put(CH, 0x16C, w16c); put(CH, 0xE0, e0)
+    face = r32()
+    put(TOP, 0x70, face)
+    got = run_writer(0x46C5C0, "unit")
+    cell = (c[0], c[1]) if has_ch else (ux >> 5, uy >> 5)
+    rel = lambda a, b: 0 if a == b else (2 if a > b else 1)
+    parts = [kind & 0xFFFF, handle, player & 3, cell[0] & 127, cell[1] & 127, home[0], home[1]]
+    line = " ".join(map(str, parts))
+    if has_ch:
+        line += " C %d %d %d %d %d %d %d %d %d" % (rel(c[0], c[2]), rel(c[1], c[3]), rel(c[2], c[4]), rel(c[3], c[5]), (goalx >> 5) & 127, (goaly >> 5) & 127, w168, w16c & 63, int(e0 == 2))
+    else:
+        line += " N"
+    if has_top:
+        line += " T %d %d" % (face & 31, (u32(OBJ2 + 0x68) if 109 <= kind <= 113 else -1))
+    else:
+        line += " N"
+    if got[0] != line or got[1] != "bits left 0":
+        bad += 1; print("MISMATCH unit", got, line)
 print("net layout:", "ok" if not bad else f"{bad} mismatches")
 sys.exit(1 if bad else 0)

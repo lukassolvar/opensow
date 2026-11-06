@@ -65,6 +65,7 @@ impl Frame {
     }
 }
 
+#[inline(always)]
 pub fn rgb565_to_rgb8(c: u16) -> [u8; 3] {
     let (r, g, b) = ((c >> 11) as u8, ((c >> 5) & 63) as u8, (c & 31) as u8);
     [r << 3 | r >> 2, g << 2 | g >> 4, b << 3 | b >> 2]

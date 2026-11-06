@@ -61,6 +61,15 @@ impl Default for Explosion {
 }
 
 impl Explosion {
+    /// `([bullet+0x26c4], [bullet+0x26c8])`: the counter and the step the event is at (a savegame keeps both).
+    pub fn parts(&self) -> (i32, usize) {
+        (self.counter, self.k)
+    }
+
+    pub fn from_parts(counter: i32, k: usize) -> Explosion {
+        Explosion { counter, k }
+    }
+
     /// Number of words of the offset list used: twice the offsets up to `LAST_RING` (`ends` as in `Rings::ends`).
     pub fn limit(ends: &[usize]) -> usize {
         ends.get(LAST_RING).map_or(0, |&e| 2 * e)

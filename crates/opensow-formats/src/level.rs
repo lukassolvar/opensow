@@ -127,9 +127,19 @@ impl Object {
         }
     }
 
-    /// Current hit points (word 13); buildings top out at ~13536.
+    /// Current hit points as stored in word 13 (the exe reads it but never uses it: see [`Object::start_hp`]).
     pub fn hp(&self) -> i32 {
         self.raw[13]
+    }
+
+    /// The hit points a building really starts with (`0x41dfc8..0x41dff3`, `0x43a003`): a neutral building (owner 2) gets half its
+    /// maximum; every other owner gets `max * word18 / 100` (the percentage, 100 in files without the word), capped at `max`.
+    pub fn start_hp(&self, max: i32) -> i32 {
+        if self.raw[14] == 2 {
+            max / 2
+        } else {
+            (max * self.raw[18] / 100).min(max)
+        }
     }
 }
 
@@ -238,13 +248,12 @@ impl Level {
         [self.header[2], self.header[3]]
     }
 
-    /// Starting air-force stocks: header words `4+3g ..= 6+3g` for group `g` in [`HEADER_ORDER`].
-    /// The exe's level loader (`0x41d88e..0x41d9bd`) pushes each type code onto a per-side queue that many times.
+    /// Starting air-force stocks for group `g` in [`HEADER_ORDER`]: `counts` = `[player, enemy, unused]` = header words
+    /// `5+3g`, `6+3g` and `4+3g`. The exe's level loader (`0x41d88e..0x41d9bd`) queues the type code `header[5+3g]` times for the
+    /// player block `0x70ba50` and `header[6+3g]` times for the enemy block `0x70c6b8`; word `4+3g` is never read (and is 0 in
+    /// every shipped level). Multiplayer maps set both players' words (Island of Fate: 12 fighters each).
     pub fn air_stock(&self) -> [AirStock; 5] {
-        std::array::from_fn(|g| {
-            let w = &self.header[4 + 3 * g..7 + 3 * g];
-            AirStock { force: HEADER_ORDER[g], counts: [w[0], w[1], w[2]] }
-        })
+        std::array::from_fn(|g| AirStock { force: HEADER_ORDER[g], counts: [self.header[5 + 3 * g], self.header[6 + 3 * g], self.header[4 + 3 * g]] })
     }
 
     pub fn parse(data: &[u8]) -> Result<Level> {
@@ -331,11 +340,11 @@ mod tests {
     #[test]
     fn air_stock_groups() {
         let mut l = Level::parse(&sample()).unwrap();
-        l.header[5 + 3 * 3] = 4; // group 3 (fighter), side 1
-        l.header[6 + 3 * 4] = 9; // group 4 (tripler), side 2
+        l.header[5 + 3 * 3] = 4; // group 3 (tripler), the player's word
+        l.header[6 + 3 * 4] = 9; // group 4 (fighter), the enemy's word
         let st = l.air_stock();
-        assert_eq!((st[3].force, st[3].counts), (crate::air::AirForce::Tripler, [0, 4, 0]));
-        assert_eq!((st[4].force, st[4].counts), (crate::air::AirForce::Fighter, [0, 0, 9]));
+        assert_eq!((st[3].force, st[3].counts), (crate::air::AirForce::Tripler, [4, 0, 0]));
+        assert_eq!((st[4].force, st[4].counts), (crate::air::AirForce::Fighter, [0, 9, 0]));
         assert_eq!(st[0].counts, [0, 0, 0]);
     }
 

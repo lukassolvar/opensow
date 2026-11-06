@@ -1,18 +1,27 @@
 //! Level terrain: `Mxx.map` (per-cell flags) and `Mxx.tmi` (tile index grid).
 //!
-//! `.map` layout (all little-endian):
+//! A `.map` file is the exe's own `Serialize` stream of the map object (`0x459960`, global `0x6bf980`, docs/savegame.md) in
+//! its "level" form, so `save::MapState` parses it too (`tests/real_data.rs`). All little-endian:
 //! ```text
-//! u8   tag_len = 4, "VER7"
-//! u32  a, b            probably start/camera position in pixels (unconfirmed)
-//! u32  width, height   in cells (one cell = 32x32 px of the background SRF)
-//! u8   unknown         always 0 so far
-//! width*height * 17-byte cells, row-major:
-//!   u8 x; [u8;3]+u8 blocked (0xFFFFFD when impassable, else 0);
-//!   [u8;4] border (same encoding; set on the outer ring of the map and, on M04/M10/M22, on no-fly areas: the air layer's terrain, docs/pathfinding.md);
-//!   [u8;3] zero; u8 flag (sparse, meaning unknown); [u8;4] zero; u8 y
-//! 4 zero bytes
+//! u8   tag_len = 4, "VER7"      the version string; the loader compares it with the CString at 0x71cec8
+//!                               ("Wrong map version!!!")
+//! u32  a, b                     scroll position of player 0's view in pixels ([map+0x20], [map+0x2c]; clamped
+//!                               to the map minus the screen)
+//! u32  width, height            in cells (one cell = 32x32 px of the background SRF)
+//! height * width * 17-byte cells, row-major (y outer, x inner; in memory index x * 128 + y):
+//!   u16 coord    (x << 8) | y     [+0xcc], never read by the exe
+//!   u32 ground   0xFFFFFD = impassable terrain, else 0                  [+0x80cc]   walkers' obstacle grid
+//!   u32 air      the same for the air layer: the outer ring and, on M04/M10/M22, no-fly areas  [+0x180cc]
+//!   u8  reserved always 0 (the only writer, 0x436130, ANDs it)          [+0x280cc]
+//!   u8  no_marks 1 = no scorch decals / impact debris / smoke here (M02 only: 497 cells)  [+0x2c0cc]
+//!   u8  no_build 1 = buildings and turrets may not be placed here        [+0x300cc]
+//!   u32 building handle of the building covering the cell, 0 in files  [+0x340cc]
+//! u8   0                         "has player records" (0 in files; 1 in savegames, then `u32 3` and 3 camera records)
+//! u32  0                         number of map items (sprites added at run time; none in files)
 //! ```
-//! File size is always `22 + width*height*17 + 4` (checked on all shipped maps).
+//! File size is always `22 + width*height*17 + 4`: the cell stream starts at byte 21 and the five tail bytes are the
+//! two fields above. (Older notes read the first byte of each 17-byte window as a pad; the layout below is shifted by that
+//! one byte, which is why `Cell::x` is byte 0 of the window: the high byte of `coord`.)
 //!
 //! `.tmi`: `u16 width, u16 height`, then `width*height` u16 indices into the
 //! level's `.til` frame list (0 = no tile).
@@ -28,8 +37,12 @@ pub struct Cell {
     pub y: u8,
     pub blocked: bool,
     pub border: bool,
-    /// Sparse flag at cell byte 11; meaning not yet identified.
-    pub flag: bool,
+    /// `no_build` layer (`+0x300cc`, window byte 11): buildings and turrets cannot be placed here (shore and rock edges). The
+    /// placement check (`0x408cfc`) refuses it; the footprint stamp (`0x40ad69`) sets it and a destroyed building clears it (`0x40b0e5`).
+    pub no_build: bool,
+    /// `no_marks` layer (`+0x2c0cc`, window byte 10): no scorch decal, flying piece or smoke puff lands here (docs/effects.md).
+    /// Only M02 sets it (497 cells in its lower part).
+    pub no_marks: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -58,7 +71,7 @@ impl Map {
         let mut cells = Vec::with_capacity(n);
         for _ in 0..n {
             let c = r.bytes(CELL_SIZE, "map cell")?;
-            cells.push(Cell { x: c[0], y: c[16], blocked: c[1] != 0, border: c[5] != 0, flag: c[11] != 0 });
+            cells.push(Cell { x: c[0], y: c[16], blocked: c[1] != 0, border: c[5] != 0, no_build: c[11] != 0, no_marks: c[10] != 0 });
         }
         if r.remaining() != 4 {
             return Err(Error::Invalid(format!("{} trailing bytes after cells, expected 4", r.remaining())));
@@ -111,6 +124,17 @@ mod tests {
         }
         d.extend([0; 4]);
         d
+    }
+
+    #[test]
+    fn no_build_and_no_marks_are_window_bytes_11_and_10() {
+        let mut d = tiny_map();
+        let first = 22; // the first 17-byte window (after the one-byte shift)
+        d[first + 10] = 1;
+        d[first + CELL_SIZE + 11] = 1;
+        let m = Map::parse(&d).unwrap();
+        assert!(m.cells[0].no_marks && !m.cells[0].no_build);
+        assert!(m.cells[1].no_build && !m.cells[1].no_marks);
     }
 
     #[test]

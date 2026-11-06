@@ -6,8 +6,8 @@
 //!
 //! * launch (`0x467ee0`) -> [`Aircraft::launch`]; per-tick update (`0x467b50`) -> [`Aircraft::step`];
 //!   bomb/missile/pod/meteor/unload spawns (`0x468240`) -> [`Event`]; carryall squads (`0x468960`) -> [`squad`].
-//! * Not ported: the death sequence effects (smoke/explosions; an aircraft with `hp <= 0` is removed after `death_timer`
-//!   ticks), engine sounds and the smoke puffs of the fighter, and the damage a bullet does on impact (see `projectile`).
+//! * The death sequence (`0x467850`, [`Aircraft::step`] -> `die`): explosions while falling, a final blast; an aircraft with
+//!   `hp <= 0` is removed after `death_timer` ticks. Engine sounds and the fighter's smoke are ported; bullet damage is in `projectile`.
 
 use crate::air::AirForce;
 use crate::projectile::steps_at;
@@ -22,6 +22,9 @@ pub enum Event {
     Shot { bullet_type: u8, strength: i32, from: (i32, i32), to: (i32, i32) },
     /// A carryall lands a squad on the 4x2 cells starting at `(cell_x - 1, cell_y)` (`squad` = index into [`squad`]).
     Unload { cell_x: i32, cell_y: i32, squad: usize },
+    /// A falling aircraft's `e_air2` explosion sprite (`0x4054a0`, array `0x5e96f8`, 52 frames, `period` ticks each: 2 while it
+    /// falls, 4 for the four of the final blast) at a map position.
+    Fireball { x: i32, y: i32, period: u8 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -42,10 +45,16 @@ pub struct Aircraft {
     pub speed: i32,
     /// `[+0x2c]`: hit points.
     pub hp: i32,
+    /// `[+0x18]`: x offset of the point anti-air aims at (`0x479953`) and of the range test for a kept target (`0x47b461`): the
+    /// bomber's +50 flying right / -50 flying left (`0x468063..0x468070`), 0 for the others (`0x467f4e`).
+    #[serde(default)]
+    pub aim_dx: i32,
     /// `[+0x34]`: true = flies towards +x.
     pub right: bool,
     /// `[+0x38]`: ticks a destroyed aircraft keeps falling before it is removed.
     pub death_timer: i32,
+    /// `[+0x3c]`: ticks until the next explosion of the falling aircraft (0 at launch, so the first comes at once).
+    pub cloud_timer: i32,
     /// `[+0x40]`, `[+0x44]`, `[+0x48]`, `[+0x4c]`: frame, frame count, countdown, reload of the main animation.
     pub frame: i32,
     pub frames: i32,
@@ -62,9 +71,17 @@ pub struct Aircraft {
     pub armed: bool,
     /// `[+0x88]`: carryall squad index.
     pub squad: usize,
+    /// Carryall exhaust (`carryAll_rear`, `[+0x50]` frame of 4, `[+0x58]` countdown, reload 2) and landing glow (`carryAll_down`,
+    /// `[+0x60]` frame of 2, `[+0x68]` countdown, reload 4); both advance once per step (`0x467450`).
+    pub rear_frame: i32,
+    rear_count: i32,
+    pub down_frame: i32,
+    down_count: i32,
     map_width_px: i32,
     /// `[+0x94]`: the bomber's drone countdown (a sound every 9 steps); also marks "sound already played" for the others.
     sound: i32,
+    /// `[+0x8d]`: the carryall's departure sound has played.
+    sound_out: bool,
     /// Sound effects the last steps asked for: `(effect id, x, y)` in map pixels. The game drains this.
     pub sounds: Vec<(u8, i32, i32)>,
 }
@@ -94,8 +111,10 @@ impl Aircraft {
             altitude: 200,
             speed: 120,
             hp: 0,
+            aim_dx: 0,
             right,
             death_timer: 180,
+            cloud_timer: 0,
             frame: 0,
             frames: 1,
             anim_count: 0,
@@ -107,8 +126,13 @@ impl Aircraft {
             off_y: 0,
             armed: false,
             squad: 0,
+            rear_frame: 0,
+            rear_count: 0,
+            down_frame: 0,
+            down_count: 0,
             map_width_px,
             sound: 0,
+            sound_out: false,
             sounds: Vec::new(),
         };
         match force {
@@ -117,7 +141,7 @@ impl Aircraft {
                 a.frames = 3;
                 a.anim_reload = 2;
                 a.counter = 4;
-                (a.reach, a.off_x) = if right { (45, 75) } else { (-45, 70) };
+                (a.reach, a.off_x, a.aim_dx) = if right { (45, 75, 50) } else { (-45, 70, -50) };
                 a.off_y = 20;
             }
             AirForce::Carryall => {
@@ -155,6 +179,16 @@ impl Aircraft {
     }
 
     /// False once the aircraft left the map or finished falling.
+    /// The countdowns of the exhaust and landing-glow animations (`[+0x58]`, `[+0x68]`), kept by a savegame.
+    pub fn glow_counts(&self) -> (i32, i32) {
+        (self.rear_count, self.down_count)
+    }
+
+    pub fn set_glow_counts(&mut self, rear: i32, down: i32) {
+        self.rear_count = rear;
+        self.down_count = down;
+    }
+
     pub fn alive(&self) -> bool {
         if self.hp <= 0 && self.death_timer <= 0 {
             return false;
@@ -166,11 +200,45 @@ impl Aircraft {
         }
     }
 
+    /// The destroyed aircraft's tick (`0x467850`, called every tick while `hp <= 0`). The cloud timer `[+0x3c]` counts down; at 0 it
+    /// restarts at `30 + rand(5)`, sound 23 plays and one fireball appears: with chance 1/4 (`rand(4) == 0`) within +-50 px
+    /// vertically and +-100 px horizontally of the aircraft, else within +-30 / +-60 (each offset `(rand(2) * 2 - 1) * rand(n)`, the
+    /// vertical one drawn first). When the death timer `[+0x38]` runs out three more sounds and four slow fireballs (the wide
+    /// spread) mark the end. All draws use the lockstep generator.
+    fn die(&mut self, rand: &mut dyn FnMut(u32) -> i32, events: &mut Vec<Event>) {
+        let (x, y) = (self.x, self.y - self.altitude);
+        let spread = |rand: &mut dyn FnMut(u32) -> i32, ny: u32, nx: u32| {
+            let sy = rand(2) * 2 - 1;
+            let dy = rand(ny) * sy;
+            let sx = rand(2) * 2 - 1;
+            let dx = rand(nx) * sx;
+            (x + dx, y + dy)
+        };
+        self.cloud_timer -= 1;
+        if self.cloud_timer <= 0 {
+            self.cloud_timer = 30 + rand(5);
+            self.sounds.push((23, x, y));
+            let (ny, nx) = if rand(4) == 0 { (50, 100) } else { (30, 60) };
+            let (fx, fy) = spread(rand, ny, nx);
+            events.push(Event::Fireball { x: fx, y: fy, period: 2 });
+        }
+        self.death_timer -= 1;
+        if self.death_timer <= 0 {
+            for _ in 0..3 {
+                self.sounds.push((23, x, y));
+            }
+            for _ in 0..4 {
+                let (fx, fy) = spread(rand, 50, 100);
+                events.push(Event::Fireball { x: fx, y: fy, period: 4 });
+            }
+        }
+    }
+
     /// Advances one game tick. `rand(n)` must return a value in `0..n` (the exe's lockstep generator `0x437b10`).
     pub fn step(&mut self, tick: u32, rand: &mut dyn FnMut(u32) -> i32) -> Vec<Event> {
         let mut events = Vec::new();
         if self.hp <= 0 {
-            self.death_timer -= 1;
+            self.die(rand, &mut events);
             if self.death_timer <= 0 {
                 return events;
             }
@@ -280,15 +348,44 @@ impl Aircraft {
     }
 
     fn carryall_step(&mut self, tick: u32, events: &mut Vec<Event>) {
+        // the two exhaust animations count down and wrap (`0x467458..0x467494`)
+        self.rear_count -= 1;
+        if self.rear_count < 0 {
+            self.rear_frame += 1;
+            self.rear_count = 2;
+            if self.rear_frame >= 4 {
+                self.rear_frame = 0;
+            }
+        }
+        self.down_count -= 1;
+        if self.down_count < 0 {
+            self.down_frame += 1;
+            self.down_count = 4;
+            if self.down_frame >= 2 {
+                self.down_frame = 0;
+            }
+        }
         let d = (self.x - self.target.0).abs();
+        let approaching = self.target.0 <= self.x;
+        // body frame 0..4 from the distance (`0x4674c2..0x467565`): approaching (target at or left of x) and leaving use
+        // different thresholds
+        let thresholds: [i32; 4] = if approaching { [190, 175, 160, 145] } else { [190, 180, 170, 160] };
+        self.frame = thresholds.iter().filter(|&&t| d < t).count() as i32;
         let lead = if d >= 120 { 0 } else { 119 - d };
         if (41..=199).contains(&d) {
             self.altitude = d;
         }
         self.x -= steps_at((self.speed - lead) as u32, tick) as i32;
-        // the landing sound (62, `0x467592`): once, when it is closer than 190 px and still above 45
-        if self.sound == 0 && d < 190 && self.altitude > 45 {
-            self.sound = 1;
+        // the landing sound (62, `0x467592`, at the aircraft's position and altitude) plays twice per visit, each time once: while
+        // approaching (target at or left of x) as soon as it is closer than 190 px (flag `[+0x8c]`), and while leaving (target right
+        // of x) as soon as it climbs above 45 (flag `[+0x8d]`, `0x467570`)
+        if approaching {
+            if self.sound == 0 && d < 190 {
+                self.sound = 1;
+                self.sounds.push((62, self.x, self.y - self.altitude));
+            }
+        } else if self.altitude > 45 && !self.sound_out {
+            self.sound_out = true;
             self.sounds.push((62, self.x, self.y - self.altitude));
         }
         if d < 5 && self.counter <= 0 {
@@ -400,12 +497,166 @@ pub fn squad(index: usize) -> Option<Vec<(i32, i32, i32)>> {
 /// The squad used when the game-mode global `[0x49a33c]` is 1.
 pub const MODE1_SQUAD: [i32; 6] = [7, 7, 7, 7, 10, 10];
 
+/// One unit as the computer opponent's strike pick (`0x435ad0`) sees it.
+#[derive(Debug, Clone, Copy)]
+pub struct StrikeUnit {
+    pub x: i32,
+    pub y: i32,
+    pub kind: i32,
+    /// Belongs to the side that picks the target.
+    pub own: bool,
+    /// Standing at its destination (`[chassis+0x14/0x18] == [top+0x5c/0x60]`).
+    pub idle: bool,
+}
+
+/// Where the computer opponent sends an air strike (`0x435ad0`, port of the pick, not emulation-verified).
+/// 1. An idle pod (kind 46) of another side: its position.
+/// 2. Otherwise a density map over a 24-column grid of 128-px blocks, `index = bx + 24 * by`, built from every unit but the
+///    Advancer (40): an own unit subtracts 3 on its block, 2 on the blocks left and right, 1 above and below (indices `0..=480`
+///    only); a foreign one adds `3w`, `2w`, `w` the same way with `w` = 2 for an idle walker (41..=45) else 1, but only for
+///    indices `0..=256` (so the lower part of the map never attracts a strike), with no column check (a neighbour past
+///    column 23 lands on the next row). The first cell with the highest value wins when it reaches 9 (the running best is
+///    kept as a signed byte); the strike goes to the cell's centre.
+pub fn ai_strike_target(units: &[StrikeUnit]) -> Option<(i32, i32)> {
+    if let Some(u) = units.iter().find(|u| u.kind == 46 && !u.own && u.idle) {
+        return Some((u.x, u.y));
+    }
+    let mut grid = [0i32; 481];
+    for u in units.iter().filter(|u| u.kind != 40) {
+        let i = (u.x >> 7) + 24 * (u.y >> 7);
+        let w = if (41..=45).contains(&u.kind) && u.idle { 2 } else { 1 };
+        let (limit, c, side, vert) = if u.own { (480, -3, -2, -1) } else { (256, 3 * w, 2 * w, w) };
+        for (j, v) in [(i, c), (i + 1, side), (i - 1, side), (i + 24, vert), (i - 24, vert)] {
+            if (0..=limit).contains(&j) {
+                grid[j as usize] += v;
+            }
+        }
+    }
+    let (mut best, mut at) = (0i8, 0usize);
+    for (i, &v) in grid[..480].iter().enumerate() {
+        if (best as i32) < v {
+            best = v as i8;
+            at = i;
+        }
+    }
+    (best >= 9).then(|| ((at as i32 % 24) * 128 + 64, (at as i32 / 24) * 128 + 64))
+}
+
+/// Pixels per range cell in the anti-air aircraft search (`0x47b3e7`, `0x47b3f3`: `imul .., 0x32`).
+pub const AIR_RANGE_STEP: i32 = 50;
+
+/// What the anti-air search sees of one aircraft slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AirSlot {
+    pub id: u32,
+    pub side: i32,
+    pub force: AirForce,
+    pub x: i32,
+    pub y: i32,
+    pub aim_dx: i32,
+    pub hp: i32,
+}
+
+/// The anti-air top's aircraft search (`0x47b3c0`, called by `0x46c990` for the anti-air kinds 1, 2, 3, 42 and the turret 110 on
+/// the top's 30-tick poll) from the shooter's position `(x, y)` with the range `min..max` in cells and `current` the aircraft
+/// it aimed at last (`[unit+0x80]`). Slots are scanned side by side (0, 1, 2, skipping `own_side`) in slot order; aircraft
+/// with `hp <= 0` and fighters (code 32) are skipped. The current target is kept while `min*50 < d < max*50`, `d` measured to
+/// `x + aim_dx` (`0x47b461..0x47b49f`); otherwise (the current one is no candidate) the nearest other aircraft by the plain
+/// `x`, on a tie the later slot, is taken if `min*50 <= d <= max*50` (`0x47b4cf..0x47b55a`). Distances are `trunc(sqrt(..))`.
+/// Returns the new target (`None` clears both `[unit+0x80]` and the top's target, `0x47b5b2`).
+pub fn anti_air_target(slots: &[AirSlot], x: i32, y: i32, current: Option<u32>, min: u32, max: u32, own_side: i32) -> Option<u32> {
+    let (lo, hi) = (min as i32 * AIR_RANGE_STEP, max as i32 * AIR_RANGE_STEP);
+    let dist = |dx: i32, dy: i32| ((dx as f64 * dx as f64 + dy as f64 * dy as f64).sqrt()) as i32;
+    let mut candidates = Vec::new();
+    for side in 0..3 {
+        if side == own_side {
+            continue;
+        }
+        for a in slots.iter().filter(|a| a.side == side && a.hp > 0 && a.force != AirForce::Fighter) {
+            if Some(a.id) == current {
+                let d = dist(x - a.aim_dx - a.x, y - a.y);
+                if d > lo && d < hi {
+                    return Some(a.id);
+                }
+            } else {
+                candidates.push(a);
+            }
+        }
+    }
+    let mut best: Option<&AirSlot> = None;
+    let mut best_d = hi + 100;
+    for a in candidates {
+        let d = dist(x - a.x, y - a.y);
+        if best_d < d {
+            continue;
+        }
+        best_d = d;
+        best = Some(a);
+    }
+    best.filter(|_| best_d >= lo && best_d <= hi).map(|a| a.id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn no_rand() -> impl FnMut(u32) -> i32 {
         |_| 0
+    }
+
+    #[test]
+    fn a_falling_bomber_explodes_every_30_ticks_and_ends_with_four_slow_fireballs() {
+        let mut a = Aircraft::launch(AirForce::Bomber, 500, 700, 0, 64, 0);
+        a.hp = 0;
+        let mut r = no_rand();
+        let mut fireballs = Vec::new();
+        let mut ticks = 0;
+        while a.alive() && ticks < 400 {
+            ticks += 1;
+            for e in a.step(0, &mut r) {
+                if let Event::Fireball { period, .. } = e {
+                    fireballs.push((ticks, period));
+                }
+            }
+        }
+        // the first at once (timer 0 at launch), then every 30 ticks with rand(5) = 0; the 180th tick (death timer) adds the four slow ones and removes it
+        let slow = fireballs.iter().filter(|f| f.1 == 4).count();
+        let fast: Vec<i32> = fireballs.iter().filter(|f| f.1 == 2).map(|f| f.0).collect();
+        assert_eq!(slow, 4);
+        assert_eq!(fast, vec![1, 31, 61, 91, 121, 151]);
+        assert_eq!(ticks, 180);
+        assert_eq!(a.sounds.len(), 6 + 3); // one per explosion, three at the end
+    }
+
+    fn foe(x: i32, y: i32, kind: i32, idle: bool) -> StrikeUnit {
+        StrikeUnit { x, y, kind, own: false, idle }
+    }
+
+    #[test]
+    fn the_strike_pick_prefers_an_idle_enemy_pod_then_the_densest_block() {
+        let pod = foe(300, 400, 46, true);
+        assert_eq!(ai_strike_target(&[foe(10, 10, 1, false), pod]), Some((300, 400)));
+        assert_eq!(ai_strike_target(&[foe(300, 400, 46, false)]), None); // a moving pod and a single unit: 3 < 9
+        // three foes on one block: 9 on it
+        let three = [foe(200, 200, 1, false), foe(210, 200, 1, false), foe(220, 200, 1, false)];
+        assert_eq!(ai_strike_target(&three), Some((192, 192)));
+        // an own unit on the same block takes 3 away
+        let mut with_own = three.to_vec();
+        with_own.push(StrikeUnit { own: true, ..foe(200, 200, 1, false) });
+        assert_eq!(ai_strike_target(&with_own), None);
+        // idle walkers count double
+        assert_eq!(ai_strike_target(&[foe(200, 200, 41, true), foe(200, 200, 41, true)]), Some((192, 192)));
+    }
+
+    #[test]
+    fn the_strike_pick_keeps_the_exes_grid_quirks() {
+        // below index 256 (row 10 and further down) foreign units add nothing
+        let low = [foe(200, 11 * 128 + 5, 1, false), foe(200, 11 * 128 + 5, 1, false), foe(200, 11 * 128 + 5, 1, false)];
+        assert_eq!(ai_strike_target(&low), None);
+        // two idle walkers in column 23: the block scores 12; its right neighbour is column 0 of the next row (index 24, +8, never
+        // the maximum), so the pick stays in column 23
+        let edge = [foe(23 * 128, 0, 41, true); 2];
+        assert_eq!(ai_strike_target(&edge), Some((23 * 128 + 64, 64)));
     }
 
     #[test]
@@ -461,6 +712,24 @@ mod tests {
     }
 
     #[test]
+    fn carryall_draw_state_follows_the_exe() {
+        // body frame by distance while approaching (0x4674c2): 0 beyond 190 px, 4 below 145; exhaust frames cycle 0..3 every 3 steps
+        let mut c = Aircraft::launch(AirForce::Carryall, 1000, 900, 0, 64, 0);
+        let mut r = no_rand();
+        let (mut seen, mut rear) = (std::collections::BTreeSet::new(), std::collections::BTreeSet::new());
+        for t in 0..3000 {
+            c.step(t % 60, &mut r);
+            seen.insert(c.frame);
+            rear.insert(c.rear_frame);
+            if !c.alive() || c.x < 0 {
+                break;
+            }
+        }
+        assert_eq!(seen.into_iter().collect::<Vec<_>>(), vec![0, 1, 2, 3, 4]);
+        assert_eq!(rear.into_iter().collect::<Vec<_>>(), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
     fn squads_match_the_exe() {
         assert_eq!(squad(1).unwrap(), vec![(-1, 0, 2), (-1, 1, 2), (0, 0, 2), (0, 1, 2)]);
         assert_eq!(squad(4).unwrap(), vec![(-1, 0, 5), (-1, 1, 8), (0, 0, 13), (0, 1, 11)]);
@@ -479,7 +748,7 @@ mod tests {
             n += b.sounds.drain(..).filter(|s| s.0 == 63).count();
         }
         assert_eq!(n, 4, "steps 1, 10, 19 and 28");
-        // a fighter roars once, a carryall announces its landing once
+        // a fighter roars once, a carryall announces its landing twice (arriving and leaving)
         let mut f = Aircraft::launch(AirForce::Fighter, 1000, 900, 0, 64, 0);
         let mut c = Aircraft::launch(AirForce::Carryall, 1000, 900, 0, 64, 0);
         let (mut fs, mut cs) = (0, 0);
@@ -490,6 +759,52 @@ mod tests {
             fs += f.sounds.drain(..).filter(|s| s.0 == 66).count();
             cs += c.sounds.drain(..).filter(|s| s.0 == 62).count();
         }
-        assert_eq!((fs, cs), (1, 1));
+        assert_eq!((fs, cs), (1, 2));
+    }
+
+    fn slot(id: u32, side: i32, force: AirForce, x: i32, y: i32, aim_dx: i32) -> AirSlot {
+        AirSlot { id, side, force, x, y, aim_dx, hp: 100 }
+    }
+
+    #[test]
+    fn anti_air_measures_range_in_steps_of_50_px_and_ignores_fighters() {
+        // an anti-air unit with range 0-9 reaches 450 px
+        let a = [slot(1, 1, AirForce::Bomber, 450, 0, 0)];
+        assert_eq!(anti_air_target(&a, 0, 0, None, 0, 9, 0), Some(1));
+        let a = [slot(1, 1, AirForce::Bomber, 451, 0, 0)];
+        assert_eq!(anti_air_target(&a, 0, 0, None, 0, 9, 0), None);
+        let a = [slot(1, 1, AirForce::Fighter, 100, 0, 0)];
+        assert_eq!(anti_air_target(&a, 0, 0, None, 0, 9, 0), None, "fighters are immune");
+        let a = [slot(1, 0, AirForce::Bomber, 100, 0, 0)];
+        assert_eq!(anti_air_target(&a, 0, 0, None, 0, 9, 0), None, "own side");
+        let a = [AirSlot { hp: 0, ..slot(1, 1, AirForce::Tripler, 100, 0, 0) }];
+        assert_eq!(anti_air_target(&a, 0, 0, None, 0, 9, 0), None, "a falling aircraft");
+    }
+
+    #[test]
+    fn anti_air_keeps_its_target_and_otherwise_takes_the_nearest() {
+        let a = [slot(1, 1, AirForce::Bomber, 300, 0, 0), slot(2, 1, AirForce::Tripler, 100, 0, 0)];
+        assert_eq!(anti_air_target(&a, 0, 0, None, 0, 9, 0), Some(2));
+        assert_eq!(anti_air_target(&a, 0, 0, Some(1), 0, 9, 0), Some(1), "the current target stays while in range");
+        // the kept target is measured to x + aim_dx and strictly inside the range
+        let a = [slot(1, 1, AirForce::Bomber, 420, 0, -50)];
+        assert_eq!(anti_air_target(&a, 0, 0, Some(1), 0, 9, 0), Some(1), "|0 + 50 - 420| = 370 px");
+        let a = [slot(1, 1, AirForce::Bomber, 420, 0, 50)];
+        assert_eq!(anti_air_target(&a, 0, 0, Some(1), 0, 9, 0), None, "|0 - 50 - 420| = 470 px: lost, and the current target is no candidate");
+        let a = [slot(1, 1, AirForce::Bomber, 450, 0, 0)];
+        assert_eq!(anti_air_target(&a, 0, 0, Some(1), 0, 9, 0), None, "at exactly 450 px a kept target is lost (and is no candidate)");
+        // ties go to the later slot
+        let a = [slot(1, 1, AirForce::Bomber, 100, 0, 0), slot(2, 1, AirForce::Bomber, 0, 100, 0)];
+        assert_eq!(anti_air_target(&a, 0, 0, None, 0, 9, 0), Some(2));
+        // the minimum: new targets from min*50 on
+        let a = [slot(1, 1, AirForce::Bomber, 49, 0, 0)];
+        assert_eq!(anti_air_target(&a, 0, 0, None, 1, 9, 0), None);
+    }
+
+    #[test]
+    fn a_bomber_aims_50_px_ahead() {
+        assert_eq!(Aircraft::launch(AirForce::Bomber, 500, 700, 0, 64, 0).aim_dx, 50);
+        assert_eq!(Aircraft::launch(AirForce::Bomber, 1500, 700, 0, 64, 0).aim_dx, -50);
+        assert_eq!(Aircraft::launch(AirForce::Tripler, 500, 700, 0, 64, 0).aim_dx, 0);
     }
 }

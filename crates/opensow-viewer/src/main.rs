@@ -1,4 +1,4 @@
-//! `opensow-viewer [LEVEL] [--screenshot out.png] [--size WxH] [--zoom Z] [--center CX,CY] [--facing 0..31] [--aim 0..31] [--walk TICKS] [--fire TICK] [--shot x1,y1,x2,y2,type]... [--range CX,CY,MIN,MAX]... [--overlay blocked,grid,objects,markers,sprites,muzzles]`
+//! `opensow-viewer [LEVEL] [--screenshot out.png] [--size WxH] [--zoom Z] [--center CX,CY] [--facing 0..31] [--aim 0..31] [--walk TICKS] [--fire TICK] [--shot x1,y1,x2,y2,type]... [--range CX,CY,MIN,MAX]... [--overlay blocked,grid,objects,markers,sprites,muzzles,minimap]`
 //!
 //! Keys: arrows/WASD or left-drag pan, wheel or +/- zoom, B blocked cells, G grid,
 //! O objects (squares for things without art), M markers, X sprites, F muzzle points, [ ] turn all units, K play the walk cycle, V loop the fire/recoil sequences, N/P next/previous level, Home fit map, Esc quit.
@@ -71,7 +71,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--overlay" => {
                 let v = value("a list")?;
-                a.overlays = Overlays { blocked: false, grid: false, objects: false, markers: false, sprites: false, muzzles: false, walk: None, fire: None, foreground: false };
+                a.overlays = Overlays { blocked: false, grid: false, objects: false, markers: false, sprites: false, muzzles: false, walk: None, fire: None, foreground: false, minimap: false };
                 for o in v.split(',').filter(|s| !s.is_empty()) {
                     match o {
                         "blocked" => a.overlays.blocked = true,
@@ -83,6 +83,7 @@ fn parse_args() -> Result<Args, String> {
                             a.overlays.foreground = true;
                         }
                         "muzzles" => a.overlays.muzzles = true,
+                        "minimap" => a.overlays.minimap = true,
                         _ => return Err(format!("unknown overlay {o}")),
                     }
                 }
@@ -359,6 +360,10 @@ impl ApplicationHandler for App {
                         }
                         "m" => {
                             self.ov.markers ^= true;
+                            self.redraw();
+                        }
+                        "n" => {
+                            self.ov.minimap ^= true;
                             self.redraw();
                         }
                         "[" | "]" => {

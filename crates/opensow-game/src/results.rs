@@ -181,17 +181,33 @@ impl Results {
     }
 
     /// The statistics screen (replaces the frame).
+    /// The layout is the exe's 640x480 one; it is drawn at that size and scaled to the largest centred 4:3 rectangle, like the
+    /// other screens, over the background covering the whole window.
     pub fn draw_statistics(&self, buf: &mut [u32], w: usize, h: usize) {
         buf.fill(0);
         if let Some(bg) = &self.bg {
-            for y in 0..h {
-                let sy = y * bg.h / h;
-                for x in 0..w {
-                    let i = (sy * bg.w + x * bg.w / w) * 3;
-                    buf[y * w + x] = pack(bg.rgb[i], bg.rgb[i + 1], bg.rgb[i + 2]);
-                }
+            ui::backdrop(buf, w, h, bg);
+        }
+        if (w, h) == (640, 480) {
+            self.draw_layout(buf, w, h);
+            return;
+        }
+        let mut small = vec![0u32; 640 * 480];
+        if let Some(bg) = &self.bg {
+            ui::backdrop(&mut small, 640, 480, bg);
+        }
+        self.draw_layout(&mut small, 640, 480);
+        let s = (w as f32 / 640.0).min(h as f32 / 480.0);
+        let (dw, dh) = (((640.0 * s) as usize).max(1), ((480.0 * s) as usize).max(1));
+        let (ox, oy) = ((w - dw.min(w)) / 2, (h - dh.min(h)) / 2);
+        for y in 0..dh.min(h) {
+            for x in 0..dw.min(w) {
+                buf[(oy + y) * w + ox + x] = small[(y * 480 / dh).min(479) * 640 + (x * 640 / dw).min(639)];
             }
         }
+    }
+
+    fn draw_layout(&self, buf: &mut [u32], w: usize, h: usize) {
         let (cx, cy) = (w as i32 / 2, h as i32 / 2);
         if let Some(p) = &self.panels {
             for y in 0..p.h as i32 {

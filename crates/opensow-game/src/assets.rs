@@ -46,6 +46,11 @@ impl Assets {
     }
 
     /// Inner and outline masks of a font (`small`, `medium`, `big`, `msg`).
+    /// A pre-coloured font (`extras\\fonts\\{name}.ps6`, e.g. `font02_light`), or `None` when the install lacks it.
+    pub fn color_font(&mut self, name: &str) -> Option<Font> {
+        self.art.load(&format!("extras\\fonts\\{name}.ps6")).map(|f| Font::new((*f).clone()))
+    }
+
     pub fn font(&mut self, name: &str) -> Rc<(Font, Font)> {
         if let Some(f) = self.fonts.get(name) {
             return f.clone();

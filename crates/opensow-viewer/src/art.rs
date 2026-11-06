@@ -69,8 +69,6 @@ pub struct Placed {
 pub struct BuildArt {
     pub blue: Rc<Vec<Frame>>,
     pub green: Rc<Vec<Frame>>,
-    /// One frame: the damaged look of a neutral building (neutral art has no damage stage of its own).
-    pub grey: Option<Rc<Vec<Frame>>>,
     pub owner: Owner,
     /// `builds\\mask\\{stem}.msk`: the part of each building frame that stands in front of units (the exe draws it with the
     /// sprite, `0x4092f0` / `0x40df80`); the front ramp of a factory is left out, so units come out over it.
@@ -102,15 +100,8 @@ impl Placed {
             art.up = false;
         }
         let (set, frame) = if owner == Owner::Neutral {
-            // below a third: the neutral look has no damage art of its own, so it only changes once clearly damaged
-            if hp >= max_hp / 3 {
-                (art.blue.clone(), a.range(STATE_NEUTRAL).0)
-            } else {
-                match &art.grey {
-                    Some(g) => (g.clone(), 0),
-                    None => (art.blue.clone(), a.range(STATE_NEUTRAL).0),
-                }
-            }
+            // the state code `0x40e0df..0x40e0ee` forces state 6 (neutral) for owner 2 whatever the hit points are
+            (art.blue.clone(), a.range(STATE_NEUTRAL).0)
         } else {
             let set = if owner == Owner::Enemy { art.green.clone() } else { art.blue.clone() };
             if art.up {
@@ -121,9 +112,9 @@ impl Placed {
             }
         };
         self.frame = frame.min(set.len() - 1);
-        art.mask_frame = if owner == Owner::Neutral && hp < max_hp / 3 && art.grey.is_some() { a.range(STATE_DAMAGED).0 } else { frame };
+        art.mask_frame = frame;
         self.set = set;
-        let shadow_frame = if owner == Owner::Neutral && hp < max_hp / 3 { a.range(STATE_DAMAGED).0 } else if art.up { self.frame } else { frame };
+        let shadow_frame = if art.up { self.frame } else { frame };
         if let Some((s, i)) = &mut self.shadow {
             *i = shadow_frame.min(s.len() - 1);
         }
@@ -208,19 +199,9 @@ impl Art {
         // then damaged, destroyed and (last) a grey "neutral" look; the HQ set is shorter (one frame per state: 3 healthy, 4 damaged).
         let anim = opensow_formats::buildings::anim(o.kind);
         let shadow = self.load(&format!("builds\\shadow\\{stem}.sha")).map(|s| (s, 0));
-        // a damaged neutral building: the damaged frame without its colour
-        let grey = anim.and_then(|a| blue.get(a.bounds[opensow_formats::buildings::STATE_DAMAGED] as usize)).map(|f| {
-            let mut g = f.clone();
-            for px in &mut g.pixels {
-                let [r, gr, b] = sprite::rgb565_to_rgb8(*px);
-                let l = ((r as u32 * 30 + gr as u32 * 59 + b as u32 * 11) / 100) as u8;
-                *px = ((l as u16 >> 3) << 11) | ((l as u16 >> 2) << 5) | (l as u16 >> 3);
-            }
-            Rc::new(vec![g])
-        });
         let owner = o.owner();
         let mask = self.load(&format!("builds\\mask\\{stem}.msk"));
-        let art = BuildArt { blue: blue.clone(), green: green.clone(), grey, owner, mask, mask_frame: 0, up: false };
+        let art = BuildArt { blue: blue.clone(), green: green.clone(), owner, mask, mask_frame: 0, up: false };
         let mut p = Placed { source: Source::Object(index), layer: 0, set: blue, frame: 0, shadow, ax: cx, ay: cy, sort_y: cy, muzzles: vec![], walk: None, recoil: None, anim, art: Some(Box::new(art)) };
         p.set_building_state(owner, 1, 1, 0, 0);
         Some(p)
@@ -271,6 +252,12 @@ impl Art {
         self.mega.read(e).ok().and_then(|d| FireTables::parse(&d).ok())
     }
 
+    /// The weapon's reference point table `units\\{top}.po2` (one table; the spawner `0x47cf40` ends a shot at the target plus this point minus the barrel's).
+    pub fn fire_tables_ref(&mut self, top: &str) -> Option<FireTables> {
+        let e = self.mega.find(&format!("units\\{top}.po2"))?;
+        self.mega.read(e).ok().and_then(|d| FireTables::parse(&d).ok())
+    }
+
     /// `frame` is the top's own frame index: fire-point tables of 16-facing tops only fill their first 16 entries.
     fn muzzles(&mut self, top: &str, frame: usize, x: i32, y: i32) -> Vec<(i32, i32)> {
         let Some(e) = self.mega.find(&format!("units\\{top}.po1")) else { return Vec::new() };
@@ -289,19 +276,21 @@ mod tests {
 
     fn placed(owner: Owner) -> Placed {
         let (blue, green) = (set(18, 1), set(17, 2));
-        let art = BuildArt { blue: blue.clone(), green, grey: Some(set(1, 3)), owner, mask: None, mask_frame: 0, up: false };
+        let art = BuildArt { blue: blue.clone(), green, owner, mask: None, mask_frame: 0, up: false };
         Placed { source: Source::Object(0), layer: 0, set: blue, frame: 0, shadow: None, ax: 0, ay: 0, sort_y: 0, muzzles: vec![], walk: None, recoil: None, anim: opensow_formats::buildings::anim(106), art: Some(Box::new(art)) }
     }
 
     #[test]
-    fn neutral_buildings_show_damage_and_captured_ones_change_colour() {
+    fn neutral_buildings_never_show_damage_and_captured_ones_change_colour() {
         let mut p = placed(Owner::Neutral);
         p.set_building_state(Owner::Neutral, 100, 100, 0, 0);
         assert_eq!((p.set[0].pixels[0], p.frame), (1, 17)); // grey neutral frame of the blue set
         p.set_building_state(Owner::Neutral, 49, 100, 0, 0);
         assert_eq!(p.frame, 17); // about half hit points is still the regular look
         p.set_building_state(Owner::Neutral, 30, 100, 0, 0);
-        assert_eq!(p.set[p.frame].pixels[0], 3); // damaged, colourless
+        assert_eq!((p.set[0].pixels[0], p.frame), (1, 17), "the exe shows state 6 for a neutral building at any hit points");
+        p.set_building_state(Owner::Neutral, 1, 100, 0, 0);
+        assert_eq!(p.frame, 17);
         // captured: a new building at 1 hp builds up (scaffold, construction, finished) in the new colour
         p.set_building_state(Owner::Enemy, 1, 100, 99, 5);
         assert_eq!((p.set[0].pixels[0], p.frame), (2, 0));

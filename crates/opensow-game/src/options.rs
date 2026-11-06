@@ -76,8 +76,12 @@ impl GameOptions {
 /// Map scroll in pixels per second for a KEYS / MOUSE SCROLL setting (0..=10): the logic step scrolls `ticks * speed`
 /// and `0x457f80` doubles it, 60 ticks per second (`0x415ef1`, `0x416b8b`).
 pub fn scroll_px_per_second(speed: u32) -> f32 {
-    2.0 * 60.0 * speed as f32
+    2.0 * 60.0 * speed as f32 * SCROLL_BOOST
 }
+
+/// Our own addition: the camera moves this much faster than the exe's formula (the original's defaults, KEYS 5 and MOUSE 3, feel
+/// slow on today's large windows). The Options values keep their meaning (0..=10); 1.0 is the original speed.
+pub const SCROLL_BOOST: f32 = 1.5;
 
 /// The two animated gears of the picture (`0x44ade0`): sprite `extras\kruh` (16 frames of a turning cog), each drawn as a
 /// shadow (`Blit::Shade`, 3 px right/down) under the cog itself (`Blit::Additive`). Both steps happen every 4 ticks (a
@@ -604,9 +608,10 @@ mod tests {
 
     #[test]
     fn scroll_speed_is_two_pixels_per_tick_and_setting() {
+        // the exe's speed (2 px per tick and setting, 60 ticks/s) times our SCROLL_BOOST
         assert_eq!(scroll_px_per_second(0), 0.0);
-        assert_eq!(scroll_px_per_second(5), 600.0, "keys default");
-        assert_eq!(scroll_px_per_second(3), 360.0, "mouse default");
+        assert_eq!(scroll_px_per_second(5), 600.0 * SCROLL_BOOST, "keys default");
+        assert_eq!(scroll_px_per_second(3), 360.0 * SCROLL_BOOST, "mouse default");
     }
 
     #[test]

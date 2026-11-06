@@ -85,7 +85,7 @@ impl World {
         let aim = (weapon != 0).then(|| TopAim::new(weapon, 0)).flatten();
         let slots: Vec<SlotState> = slots.iter().filter_map(|&(k, m)| slot_target(k).filter(|_| k != 0).map(|target| SlotState { kind: k, progress: 0, target, level: 0, max_level: m, waiting: 0 })).collect();
         let active = 1.min(slots.len());
-        self.add_structure(Structure { object: usize::MAX, kind, owner, cell, hp: max_hp, max_hp, aim, weapon, target: None, slots, active, kind_id, tally: [0; 3], heal: 0, upgrade: 0, protected: kind_id == 100, attacked: false, sat_cd: 0, advancer: None, rally: None });
+        self.add_structure(Structure { object: usize::MAX, kind, owner, cell, hp: max_hp, max_hp, aim, weapon, target: None, slots, active, kind_id, tally: [0; 3], heal: 0, upgrade: 0, protected: kind_id == 100, attacked: false, sat_cd: 0, advancer: None, rally: None, dying: None });
         self.structures.len() - 1
     }
 

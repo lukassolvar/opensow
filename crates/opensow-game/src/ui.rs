@@ -50,6 +50,31 @@ pub fn sprite_lit(buf: &mut [u32], w: usize, h: usize, f: &Frame, x: i32, y: i32
     }
 }
 
+/// The main menu's highlighted button frames (`001_buttons.tsp` frames 0..5): the exe copies them plain (`0x445620` -> `0x45edf0`)
+/// because the art has the original 640x480 backdrop baked in behind the green glow; on another backdrop (the Steam art) that
+/// shows as a grey rectangle. Here only the green part is kept: the weight of a pixel is how far its green exceeds red and blue.
+pub fn sprite_glow(buf: &mut [u32], w: usize, h: usize, f: &Frame, x: i32, y: i32, scale: f32) {
+    let (dw, dh) = ((f.width as f32 * scale).round() as i32, (f.height as f32 * scale).round() as i32);
+    for dy in y.max(0)..(y + dh).min(h as i32) {
+        let sy = (((dy - y) as f32 / scale) as usize).min(f.height as usize - 1);
+        for dx in x.max(0)..(x + dw).min(w as i32) {
+            let sx = (((dx - x) as f32 / scale) as usize).min(f.width as usize - 1);
+            let i = sy * f.width as usize + sx;
+            if !f.mask[i] {
+                continue;
+            }
+            let [r, g, b] = rgb565_to_rgb8(f.pixels[i]).map(|c| c as u32);
+            let a = (g.saturating_sub(r.max(b)) * 2).min(255);
+            if a == 0 {
+                continue;
+            }
+            let p = &mut buf[dy as usize * w + dx as usize];
+            let mix = |shift: u32, s: u32| ((((*p >> shift) & 255) * (255 - a) + s * a) / 255) as u8;
+            *p = pack(mix(16, r), mix(8, g), mix(0, b));
+        }
+    }
+}
+
 /// Additive blit (`0x45cde0`: `min(dst + src, max)` per channel); `half` is mode 2 of the widget draw (`0x45c220`),
 /// which halves the source first.
 pub fn sprite_add(buf: &mut [u32], w: usize, h: usize, f: &Frame, x: i32, y: i32, scale: f32, half: bool) {

@@ -48,6 +48,25 @@ const fn p(min_range: u32, max_range: u32, reload: u32, jitter: u32, steps: u32)
     AimParams { min_range, max_range, reload, jitter, steps }
 }
 
+/// Scatter of a top's shots in pixels (`[top+0x20]`, member field `[+0x18]` of the volley spawner `0x47cf40`): each round's end
+/// point moves by `+-random(spread)` on both axes (sign from `random(2) == 1`). Read from the constructor cases (exe-tested).
+pub fn spread(kind: i32) -> u32 {
+    match kind {
+        5 => 20,
+        13 | 14 => 5,
+        44 => 24,
+        112 => 16,
+        113 => 20,
+        1..=4 | 6..=12 => 10,
+        _ => 1,
+    }
+}
+
+/// Rounds per shot (`[top+0x30]`, the spawner's outer loop): the fifth turret throws six, everything else one.
+pub fn rounds(kind: i32) -> u32 {
+    if kind == 113 { 6 } else { 1 }
+}
+
 /// Aim and cooldown values of a unit kind's weapon top (ground kinds 1..=15, walkers 41..=45).
 pub fn aim_params(kind: i32) -> Option<AimParams> {
     Some(match kind {
@@ -80,6 +99,26 @@ pub fn aim_params(kind: i32) -> Option<AimParams> {
         113 => p(2, 10, 70, 0, 32),
         _ => return None,
     })
+}
+
+/// The top's vertical offset `[top+0x60]` (the horizontal `[top+0x5c]` is always 0): the aim origin of `0x4797c0` is the chassis
+/// position plus `(0, dy)`, and the muzzle-flash rectangle `0x479bc0` is placed with it. The constructor case stores a base for a
+/// few kinds (kind 2: 4, kind 12: 7, the turret tops -11, -2, -20, -17, -31) and the shared tail `0x47ab76` adds `-4`, `-10` or
+/// `-16` by kind through the byte table `0x47acf4` (units 1..=45 only). Exe-tested by `top_offsets_match_the_exes_constructor`.
+pub fn top_dy(kind: i32) -> i32 {
+    match kind {
+        1 | 4 | 5 | 7 | 8 | 10 | 11 | 13 | 14 => -4,
+        3 | 6 | 9 => -10,
+        2 | 15 | 45 => 0,
+        12 => -3,
+        40..=44 => -16,
+        109 => -11,
+        110 => -2,
+        111 => -20,
+        112 => -17,
+        113 => -31,
+        _ => 0,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -126,6 +165,20 @@ fn no_sequence() -> FireSequence {
 }
 
 impl TopAim {
+    /// The counters a savegame keeps: turn countdown (`[top+0x74]`), target search countdown, weapon cooldown (`[top+0x210]`),
+    /// tick inside the fire sequence.
+    pub fn counters(&self) -> (i32, i32, i32, u32) {
+        (self.turn_counter, self.search_counter, self.cooldown, self.seq_tick)
+    }
+
+    /// Puts the counters back (savegame load).
+    pub fn set_counters(&mut self, turn_counter: i32, search_counter: i32, cooldown: i32, seq_tick: u32) {
+        self.turn_counter = turn_counter;
+        self.search_counter = search_counter;
+        self.cooldown = cooldown;
+        self.seq_tick = seq_tick;
+    }
+
     /// Rebuilds the static fire sequence after the aim was deserialized from a savegame.
     pub fn restore(&mut self) {
         if let Some(s) = fire_sequence(self.kind) {
@@ -161,6 +214,12 @@ impl TopAim {
     /// The sequence being played and the tick inside it, for drawing.
     pub fn firing(&self) -> Option<(&FireSequence, u32)> {
         (self.state == State::Firing && self.seq_tick > 0).then_some((&self.seq, self.seq_tick))
+    }
+
+    /// Whether this tick's [`TopAim::tick`] runs the target search (state 0 and the 30-tick poll counter runs out, `0x479cb5`):
+    /// the searches with side effects (the anti-air top's kept aircraft, `0x47b3c0`) run only then.
+    pub fn polls_now(&self) -> bool {
+        self.state == State::Idle && self.search_counter <= 1
     }
 
     /// One game tick. `target` = the facing from the top to its current target (`None` = no target in range);

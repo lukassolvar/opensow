@@ -34,6 +34,8 @@ pub enum Pointer {
     Upgrade = 8,
     /// Rally point placement (`0x416fc6`, `0x417678`): shown over free ground while the mode is on.
     Rally = 9,
+    /// Air-strike mode (`0x416f80`, `0x41727b`): shown over the map while a strike is armed and the air layer lets the target cell be hit.
+    AirStrike = 10,
     /// Scroll arrows, `0x0b..=0x12`.
     ScrollUpLeft = 0x0b,
     ScrollUpRight = 0x0c,
@@ -99,6 +101,8 @@ mod tests {
         assert_eq!(Pointer::Repair.frame(3), 51);
         assert_eq!(Pointer::Upgrade.frame(7), 71);
         assert_eq!(Pointer::Rally.frame(2), 74);
+        assert_eq!(Pointer::AirStrike.frame(3), 83);
+        assert_eq!(Pointer::AirStrike.offset(), (0, 0));
         assert_eq!(Pointer::ScrollUp.frame(8), 18 * 8);
     }
 

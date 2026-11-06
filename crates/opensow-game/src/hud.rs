@@ -80,6 +80,9 @@ pub struct Layout {
     pub tabs: Vec<(u32, Rect, (i32, i32))>,
     /// Pills from the top: (force, click rect, centre x, centre y).
     pub pills: Vec<(AirForce, Rect, i32, i32)>,
+    /// The pills are disabled (3 s after a launch, widget state 2, `0x454e4e`): drawn half-additive (`0x45c220`), no info box and
+    /// no click (`0x454d02`), the hover glow and sound stay (`0x456350` updates the widget regardless of its state).
+    pub pills_locked: bool,
     pub info: Option<Rect>,
     /// Slot icons: (click rect, centre x, centre y).
     pub slots: Vec<(Rect, i32, i32)>,
@@ -155,7 +158,7 @@ impl Layout {
             let (x0, y0, x1, y1) = rally::BUTTON_RECT;
             (Rect { x: px + u(x0) + 1, y: py + u(y0) + 1, w: u(x1 - x0) - 1, h: u(y1 - y0) - 1 }, px, py)
         });
-        Layout { radar_on: true, s, w, h, mission: i.mission, credits, research, radar_frame, radar_frame_index: frame_idx, radar, map_cells: i.map_cells, tabs, pills, info: i.info, slots, arrows, rally }
+        Layout { radar_on: true, s, w, h, mission: i.mission, credits, research, radar_frame, radar_frame_index: frame_idx, radar, map_cells: i.map_cells, tabs, pills, info: i.info, slots, arrows, rally, pills_locked: false }
     }
 
     pub fn hit(&self, x: i32, y: i32) -> Option<Hit> {
@@ -313,18 +316,21 @@ pub fn draw(l: &Layout, st: &State, assets: &mut Assets, buf: &mut [u32], w: usi
     }
 
     let icons = assets.art.load("extras\\ikony.ps6");
-    let digits = assets.art.load("extras\\panel2nu.ps6");
+    let digits = assets.art.load("__extras\\panel2nu.ps6");
+    let aura = assets.art.load("extras\\ikonyaura.ps6");
     // air pills: the force's pill, its stock in small digits (`0x4543a2`..`0x4544e9`)
     for (f, r, cx, cy) in &l.pills {
         let g = opensow_formats::air::HEADER_ORDER.iter().position(|x| x == f).unwrap_or(0);
         let stock = st.world.air_stock[0][g];
         if let Some(fr) = icons.as_ref().and_then(|set| set.get(pill_frame(*f))) {
-            ui::sprite(buf, w, h, fr, cx - u(31), cy - u(26), s);
+            // state 2 (disabled) draws through the half-additive blit `0x45c220`, like a locked slot icon (`0x456140`, `0x4561d0`)
+            ui::sprite_add_or_plain(buf, w, h, fr, cx - u(31), cy - u(26), s, l.pills_locked);
         }
-        if st.strike == Some(*f) {
-            frame_box(buf, w, h, *r, (255, 230, 90));
-        } else if st.hover == Some(Hit::Air(*f)) {
-            frame_box(buf, w, h, *r, (160, 190, 255));
+        // the pill's `+0x34` is `ikonyaura` frame 2 (`0x454014`: `[0x5e7178]`), added while the pointer is on it; our armed pill keeps it
+        if st.strike == Some(*f) || st.hover == Some(Hit::Air(*f)) {
+            if let Some(a) = aura.as_ref().and_then(|set| set.get(2)) {
+                ui::sprite_add(buf, w, h, a, cx - u(a.hot_x as i32), cy - u(a.hot_y as i32), s, false);
+            }
         }
         let (hun, ten, one) = ((stock / 100 % 10) as usize, (stock / 10 % 10) as usize, (stock % 10) as usize);
         let k = if one != 1 { -1 } else { 0 };
@@ -346,19 +352,19 @@ pub fn draw(l: &Layout, st: &State, assets: &mut Assets, buf: &mut [u32], w: usi
     }
     // turret tabs: later tabs (further left) are drawn over the earlier ones, so draw from the right
     let small = assets.font("small");
-    let aura = assets.art.load("extras\\ikonyaura.ps6");
     for (tier, r, tl) in l.tabs.iter() {
         if let Some(fr) = icons.as_ref().and_then(|set| set.get(24 + *tier as usize)) {
-            ui::sprite(buf, w, h, fr, tl.0, tl.1, s);
+            // widget state 2 (`0x454e60`: credits < 200 * tier) draws through the half-additive blit `0x45c220`, like a locked slot icon
+            let poor = st.world.credits[0] < opensow_formats::production::turret_price(*tier).unwrap_or(0);
+            ui::sprite_add_or_plain(buf, w, h, fr, tl.0, tl.1, s, poor);
             // the tab's `ikonyaura` frame 1 (`+0x34`, `0x455400`) is added while the pointer is on it
             if let Some(a) = aura.as_ref().filter(|_| st.hover == Some(Hit::Turret(*tier))).and_then(|set| set.get(1)) {
                 let (cx, cy) = (tl.0 + u(fr.hot_x as i32), tl.1 + u(fr.hot_y as i32));
                 ui::sprite_add(buf, w, h, a, cx - u(a.hot_x as i32), cy - u(a.hot_y as i32), s, false);
             }
         }
-        if st.placing == Some(*tier) {
-            frame_box(buf, w, h, Rect { x: r.x, y: r.y, w: r.w, h: r.h }, (255, 230, 90));
-        } else if st.hover == Some(Hit::Turret(*tier)) {
+        // no selection mark: the original only dims a tab it cannot afford (`0x454e60`)
+        if st.hover == Some(Hit::Turret(*tier)) {
             let price = opensow_formats::production::turret_price(*tier).unwrap_or(0);
             ui::text(buf, w, h, &small, &format!("{price}"), r.x + u(8), r.y - u(14), s, (255, 240, 170), (0, 0, 0));
         }
@@ -467,6 +473,9 @@ mod tests {
         assert_eq!(l.pills[1].3, 111);
         assert_eq!(l.hit(l.tabs[0].1.x + 2, l.tabs[0].1.y + 2), Some(Hit::Turret(1)));
         assert_eq!(l.hit(l.pills[1].1.x + 2, l.pills[1].1.y + 2), Some(Hit::Air(AirForce::Fighter)));
+        let mut locked = Layout::new(640, 480, 1.0, &inputs());
+        locked.pills_locked = true;
+        assert_eq!(locked.hit(locked.pills[1].1.x + 2, locked.pills[1].1.y + 2), Some(Hit::Air(AirForce::Fighter)), "the hover still reaches a disabled pill");
         assert_eq!(l.hit(l.radar.x + 3, l.radar.y + 3), Some(Hit::Radar));
         assert_eq!(l.hit(320, 240), None);
     }

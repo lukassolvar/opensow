@@ -29,6 +29,8 @@ The exe is only read, never modified or copied. Checks (random inputs, exact com
   * 0x45d3a0 / 0x45d400  pause and mission-end frame rows vs `opensow scanlines` (565 and 555 branches, random sizes and pixels)
   * 0x436230  range ring list builder      vs `opensow rings`     (64-entry index table + 14017 offsets)
   * 0x40f2c0  random curve table (bullet types 13/14) + their constructor/path draws   vs `opensow curves|curvebullet`
+  * 0x40aa04..0x40ace6 constructor turret spots vs `opensow turretspots`; 0x431120 the computer's turret routine vs `opensow turretai`
+                                           (1500 random worlds; rand, placement test, creator stubbed)
 `atan` (an import) is emulated by a hook; nothing else outside the image is needed.
 """
 import math, random, struct, subprocess, sys
@@ -91,6 +93,190 @@ def report(name, total, bad):
     global failures
     failures += bad
     print(f"{name}: {total} compared, {bad} mismatches")
+
+
+# 0c. The computer's turret routine (runs first, on clean memory: later sections hook the handle functions and the generator): the constructor's eight turret spots (0x40aa04..0x40ace6) vs `opensow turretspots`, and the whole
+#     routine 0x431120 (rand 0x437b10, the placement test 0x408be0, the building creator 0x439e30 and the checksum 0x4062a0 stubbed;
+#     everything else real) vs `opensow turretai`.
+import os, tempfile
+OBJ = 0x64000000
+mu.mem_map(OBJ, 0x200000)
+CTOR_FRAME = STACK + 0x80000
+
+
+def ctor_spots(kind, x, y, obj):
+    """Runs the constructor part that computes the spots on a fresh building object; returns the 16 ints at +0x224."""
+    mu.mem_write(obj, b"\0" * 0x400)
+    mu.mem_write(obj + 4, struct.pack("<ii", x, y))
+    mu.mem_write(obj + 0x94, struct.pack("<i", kind))
+    from unicorn.x86_const import UC_X86_REG_EBX, UC_X86_REG_ESI, UC_X86_REG_EDI, UC_X86_REG_EBP
+    mu.reg_write(UC_X86_REG_EBP, CTOR_FRAME)
+    mu.reg_write(UC_X86_REG_ESP, CTOR_FRAME - 0x400)
+    mu.reg_write(UC_X86_REG_EBX, obj)
+    mu.reg_write(UC_X86_REG_ESI, kind)
+    mu.reg_write(UC_X86_REG_EDI, 0)
+    mu.emu_start(0x40AA04, 0x40ACE6, count=100000)
+    return list(struct.unpack("<16i", mu.mem_read(obj + 0x224, 64)))
+
+
+bad = 0
+cases = 0
+for kind in (100, 101, 102, 103, 104, 105, 106, 107):
+    for _ in range(25):
+        x, y = random.randint(2, 100), random.randint(2, 100)
+        got = ctor_spots(kind, x, y, OBJ)
+        want = [int(v) for v in sh("turretspots", kind, x, y).split()]
+        # the exe stores x_i at +0x224+4i and y_i at +0x244+4i
+        xs = struct.unpack("<8i", mu.mem_read(OBJ + 0x224, 32))
+        ys = struct.unpack("<8i", mu.mem_read(OBJ + 0x244, 32))
+        cases += 1
+        bad += list(xs) + list(ys) != want
+report("turret spots written by the building constructor (0x40aa04..0x40ace6)", cases, bad)
+
+from unicorn.x86_const import UC_X86_REG_EIP as _EIP, UC_X86_REG_ESP as _ESP, UC_X86_REG_EAX as _EAX
+
+HOOK = {"rand": [], "log": [], "place": []}
+
+
+def _ret(uc):
+    sp = uc.reg_read(_ESP)
+    (r,) = struct.unpack("<I", uc.mem_read(sp, 4))
+    uc.reg_write(_ESP, sp + 4)
+    uc.reg_write(_EIP, r)
+
+
+def _arg(uc, i):
+    sp = uc.reg_read(_ESP)
+    return struct.unpack("<i", uc.mem_read(sp + 4 + 4 * i, 4))[0]
+
+
+def h_rand(uc, a, s, ud):
+    n = _arg(uc, 0)
+    seq = HOOK["seq"]
+    v = seq[HOOK["n"] % len(seq)]
+    HOOK["n"] += 1
+    uc.reg_write(_EAX, v % n if n else 0)
+    _ret(uc)
+
+
+def h_test(uc, a, s, ud):
+    x, y, w, h = (_arg(uc, i) for i in range(4))
+    okp = _arg(uc, 6) & 0xFFFFFFFF
+    ok = ((x * 31 + y * 17) & 7) < 3
+    HOOK["log"].append(f"try {x} {y} {w} {h}")
+    uc.mem_write(okp, b"\x01" if ok else b"\x00")
+    _ret(uc)
+
+
+def h_place(uc, a, s, ud):
+    x, y, kind = _arg(uc, 0), _arg(uc, 1), _arg(uc, 3)  # (x, y, player, kind, 0, 0)
+    HOOK["place"].append((x, y, kind))
+    _ret(uc)
+
+
+def h_nop(uc, a, s, ud):
+    _ret(uc)
+
+
+TURRET_HOOKS = [mu.hook_add(UC_HOOK_CODE, fn, begin=addr, end=addr) for addr, fn in ((0x437B10, h_rand), (0x408BE0, h_test), (0x439E30, h_place), (0x4062A0, h_nop))]
+
+GRID = 0x5FAC38
+BLD_TABLE, UNIT_TABLE, BLD_COUNT, UNIT_COUNT, CREDITS, FLAGS = 0x5BAB00, 0x5B62C0, 0x575740, 0x575734, 0x517AF8, 0x70BAF5
+UNIT_OBJ = OBJ + 0x100000
+
+bad = 0
+cases = 0
+placed = 0
+TIERS = {}
+for case in range(1500):
+    me = random.randint(0, 1)
+    nb = random.randint(1, 4)
+    blds = []
+    for i in range(nb):
+        kind = random.choice([100, 101, 102, 103, 104, 105, 106, 107, 107, 25, 26, 28])
+        x, y = random.randint(6, 90), random.randint(6, 90)
+        obj = OBJ + 0x1000 * i
+        if kind >= 100:
+            ctor_spots(kind, x, y, obj)
+            w, h, _ = struct.unpack("<iii", mu.mem_read(obj + 0x14, 4) + mu.mem_read(obj + 0x18, 4) + b"\0" * 4)
+        else:  # a turret: skipped by the routine, only its kind matters
+            mu.mem_write(obj, b"\0" * 0x400)
+            mu.mem_write(obj + 4, struct.pack("<ii", x, y))
+            mu.mem_write(obj + 0x94, struct.pack("<i", kind))
+            mu.mem_write(obj + 0x14, struct.pack("<ii", 1, 1))
+        blds.append((kind, x, y, obj))
+        mu.mem_write(BLD_TABLE + 4 * (me * 0x12C + i), struct.pack("<I", obj))
+    mu.mem_write(BLD_COUNT + 4 * me, struct.pack("<i", nb))
+    # units: three players, owner == table
+    lines = [f"me {me}"]
+    uidx = 0
+    for q in range(3):
+        cnt = random.randint(0, 6)
+        for j in range(cnt):
+            kind_, bx, by, _ = random.choice(blds)
+            cx, cy = bx + random.randint(-7, 8), by + random.randint(-7, 8)
+            ukind = random.choice([1, 2, 7, 11, 40, 41, 43, 45, 46, 109, 110, 111, 112, 113])
+            if ukind == 40 and random.random() < 0.7 and kind_ >= 100:
+                o = random.choice([b for b in blds if b[0] >= 100])
+                ax = call(0x409AB0, [], ecx=o[3]) & 0xFFFFFFFF
+                ay = call(0x409AC0, [], ecx=o[3]) & 0xFFFFFFFF
+                cx, cy = struct.unpack("<i", struct.pack("<I", ax))[0], struct.unpack("<i", struct.pack("<I", ay))[0]
+            u = UNIT_OBJ + 0x100 * uidx
+            uidx += 1
+            px, py = cx * 32 + random.randint(0, 31), cy * 32 + random.randint(0, 31)
+            mu.mem_write(u, b"\0" * 0x100)
+            mu.mem_write(u + 0x14, struct.pack("<ii", px, py))
+            mu.mem_write(u + 0x40, struct.pack("<i", ukind))
+            mu.mem_write(u + 0x44, struct.pack("<i", q))
+            mu.mem_write(UNIT_TABLE + 4 * (q * 1000 + j), struct.pack("<I", u))
+            lines.append(f"u {cx} {cy} {q} {ukind}")
+        mu.mem_write(UNIT_COUNT + 4 * q, struct.pack("<i", cnt))
+    credits = random.choice([150, 250, 450, 700, 900, 1000, 1200, 1500, 1600, 2500, 6000])
+    flags = [random.random() < 0.6 for _ in range(5)]
+    mu.mem_write(CREDITS + 4 * me, struct.pack("<i", credits))
+    mu.mem_write(FLAGS + me * 0xC68, bytes(int(f) for f in flags))
+    # turret handles on the grid around the spots: class 2 (bits 22-24), type 6 = anti-air (bits 19-21), type 3 = other turrets
+    touched = []
+    for kind, x, y, obj in blds:
+        if kind < 100:
+            continue
+        xs = struct.unpack("<8i", mu.mem_read(obj + 0x224, 32))
+        ys = struct.unpack("<8i", mu.mem_read(obj + 0x244, 32))
+        for sx, sy in zip(xs, ys):
+            r = random.random()
+            if r < 0.3 and 0 <= sx < 128 and 0 <= sy < 128:
+                t = 6 if r < 0.2 else 3
+                mu.mem_write(GRID + 4 * (sx * 128 + sy), struct.pack("<I", (2 << 22) | (t << 19) | 0x123))
+                touched.append((sx, sy))
+                if t == 6:
+                    lines.append(f"aa {sx} {sy}")
+    for kind, x, y, obj in blds:
+        if kind >= 100:
+            lines.append(f"b {kind} {x} {y}")
+    lines += [f"credits {credits}", "flags " + " ".join(str(int(f)) for f in flags)]
+    seq = [random.randrange(65536) for _ in range(12)]
+    lines.append("rng " + " ".join(map(str, seq)))
+    HOOK.update(seq=seq, n=0, log=[], place=[])
+    call(0x431120, [me])
+    got = HOOK["log"] + ([f"place {x} {y} {k}" for x, y, k in HOOK["place"]] or ["none"])
+    (after,) = struct.unpack("<i", mu.mem_read(CREDITS + 4 * me, 4))
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+        f.write("\n".join(lines))
+    want = sh("turretai", f.name).split("\n")
+    os.unlink(f.name)
+    cases += 1
+    placed += got[-1] != "none"
+    if got[-1] != "none":
+        TIERS[int(got[-1].split()[3]) - 24] = TIERS.get(int(got[-1].split()[3]) - 24, 0) + 1
+    if got != want or (got[-1] != "none" and after != credits - 200 * (int(got[-1].split()[3]) - 24)):
+        bad += 1
+        if bad <= 3:
+            print("MISMATCH", lines, "\n exe ", got, after, "\n rust", want)
+    for sx, sy in touched:
+        mu.mem_write(GRID + 4 * (sx * 128 + sy), b"\0\0\0\0")
+report(f"computer turret routine (0x431120, {placed} placements, tiers {sorted(TIERS.items())}; rand/placement test/creator stubbed)", cases, bad)
+for _h in TURRET_HOOKS:
+    mu.hook_del(_h)
 
 
 # 0. Advancer beam cooldown member (0x47c6b0 tick; object fields: +4 enabled, +0x1c counter, +0x20 reload, +0x40 state)

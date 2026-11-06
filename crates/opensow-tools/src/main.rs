@@ -21,6 +21,7 @@ opensow <command> [args]
   path <type> x1 y1 x2 y2 delay      print a bullet's flight path points (x y lift), one per line
   launch <code> <tx> <ty> <side> <cells> <counter>   fields of a launched aircraft (code 30..=34)
   squad <0..17>                      units a carryall lands: dx dy kind per line
+  cloud roll W H r1 r2 r3 r4 | scatter W H r1..r6 | step X SPEED W T0 N   ambient cloud: new fields / the position after N ticks from tick T0
   rings                              print the range index table and the ring offset list (dx dy ...)
   weapons                            table of every weapon: range, reload, volley, projectile, speed, strength
   hover                              the Advancer's hover bob table (0x89cf58)
@@ -78,12 +79,136 @@ fn run(args: &[String]) -> Res<()> {
                 println!("{} bytes; {:?}", state.len(), opensow_formats::save::StateHead::parse(&state)?);
             }
         }
+        ["savestate", speech, hexfile] => {
+            // parse a whole decompressed state stream (hex text file; `speech` = [0x575720] + 1), print a summary and whether
+            // State::to_bytes reproduces it byte for byte (scripts/verify_save_state.py compares the summary with the emulated memory)
+            use opensow_formats::save::State;
+            let text = std::fs::read_to_string(hexfile)?;
+            let t = text.trim();
+            let bytes: Vec<u8> = (0..t.len() / 2).map(|i| u8::from_str_radix(&t[2 * i..2 * i + 2], 16)).collect::<Result<_, _>>()?;
+            let st = State::parse(&bytes, speech.parse()?)?;
+            let again = st.to_bytes();
+            println!("rewrite {}", if again.as_deref() == Some(&bytes[..]) { "ok" } else { "DIFFERS" });
+            let h = &st.head;
+            println!("head {} {} {} {} {} {} {} {} {} {}", h.level, h.rng_index, h.v_5baafc, h.flag_49a339 as u8, h.v_5baad8, h.v_5baadc, h.v_5baac4, h.v_5baac8, h.flag_5baa99 as u8, h.v_89cf50);
+            let hex = |v: &[u8]| v.iter().map(|b| format!("{b:02x}")).collect::<String>();
+            for p in 0..3 {
+                println!("pw {p} {} {} {}", st.player_words[p][0], st.player_words[p][1], st.player_words[p][2]);
+                for k in 0..4 {
+                    println!("parr {p} {k} {}", hex(&st.player_arrays[p][k]));
+                }
+            }
+            for (r, pair) in st.lists.iter().enumerate() {
+                for (k, l) in pair.iter().enumerate() {
+                    println!("list {r} {k} {}", l.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" "));
+                }
+            }
+            let m = &st.map;
+            println!("map {} {} {} {} {} {}", m.version, m.scroll_x, m.scroll_y, m.width, m.height, m.items.len());
+            for (k, c) in m.cameras.iter().enumerate() {
+                println!("cam {k} {} {} {} {} {} {} {}", c.scroll_to as u8, c.target_x, c.target_y, c.quake_left, c.quake_timer, c.quake_x, c.quake_y);
+            }
+            for (i, c) in m.cells.iter().enumerate().take(40) {
+                println!("cell {i} {} {} {} {} {} {} {}", c.coord, c.ground, c.air, c.reserved, c.no_marks, c.no_build, c.building);
+            }
+            for (name, groups) in [("units", &st.units), ("buildings", &st.buildings), ("bullets", &st.bullets), ("squads", &st.squads)] {
+                for (p, g) in groups.iter().enumerate() {
+                    println!("slots {name} {p} {} {}", g.0, g.1.iter().map(|x| x.0.to_string()).collect::<Vec<_>>().join(" "));
+                }
+            }
+            println!("decalflags {}", hex(&st.decal_flags));
+            println!("decals {} clouds {} speech {} players {} stocks {} params {}", st.decals.len(), st.clouds.len(), st.speech.len(), st.players.len(), st.stocks.len(), st.params.len());
+            for (i, sp) in st.speech.iter().enumerate() {
+                println!("speechitems {i} {}", sp.orders.iter().map(|o| o.strings[0].clone()).collect::<Vec<_>>().join("|"));
+            }
+        }
+        ["saverec", class, hexfile] => {
+            // parse one record (hex text file), print every field as `path offset value` and whether write(parse(x)) == x
+            use opensow_formats::{saveobj::{Class, Object}, Reader};
+            let text = std::fs::read_to_string(hexfile)?;
+            let t = text.trim();
+            let bytes: Vec<u8> = (0..t.len() / 2).map(|i| u8::from_str_radix(&t[2 * i..2 * i + 2], 16)).collect::<Result<_, _>>()?;
+            let c = Class::ALL.iter().copied().find(|c| format!("{c:?}") == *class).ok_or("unknown class")?;
+            let mut r = Reader::new(&bytes);
+            let o = Object::parse(&mut r, c)?;
+            let mut again = Vec::new();
+            o.write(&mut again);
+            println!("consumed {} of {} rewrite {}", bytes.len() - r.remaining(), bytes.len(), if again == bytes { "ok" } else { "DIFFERS" });
+            let mut v = Vec::new();
+            o.flatten("", &mut v);
+            for (p, off, val) in v {
+                println!("{p}|{off}|{val}");
+            }
+        }
         ["savelayout"] => {
             use opensow_formats::saveobj::Class;
             for c in [Class::Unit, Class::Top, Class::Chassis, Class::Order, Class::Weapon, Class::Building, Class::BuildingPart, Class::Bullet, Class::Aircraft, Class::Decal, Class::Cloud, Class::PlayerState, Class::Stock, Class::Params, Class::Speech, Class::SpeechItem, Class::MapItem] {
                 let (v, m) = c.header();
                 let f: Vec<String> = c.scalars().iter().map(|&(o, b)| format!("{}{:#x}", if b { "b" } else { "u" }, o)).collect();
                 println!("{c:?} {v} {m:#x} {}", f.join(" "));
+                if std::env::var_os("NAMES").is_some() {
+                    for &(o, b) in c.scalars().iter() {
+                        println!("    {}{o:#x} {}", if b { "b" } else { "u" }, c.field_name(o));
+                    }
+                }
+            }
+        }
+        ["netsync", what, hex, bits] => {
+            // decode a state-sync record given as hex bytes and a bit count (docs/network.md, `formats::netsync`)
+            use opensow_formats::{net::Bits, netsync::*};
+            let bytes: Vec<u8> = (0..hex.len() / 2).map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16)).collect::<Result<_, _>>()?;
+            let mut r = Bits::new(&bytes, bits.parse()?);
+            match *what {
+                "building" => {
+                    let b = BuildingSync::parse(&mut r)?;
+                    println!("{} {} {} {} {}", b.kind, b.word90, b.cell.0, b.cell.1, b.owner);
+                }
+                "bullet" => {
+                    let b = BulletSync::parse(&mut r)?;
+                    let (xi, xv) = match b.extra {
+                        BulletExtra::None => (5, 0),
+                        BulletExtra::Handle(v) => (0, v),
+                        BulletExtra::Delay(v) => (1, v),
+                        BulletExtra::Speed(v) => (2, v),
+                        BulletExtra::Variant(v) => (3, v),
+                        BulletExtra::Variant2(v) => (4, v),
+                    };
+                    println!("{} {} {} {} {} {} {} {} {} {} {xi} {xv} {}", b.ty, b.owner, b.points[0], b.points[1], b.points[2], b.points[3], b.word2698, b.strength, b.word26b0, b.word26b4, b.flag.map_or(-1, |f| f as i32));
+                }
+                "air" => {
+                    let a = AirSync::parse(&mut r)?;
+                    println!("{} {} {} {} {} {} {} {} {}", a.code, a.handle, a.target.0, a.target.1, a.word98, a.word9c, a.word20, a.worda0, a.worda4);
+                }
+                "unit" => {
+                    let u = UnitSync::parse(&mut r)?;
+                    let mut line = format!("{} {} {} {} {} {} {}", u.kind, u.handle, u.player, u.cell.0, u.cell.1, u.home.0, u.home.1);
+                    match u.chassis {
+                        Some(c) => line += &format!(" C {} {} {} {} {} {} {} {} {}", c.steps[0], c.steps[1], c.steps[2], c.steps[3], c.goal.0, c.goal.1, c.words.0, c.words.1, c.approaching as u8),
+                        None => line += " N",
+                    }
+                    match u.top {
+                        Some((f, w)) => line += &format!(" T {f} {}", w.map_or(-1i64, |v| v as i64)),
+                        None => line += " N",
+                    }
+                    println!("{line}");
+                }
+                _ => return Err("netsync building|bullet|air|unit HEX BITS".into()),
+            }
+            println!("bits left {}", r.remaining());
+        }
+        ["netmsg", hex, bits] => {
+            // decode a whole frame message (docs/network.md): a client's command queues (type bit 0 = 1) or the host's snapshot
+            use opensow_formats::{net::{Bits, Header}, netsync::*};
+            let bytes: Vec<u8> = (0..hex.len() / 2).map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16)).collect::<Result<_, _>>()?;
+            let n: usize = bits.parse()?;
+            let h = Header::parse(&bytes, n)?;
+            println!("header {:?}", h.fields);
+            if h.fields[0] & 1 == 1 {
+                let mut r = Bits::new(&bytes, n);
+                r.pos = opensow_formats::net::PAYLOAD_BIT as usize;
+                println!("commands from player {}: {:#?}", h.fields[7], Commands::parse_payload(&mut r)?);
+            } else {
+                println!("{:#?}", Snapshot::parse(&bytes, n)?);
             }
         }
         ["netpkg", hex, bits] => {
@@ -225,6 +350,14 @@ fn run(args: &[String]) -> Res<()> {
         ["facing", ax, ay, bx, by, steps] => {
             println!("{}", opensow_formats::facing::facing(ax.parse()?, ay.parse()?, bx.parse()?, by.parse()?, steps.parse()?));
         }
+        ["spark", px, py, x, y, r] => {
+            // `0x443210`: next vertex of a Load/Save page spark (coordinates relative to the screen centre); the scripted generator returns `r % n`
+            let r: u32 = r.parse()?;
+            match opensow_formats::savespark::next_vertex((px.parse()?, py.parse()?), (x.parse()?, y.parse()?), |n| r % n) {
+                Some((nx, ny)) => println!("{nx} {ny}"),
+                None => println!("none"),
+            }
+        }
         ["launch", code, tx, ty, side, cells, counter] => {
             use opensow_formats::{air::AirForce, aircraft::Aircraft};
             let force = AirForce::from_code(code.parse()?).ok_or("unknown air force code (30..=34)")?;
@@ -239,6 +372,22 @@ fn run(args: &[String]) -> Res<()> {
             for (dx, dy, kind) in opensow_formats::aircraft::squad(index.parse()?).ok_or("no such squad (0..=17)")? {
                 println!("{dx} {dy} {kind}");
             }
+        }
+        ["cloud", "roll", _w, h, r1, r2, r3, r4] => {
+            let mut v = [r1, r2, r3, r4].map(|s| s.parse::<u32>().unwrap()).into_iter();
+            let c = opensow_formats::clouds::Cloud::roll(h.parse()?, &mut |n| v.next().unwrap() % n);
+            println!("{} {} {} {}", c.x, c.y, c.speed, c.picture);
+        }
+        ["cloud", "scatter", w, h, r1, r2, r3, r4, r5, r6] => {
+            let mut v = [r1, r2, r3, r4, r5, r6].map(|s| s.parse::<u32>().unwrap()).into_iter();
+            let c = opensow_formats::clouds::Cloud::scatter(w.parse()?, h.parse()?, &mut |n| v.next().unwrap() % n);
+            println!("{} {} {} {}", c.x, c.y, c.speed, c.picture);
+        }
+        ["cloud", "step", x, speed, w, t0, n] => {
+            let mut c = opensow_formats::clouds::Cloud { x: x.parse()?, y: 0, speed: speed.parse()?, picture: 0 };
+            let (t0, n): (u32, u32) = (t0.parse()?, n.parse()?);
+            let alive = c.advance((0..n).map(|i| (t0 + i) % 60), w.parse()?);
+            println!("{} {}", c.x, alive as u8);
         }
         ["rings"] => {
             let r = opensow_formats::rings::Rings::generate();
@@ -317,6 +466,8 @@ fn run(args: &[String]) -> Res<()> {
         ["turn", c, t, n] => println!("{}", opensow_formats::facing::turn_step(c.parse()?, t.parse()?, n.parse()?)),
         ["curvebullet", gen, t, idx, x1, y1] => print_curve_bullet(Path::new(gen), t.parse()?, idx.parse()?, x1.parse()?, y1.parse()?)?,
         ["sparks", t, variant, vals @ ..] => print_sparks(t.parse()?, variant.parse()?, vals)?,
+        ["turretspots", kind, x, y] => print_turret_spots(kind.parse()?, x.parse()?, y.parse()?),
+        ["turretai", file] => print_turret_ai(Path::new(file))?,
         ["curves", dir] => print_curves(Path::new(dir))?,
         ["path", t, x1, y1, x2, y2, delay] => print_path(t.parse()?, x1.parse()?, y1.parse()?, x2.parse()?, y2.parse()?, delay.parse()?)?,
         ["frames", src] => frame_table(Path::new(src))?,
@@ -425,7 +576,7 @@ fn map_image(src: &Path, dst: &Path) -> Res<()> {
     let m = map::Map::parse(&std::fs::read(src)?)?;
     let mut img = Vec::with_capacity(m.cells.len() * 3);
     for c in &m.cells {
-        img.extend(match (c.border, c.blocked, c.flag) {
+        img.extend(match (c.border, c.blocked, c.no_build) {
             (true, _, _) => [255, 255, 255],
             (_, true, _) => [200, 40, 40],
             (_, _, true) => [40, 200, 40],
@@ -446,7 +597,7 @@ fn print_level(src: &Path) -> Res<()> {
     let nz: Vec<_> = l.header.iter().enumerate().skip(2).filter(|(_, &v)| v != 0).map(|(i, v)| format!("@{}={v}", i * 4)).collect();
     println!("header: {}", nz.join(" "));
     for st in l.air_stock().iter().filter(|s| s.counts.iter().any(|&c| c != 0)) {
-        println!("air force {:<9} stock {:?} (side 0/1/2)", st.force.name(), st.counts);
+        println!("air force {:<9} stock {:?} (player / enemy / unread word)", st.force.name(), st.counts);
     }
     for o in &l.objects {
         let extra = if o.object_kind().is_building() { format!(" words {:?}", &o.raw[..13]) } else { String::new() };
@@ -775,5 +926,49 @@ fn netstep_cmd(kv: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
         "pos={},{} since={},{} line=[{}] prev={},{} step1={},{} step2={},{} facing={} want={} frame={} cd={} anim={},{} routelen={} stat={} calls={}",
         c.pos.0, c.pos.1, c.since.0, c.since.1, line, c.prev.0, c.prev.1, c.step1.0, c.step1.1, c.step2.0, c.step2.1, c.facing, c.want, c.frame, c.cooldown, c.anim_count, c.phase, c.route_len, sum, host.calls.join(" ")
     );
+    Ok(())
+}
+
+/// `opensow turretspots KIND X Y`: the eight turret spots of a building (x0..x7 then y0..y7, the memory order at `[+0x224]`).
+fn print_turret_spots(kind: i32, x: i32, y: i32) {
+    let s = opensow_formats::turretai::Building { kind_id: kind, cell: (x, y) }.spots();
+    let v: Vec<String> = s.iter().map(|p| p.0.to_string()).chain(s.iter().map(|p| p.1.to_string())).collect();
+    println!("{}", v.join(" "));
+}
+
+/// `opensow turretai FILE`: runs `turretai::plan` on a description (`me P`, `credits C`, `flags a b c d e`, `b KIND X Y`,
+/// `u CX CY OWNER KIND`, `aa CX CY`, `rng v...`) and prints every placement test (`try X Y W H`) and the result. The placement
+/// test accepts a cell when `((x*31 + y*17) & 7) < 3`.
+fn print_turret_ai(file: &Path) -> Res<()> {
+    use opensow_formats::turretai::{plan, Building, Slot};
+    let text = std::fs::read_to_string(file)?;
+    let (mut me, mut credits, mut flags) = (0, 0, [false; 5]);
+    let (mut buildings, mut slots, mut aa, mut rng) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for line in text.lines() {
+        let v: Vec<i32> = line.split_whitespace().skip(1).filter_map(|t| t.parse().ok()).collect();
+        match line.split_whitespace().next() {
+            Some("me") => me = v[0],
+            Some("credits") => credits = v[0],
+            Some("flags") => (0..5).for_each(|i| flags[i] = v[i] != 0),
+            Some("b") => buildings.push(Building { kind_id: v[0], cell: (v[1], v[2]) }),
+            Some("u") => slots.push(Slot { cell: (v[0], v[1]), owner: v[2], kind: v[3] }),
+            Some("aa") => aa.push((v[0], v[1])),
+            Some("rng") => rng = v.iter().map(|&x| x as u32).collect(),
+            _ => {}
+        }
+    }
+    let mut next = rng.into_iter();
+    let mut tries = Vec::new();
+    let res = plan(&buildings, &slots, me, credits, &flags, |c| aa.contains(&c), |n| next.next().unwrap_or(0) % n, |x, y, w, h| {
+        tries.push(format!("try {x} {y} {w} {h}"));
+        ((x * 31 + y * 17) & 7) < 3
+    });
+    for t in tries {
+        println!("{t}");
+    }
+    match res {
+        Some(p) => println!("place {} {} {}", p.cell.0, p.cell.1, 0x18 + p.tier),
+        None => println!("none"),
+    }
     Ok(())
 }

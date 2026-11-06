@@ -19,6 +19,21 @@ use crate::sprite::Frame;
 
 pub const FIRST_CHAR: u32 = 32;
 pub const SPACE_ADVANCE: i32 = 4;
+/// The glyph a **byte >= 0x80** really draws in the exe (`0x461ac0` / `0x45ed50` read the byte with `movsx`, so it is negative, and index the
+/// glyph table `font * 100 + c`): the slot falls into the arrays of the fonts before it. The ten fonts are loaded one after the other at slot
+/// `f * 100 + 32` with room for 100 frames (`0x425af1..0x425c3e`: 0 small_i, 1 small_o, 2 medium_i, 3 medium_o, 4 big_i, 5 big_o, 6 msg_i,
+/// 7 msg_o, 8 font02_dark, 9 font02_light). Returns `(font, char)` of the glyph that is drawn (char 32..=125), or `None` when the slot holds no
+/// glyph of any font (slots before font 0 are other sprite arrays, slots 126..131 of a font are empty). Bytes below 0x80 return themselves.
+pub fn glyph_of_byte(font: i32, byte: u8) -> Option<(i32, u8)> {
+    let slot = font * 100 + (byte as i8) as i32;
+    let g = (slot - 32).div_euclid(100);
+    let ch = slot - g * 100;
+    if g < 0 || !(32..=125).contains(&ch) {
+        return None;
+    }
+    Some((g, ch as u8))
+}
+
 /// Characters drawn 2 px further right than the cursor (without changing the advance).
 pub const PIPE: char = '|';
 
@@ -90,6 +105,18 @@ impl Font {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn high_bytes_reach_into_the_previous_fonts() {
+        assert_eq!(glyph_of_byte(2, b'A'), Some((2, b'A')));
+        assert_eq!(glyph_of_byte(2, 0xff), Some((1, b'c'))); // -1 -> slot 199 = font 1, char 99
+        assert_eq!(glyph_of_byte(2, 0xc3), Some((1, 39))); // -61 -> slot 139
+        assert_eq!(glyph_of_byte(2, 0xbc), Some((1, 32))); // -68 -> slot 132
+        assert_eq!(glyph_of_byte(2, 0xb0), Some((0, 120))); // -80 -> slot 120 = font 0
+        assert_eq!(glyph_of_byte(2, 0xbb), None); // -69 -> slot 131: empty room after font 0's glyphs
+        assert_eq!(glyph_of_byte(1, 0xff), Some((0, b'c')));
+        assert_eq!(glyph_of_byte(0, 0xff), None); // before the table
+    }
+
     use super::*;
 
     fn glyph(w: u16, h: u16, hot_y: i16) -> Frame {

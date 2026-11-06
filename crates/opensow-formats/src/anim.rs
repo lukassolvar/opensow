@@ -103,20 +103,23 @@ impl ChassisAnim {
         self.target = facing % self.steps;
     }
 
+    /// The counters a savegame keeps (`[chassis+0x38]` turn countdown, `[chassis+0x4c]` animation countdown) and the facing step count.
+    pub fn counters(&self) -> (i32, i32, u32) {
+        (self.turn_counter, self.anim_counter, self.steps)
+    }
+
+    /// Puts the counters back (savegame load).
+    pub fn set_counters(&mut self, turn_counter: i32, anim_counter: i32) {
+        self.turn_counter = turn_counter;
+        self.anim_counter = anim_counter;
+    }
+
     /// One game tick. `moving` = the unit's position differs from the one the chassis remembers.
     /// Returns true when the facing took a turn step this tick: the exe then hands the chassis's *target* facing to the
     /// weapon top (`0x479980`, called right after every `0x46a190` turn step in `0x46f4a0` / `0x46f550`), see
     /// [`crate::aim::TopAim::set_target_facing`].
     pub fn tick(&mut self, moving: bool) -> bool {
-        let mut turned = false;
-        if self.facing != self.target {
-            self.turn_counter -= 1;
-            if self.turn_counter < 0 {
-                self.turn_counter = self.params.turn_delay as i32;
-                self.facing = turn_step(self.facing, self.target, self.steps);
-                turned = true;
-            }
-        }
+        let turned = self.turn();
         if self.facing == self.target {
             self.anim_counter -= 1;
             if self.anim_counter < 0 {
@@ -130,6 +133,30 @@ impl ChassisAnim {
             }
         }
         turned
+    }
+
+    /// The turning half of [`ChassisAnim::tick`]: while the facing is off its target the delay counter counts down and, below
+    /// zero, reloads and takes one turn step. The walking step `0x46f550` runs it once per pixel step it takes (`0x46f65f`)
+    /// *and* the tail runs it again (`0x46f8b9`), so a walking unit turns faster than a standing one. True after a turn step.
+    pub fn turn(&mut self) -> bool {
+        if self.facing != self.target {
+            self.turn_counter -= 1;
+            if self.turn_counter < 0 {
+                self.turn_counter = self.params.turn_delay as i32;
+                self.facing = turn_step(self.facing, self.target, self.steps);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The walking gate (`0x46f692`): four turn steps from the current facing reach the target.
+    pub fn within_turns(&self, n: u32) -> bool {
+        let mut f = self.facing;
+        for _ in 0..n {
+            f = turn_step(f, self.target, self.steps);
+        }
+        f == self.target
     }
 
     pub fn frame(&self) -> u32 {

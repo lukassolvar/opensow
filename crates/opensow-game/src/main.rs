@@ -1,15 +1,17 @@
 //! `opensow-game`: a playable prototype with the original menus and a skirmish on the campaign levels.
 //!
 //! ```text
-//! opensow-game [--no-intro] [--mute] [--lang SK|CZ|PL|HU|RU|CHINNESSE]   start the game window (plays the intro movie first; any key or click skips it)
+//! opensow-game [--no-intro] [--mute] [--lang SK|CZ|PL|HU|RU|CHINNESSE]   start the game window (shows the boot pictures and plays the intro movie first; any key or click skips it)
 //! opensow-game --screenshot out.png [--size WxH] [--screen main|levels|options|pause|message|results]
-//!              [--mute] [--intro-frame N [--movie mI|mO|M01..M22]] [--hover N] [--play M01 [--ticks N] [--select-all] [--select-building CX,CY] [--move CX,CY] [--zoom Z] [--center CX,CY] [--range] [--fx CX,CY,KIND,AGE]... [--no-mask]]
+//!              [--mute] [--boot-page N] [--intro-frame N [--movie mI|mO|M01..M22]] [--hover N] [--play M01 [--ticks N] [--select-all] [--select-building CX,CY] [--move CX,CY] [--zoom Z] [--center CX,CY] [--range] [--fx CX,CY,KIND,AGE]... [--no-mask]]
 //! ```
 
 mod assets;
+mod devtools;
 mod gdi;
 mod hud;
 mod infobox;
+mod boot;
 mod intro;
 mod ingame;
 mod lands;
@@ -22,6 +24,7 @@ mod saveui;
 mod sfx;
 mod results;
 mod sim;
+mod tutorial_panel;
 mod ui;
 
 use assets::Assets;
@@ -36,7 +39,7 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Window, WindowId};
+use winit::window::{CustomCursor, Cursor, Window, WindowId};
 
 /// What happens when the movie on screen ends or is skipped.
 #[derive(Debug, Clone, PartialEq)]
@@ -60,20 +63,32 @@ const TUTORIAL_LEVEL: &str = "M00";
 
 struct Game {
     assets: Assets,
+    /// The key event being handled comes from the numeric keypad (winit `KeyLocation::Numpad`).
+    numpad: bool,
+    /// The digit of the physical key being handled (top row 1-9, or numpad 0-9), whatever the layout: the original reads scan codes.
+    digit: Option<u8>,
+    /// Game speed factor `[0x49ceec]` (F3 / F4, 0.5..3.0 in steps of 0.5; it stays from mission to mission).
+    game_speed: f32,
     settings: Settings,
     levels: Vec<String>,
     /// Menu shown on top of (or instead of) the game.
     screen: Option<Screen>,
     back: Vec<Screen>,
     play: Option<Box<Play>>,
+    /// The carryall squad counter `[0x89cf50]`, kept over missions as in the exe (docs/air.md).
+    carry_counter: usize,
     hover: Option<usize>,
     pressed: Option<usize>,
     shift: bool,
+    /// F5 pressed in a mission: the next drawn frame is grabbed and saved to slot 0 (`0x416811`, docs/saveload.md).
+    quick_save: bool,
     scale: f32,
     cursor: (i32, i32),
     quit: bool,
     /// The intro movie while it plays; it replaces everything else on screen.
     intro: Option<intro::Intro>,
+    /// The boot screens (Cypronia logo, title picture) while they show; they come before the intro movie.
+    boot: Option<boot::Boot>,
     then: Then,
     language: usize,
     /// Play the briefing movies and the outro (off for headless runs and `--no-intro`).
@@ -100,12 +115,14 @@ struct Game {
     campaign: bool,
     music: music::Music,
     sfx: sfx::Sfx,
+    /// Developer tools overlay (`devtools.rs`); not part of the original.
+    dev: devtools::DevTools,
 }
 
 impl Game {
     fn new(assets: Assets) -> Game {
         let levels = opensow_viewer::scene::Scene::list(&assets.game);
-        let mut g = Game { assets, settings: Settings::default(), levels, screen: Some(Screen::Main), back: Vec::new(), play: None, hover: None, pressed: None, shift: false, scale: 1.0, cursor: (0, 0), quit: false, intro: None, then: Then::Menu, language: 0, movies: false, mute: false, lands: None, options_menu: None, saveui: None, net_menu: None, ingame: None, results: None, options: options::GameOptions::load(), progress: opensow_formats::config::PassedLevels::initial(), campaign: false, music: music::Music::new(), sfx: sfx::Sfx::new() };
+        let mut g = Game { assets, numpad: false, digit: None, game_speed: 1.0, settings: Settings::default(), levels, screen: Some(Screen::Main), back: Vec::new(), play: None, carry_counter: 0, hover: None, pressed: None, shift: false, quick_save: false, scale: 1.0, cursor: (0, 0), quit: false, intro: None, boot: None, then: Then::Menu, language: 0, movies: false, mute: false, lands: None, options_menu: None, saveui: None, net_menu: None, ingame: None, results: None, options: options::GameOptions::load(), progress: opensow_formats::config::PassedLevels::initial(), campaign: false, music: music::Music::new(), sfx: sfx::Sfx::new(), dev: devtools::DevTools::default() };
         g.apply_audio();
         g
     }
@@ -148,6 +165,20 @@ impl Game {
         self.end_movie();
     }
 
+    /// The boot screens are over: the intro movie follows, then the menu.
+    /// The exe restarts `uvod.wav` whenever a boot page starts.
+    fn boot_music(&mut self) {
+        if self.boot.as_mut().is_some_and(|b| b.take_changed()) {
+            self.music.stop();
+            self.play_music("uvod");
+        }
+    }
+
+    fn end_boot(&mut self) {
+        self.boot = None;
+        self.play_movie("mI", Then::Menu);
+    }
+
     fn end_movie(&mut self) {
         self.intro = None;
         match std::mem::replace(&mut self.then, Then::Menu) {
@@ -163,7 +194,7 @@ impl Game {
     }
 
     fn start(&mut self, level: &str) {
-        match Play::new(&mut self.assets, level, &self.settings) {
+        match Play::new(&mut self.assets, level, &self.settings, self.carry_counter) {
             Ok(p) => {
                 self.play_music(&format!("Level{:02}", 1 + music::pick(4)));
                 self.play = Some(Box::new(p));
@@ -243,7 +274,56 @@ impl Game {
         self.screen = None;
         self.back.clear();
         self.play_music(if music::pick(2) == 0 { "Brief2" } else { "Brief" }); // 0x441cf9/0x441c4b: random 0 -> brief2.wav
-        self.lands = Some(lands::Lands::new(&mut self.assets, self.progress.clone(), video && self.movies, self.mute));
+        let progress = self.effective_progress();
+        self.lands = Some(lands::Lands::new(&mut self.assets, progress, video && self.movies, self.mute));
+    }
+
+    /// The campaign progress the map shows: with the dev tools' UNLOCK ALL every locked land is open.
+    fn effective_progress(&self) -> opensow_formats::config::PassedLevels {
+        let mut p = self.progress.clone();
+        if self.dev.unlock_all {
+            for l in 1..p.states.len() {
+                if p.states[l] == 0 {
+                    p.states[l] = 2;
+                }
+            }
+        }
+        p
+    }
+
+    /// Mission running with nothing on top of it (the dev tools may place units).
+    fn in_mission(&self) -> bool {
+        self.play.is_some() && self.screen.is_none() && self.intro.is_none() && self.lands.is_none() && self.options_menu.is_none() && self.saveui.is_none() && self.net_menu.is_none() && self.results.is_none()
+    }
+
+    /// Dev tools: a pressed tool button took effect.
+    fn dev_event(&mut self, item: devtools::Item) {
+        use devtools::Item;
+        self.play_sfx(29);
+        match item {
+            Item::UnlockAll => {
+                let p = self.effective_progress();
+                if let Some(l) = self.lands.as_mut() {
+                    l.progress = p;
+                }
+            }
+            Item::Kind(k) => {
+                if let (true, Some(p)) = (self.in_mission(), self.play.as_mut()) {
+                    p.dev_spawn = if p.dev_spawn.map(|d| d.0) == Some(k) { None } else { Some((k, self.dev.side)) };
+                }
+            }
+            Item::Air(g) => {
+                if let (true, Some(p)) = (self.in_mission(), self.play.as_mut()) {
+                    p.world.air_stock[self.dev.side][g] += 1;
+                }
+            }
+            Item::Side(s) => {
+                if let Some(d) = self.play.as_mut().and_then(|p| p.dev_spawn.as_mut()) {
+                    d.1 = s;
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Play the sounds the campaign map asked for.
@@ -349,9 +429,32 @@ impl Game {
         let store = saveui::Store::locate(&self.assets.game);
         let mut ui = saveui::SaveUi::new(&mut self.assets, mode, &level, store);
         if let (saveui::Mode::Save, Some(p)) = (mode, self.play.as_mut()) {
+            p.progress = self.progress.clone();
             ui.snapshot = p.snapshot();
         }
         self.saveui = Some(ui);
+    }
+
+    /// F5 in a mission (`0x416811`): grab the screen (`0x445070`) and save slot 0 with the title "Quick Save" (`0x41a9c0`), then the
+    /// "game saved" speech (`0x428bb0`).
+    fn do_quick_save(&mut self, buf: &[u32], w: usize, h: usize) {
+        let Some(p) = self.play.as_mut() else { return };
+        p.progress = self.progress.clone();
+        let (level, snapshot) = (p.level.clone(), p.snapshot());
+        let thumb = opensow_formats::save::grab_thumbnail(buf, w, h);
+        let store = saveui::Store::locate(&self.assets.game);
+        match store.write(0, "Quick Save", &level, &snapshot, &thumb) {
+            Ok(()) => self.sfx.say(&self.assets.game, "01-game-saved.wav"),
+            Err(e) => eprintln!("quick save failed: {e}"),
+        }
+    }
+
+    /// Shift + F5 in a mission (`0x416850` -> `0x41a850(0)` -> `0x425d00`): load slot 0; nothing happens when it cannot be read.
+    fn quick_load(&mut self) {
+        let store = saveui::Store::locate(&self.assets.game);
+        if let Some((level, snapshot)) = store.level_of(0) {
+            self.saveui_event(saveui::Event::Load(level, snapshot));
+        }
     }
 
     /// Play the sounds the load / save page asked for.
@@ -421,6 +524,7 @@ impl Game {
         self.music.set(o.music_on && !self.mute, o.music_volume);
         (self.settings.scroll_keys, self.settings.scroll_mouse) = (o.cfg.scroll_b, o.cfg.scroll_a);
         (self.settings.radar_on, self.settings.quake_on) = (o.cfg.flag_a, o.cfg.flag_b);
+        self.settings.cloud_detail = o.cfg.detail;
     }
 
     fn options_event(&mut self, e: options::Event) {
@@ -454,6 +558,31 @@ impl Game {
     }
 
     fn draw(&mut self, buf: &mut [u32], w: usize, h: usize) {
+        self.draw_screen(buf, w, h);
+        if self.intro.is_none() && self.boot.is_none() {
+            let armed = self.play.as_ref().and_then(|p| p.dev_spawn);
+            let in_mission = self.in_mission();
+            if let (Some((kind, _)), Some(p), true) = (armed, self.play.as_ref(), in_mission) {
+                // the cell under the pointer shows where the unit will land
+                let (mx, my) = p.to_map(self.cursor.0, self.cursor.1);
+                let (sx, sy) = p.view.to_screen((mx.div_euclid(32) * 32) as f32, (my.div_euclid(32) * 32) as f32);
+                let z = p.view.zoom;
+                let r = ui::Rect { x: sx, y: sy, w: (32.0 * z) as i32, h: (32.0 * z) as i32 };
+                let blocked = p.world.is_blocked(mx.div_euclid(32), my.div_euclid(32));
+                ui::fill(buf, w, h, r, if blocked { (255, 80, 60) } else { (60, 255, 120) }, 70);
+                let font = self.assets.font("small");
+                let hs = (h as f32 / 768.0).max(1.0);
+                ui::text(buf, w, h, &font, &devtools::kind_label(kind), r.x + r.w + 6, r.y, hs, (255, 255, 120), (0, 0, 0));
+            }
+            self.dev.draw(&mut self.assets, buf, w, h, armed.map(|a| a.0), in_mission);
+        }
+    }
+
+    fn draw_screen(&mut self, buf: &mut [u32], w: usize, h: usize) {
+        if let Some(b) = &self.boot {
+            b.draw(buf, w, h);
+            return;
+        }
         if let Some(i) = &self.intro {
             i.draw(buf, w, h);
             return;
@@ -476,6 +605,9 @@ impl Game {
         }
         if let Some(play) = self.play.as_mut() {
             play.draw(&mut self.assets, &self.settings, buf, w, h, self.scale);
+        }
+        if std::mem::take(&mut self.quick_save) {
+            self.do_quick_save(buf, w, h);
         }
         if let Some(m) = self.saveui.as_mut() {
             if m.needs_capture() {
@@ -505,6 +637,14 @@ impl Game {
     }
 
     fn update(&mut self, dt: f32, w: usize, h: usize) {
+        if let Some(b) = self.boot.as_mut() {
+            if b.update(dt as f64) {
+                self.end_boot();
+            } else {
+                self.boot_music();
+            }
+            return;
+        }
         if let Some(i) = self.intro.as_mut() {
             i.update(dt as f64);
             if i.finished() {
@@ -533,7 +673,10 @@ impl Game {
         }
         if self.screen.is_none() {
             if let Some(p) = self.play.as_mut() {
-                p.update(dt, &self.settings, w, h);
+                p.world.cheats = self.dev.cheats();
+                let settings = menu::Settings { ticks_per_second: (self.settings.ticks_per_second as f32 * self.game_speed).round() as u32 * self.dev.speed, ..self.settings.clone() };
+                p.update(dt, &settings, w, h);
+                self.carry_counter = p.world.carry_counter;
                 // HUD sounds raised while updating: icon hover (50), info box open / close (51 / 52)
                 p.ui_sounds.extend(p.infobox.sounds.drain(..));
                 let hud_sounds: Vec<u8> = std::mem::take(&mut p.ui_sounds);
@@ -544,9 +687,9 @@ impl Game {
                 let (zoom, vx, vy) = (p.view.zoom, p.view.x, p.view.y);
                 // the exe pans by position and fades with the distance from the screen centre (`sfx::pan` / `sfx::volume`)
                 let (cx, cy) = (vx + w as f32 / zoom / 2.0, vy + h as f32 / zoom / 2.0);
-                let heard: Vec<(u8, bool, i32, i32)> = p.world.sounds.drain(..).map(|(id, x, y, j)| (id, j, (x as f32 - cx) as i32, (y as f32 - cy) as i32)).collect();
-                for (id, jitter, dx, dy) in heard {
-                    self.sfx.play_at(&self.assets.game, id, if jitter { sfx::jitter() } else { 1.0 }, dx, dy);
+                let heard: Vec<(u8, bool, i32, i32, i32)> = p.world.sounds.drain(..).map(|(id, x, y, j)| (id, j, (x as f32 - cx) as i32, (y as f32 - cy) as i32, (x as f32 - vx) as i32 - 320)).collect();
+                for (id, jitter, dx, dy, pan_dx) in heard {
+                    self.sfx.play_at(&self.assets.game, id, if jitter { sfx::jitter() } else { 1.0 }, dx, dy, pan_dx);
                 }
                 // the message events are spoken (`0x402ec0`), with the info-box / icon blips that go with some of them
                 let news: Vec<u8> = p.world.log[p.heard.min(p.world.log.len())..].iter().map(|m| m.1).collect();
@@ -619,6 +762,12 @@ impl Game {
     fn mouse_moved(&mut self, x: i32, y: i32, w: usize, h: usize) {
         let prev = self.cursor;
         self.cursor = (x, y);
+        if self.intro.is_none() {
+            let fonts = self.assets.font("small");
+            if self.dev.mouse_moved(&fonts, x, y, w, h) {
+                return;
+            }
+        }
         if let Some(l) = self.lands.as_mut() {
             l.mouse_moved(x, y, w, h);
             self.lands_sounds();
@@ -665,10 +814,33 @@ impl Game {
     }
 
     fn mouse_button(&mut self, button: MouseButton, down: bool, x: i32, y: i32, w: usize, h: usize) {
+        if self.intro.is_none() {
+            // the dev tools panel takes the clicks that land on it
+            let fonts = self.assets.font("small");
+            if button != MouseButton::Left {
+                if self.dev.covers(&fonts, x, y, w, h) {
+                    return;
+                }
+            } else if down {
+                if self.dev.press(&fonts, x, y, w, h) {
+                    return;
+                }
+            } else {
+                let (consumed, item) = self.dev.release(&fonts, x, y, w, h);
+                if let Some(i) = item {
+                    self.dev_event(i);
+                }
+                if consumed {
+                    return;
+                }
+            }
+        }
         if let Some(l) = self.lands.as_mut() {
             if down && button == MouseButton::Left {
                 let e = l.click(x, y, w, h);
-                self.progress = l.progress.clone();
+                if !self.dev.unlock_all {
+                    self.progress = l.progress.clone();
+                }
                 self.lands_sounds();
                 self.lands_event(e);
             }
@@ -702,6 +874,16 @@ impl Game {
             if down && (button == MouseButton::Left || !r.in_statistics()) {
                 let e = r.input(false, true);
                 self.results_event(e);
+            }
+            return;
+        }
+        if self.boot.is_some() {
+            if down && button == MouseButton::Left {
+                if self.boot.as_mut().is_some_and(|b| b.skip_now()) {
+                    self.end_boot();
+                } else {
+                    self.boot_music();
+                }
             }
             return;
         }
@@ -758,7 +940,36 @@ impl Game {
         }
     }
 
+    /// The digit a key stands for: the physical key's (top row or numpad, any layout; Czech needs shift for the logical digits),
+    /// else the character itself.
+    fn digit_of(&self, key: &Key) -> Option<u8> {
+        self.digit.or_else(|| match key {
+            Key::Character(c) if c.len() == 1 && c.as_bytes()[0].is_ascii_digit() => Some(c.as_bytes()[0] - b'0'),
+            _ => None,
+        })
+    }
+
     fn key(&mut self, key: &Key, down: bool, w: usize, h: usize) {
+        if down && self.intro.is_none() {
+            let typing = self.saveui.is_some() || self.net_menu.is_some();
+            match key {
+                Key::Named(NamedKey::F12) => {
+                    self.dev.toggle_visible();
+                    return;
+                }
+                Key::Character(c) if c.as_str() == "`" && !typing => {
+                    self.dev.toggle_visible();
+                    return;
+                }
+                Key::Named(NamedKey::Escape) if self.in_mission() && self.play.as_ref().is_some_and(|p| p.dev_spawn.is_some()) => {
+                    if let Some(p) = self.play.as_mut() {
+                        p.dev_spawn = None;
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
         if let Some(l) = self.lands.as_mut() {
             if down {
                 let e = if matches!(key, Key::Named(NamedKey::Escape)) { l.back() } else if l.playing_video() { l.back() } else { lands::Event::None };
@@ -832,8 +1043,8 @@ impl Game {
             return;
         }
         if self.screen.is_none() && self.play.as_ref().is_some_and(|p| p.paused) {
-            // the pause (`0x435330`) only waits for Space again (`[player+0x7d]`)
-            if down && matches!(key, Key::Named(NamedKey::Space)) {
+            // the pause (`0x435330`) only waits for the pause key again (`[player+0x7d]` = scan code 0x19 = P, docs/hotkeys.md)
+            if down && matches!(key, Key::Character(c) if c.eq_ignore_ascii_case("p")) {
                 if let Some(p) = self.play.as_mut() {
                     p.paused = false;
                 }
@@ -843,6 +1054,16 @@ impl Game {
         // developer shortcut: every mission, whether or not the campaign has opened it
         if down && matches!(self.screen, Some(Screen::Main)) && matches!(key, Key::Character(c) if c.eq_ignore_ascii_case("l")) {
             self.push(Screen::Levels);
+            return;
+        }
+        if self.boot.is_some() {
+            if down {
+                if self.boot.as_mut().is_some_and(|b| b.skip()) {
+                    self.end_boot();
+                } else {
+                    self.boot_music();
+                }
+            }
             return;
         }
         if self.intro.is_some() {
@@ -889,10 +1110,76 @@ impl Game {
                 None => {}
             },
             Key::Character(c) if c.eq_ignore_ascii_case("p") && matches!(self.screen, Some(Screen::Main | Screen::Pause)) => self.act(Action::Prototype),
-            Key::Named(NamedKey::Space) if self.screen.is_none() => {
+            // quick save / quick load: key flag `[player+0xa3]` = scan code 0x3f = F5, with a shift key (`[+0x8e]` / `[+0x9a]`) it loads
+            Key::Named(NamedKey::F5) if self.screen.is_none() && self.play.is_some() => {
+                if self.shift {
+                    self.quick_load();
+                } else {
+                    self.quick_save = true;
+                }
+            }
+            // F2 (`0x415c05`, key flag `[player+0xa0]`): in a numbered mission without remote players it plays sound 0x32 and leaves for the
+            // campaign map (state 0x1a = `0x433d90`, "after a mission") with the mission number as the result code `[0x5baa90]`
+            Key::Named(NamedKey::F2) if self.screen.is_none() && self.play.as_ref().map_or(false, |p| p.world.mission_no.map_or(false, |n| n != 0)) => {
+                self.play_sfx(0x32);
+                self.play = None;
+                self.open_lands(false);
+            }
+            // P pauses (`0x415d05`: `[player+0x7d]`, scan code 0x19; docs/hotkeys.md)
+            Key::Character(c) if self.screen.is_none() && c.eq_ignore_ascii_case("p") => {
                 if let Some(p) = self.play.as_mut() {
                     p.paused ^= true;
                 }
+            }
+            // Space and numpad 0 (`0x416177`): the view goes to the position of the last message event
+            Key::Named(NamedKey::Space) if self.screen.is_none() => {
+                if let Some(p) = self.play.as_mut() {
+                    p.look_at_event();
+                }
+            }
+            Key::Character(_) | Key::Dead(_) | Key::Unidentified(_) if self.screen.is_none() && self.numpad && self.digit_of(key) == Some(0) => {
+                if let Some(p) = self.play.as_mut() {
+                    p.look_at_event();
+                }
+            }
+            Key::Named(NamedKey::Tab) if self.screen.is_none() => {
+                if let Some(p) = self.play.as_mut() {
+                    p.select_next_unit();
+                }
+            }
+            Key::Named(NamedKey::Backspace) if self.screen.is_none() => {
+                if let Some(p) = self.play.as_mut() {
+                    p.look_at_hq();
+                }
+            }
+            Key::Named(NamedKey::Enter) if self.screen.is_none() && self.numpad => {
+                if let Some(p) = self.play.as_mut() {
+                    p.centre_on_selection();
+                }
+            }
+            Key::Character(c) if self.screen.is_none() && (c.eq_ignore_ascii_case("h") || (self.numpad && c.as_str() == "+")) => {
+                if let Some(p) = self.play.as_mut() {
+                    p.select_next_advancer();
+                }
+            }
+            Key::Character(c) if self.screen.is_none() && self.numpad && matches!(c.as_str(), "*" | "/" | "-") => {
+                if let Some(p) = self.play.as_mut() {
+                    p.select_visible(match c.as_str() { "/" => Some(true), "-" => Some(false), _ => None });
+                }
+            }
+            // numpad 1-9: camera bookmarks (shift sets); the top-row 1-5 stay the turret keys
+            Key::Character(_) | Key::Dead(_) | Key::Unidentified(_) if self.screen.is_none() && self.numpad && matches!(self.digit_of(key), Some(1..=9)) => {
+                let (shift, n) = (self.shift, self.digit_of(key).unwrap_or(1) as usize - 1);
+                if let Some(p) = self.play.as_mut() {
+                    p.bookmark(n, shift);
+                }
+            }
+            // F3 / F4 (`0x415c49` / `0x415cb1`): game speed -/+ 0.5 between 0.5 and 3.0, not in a network game
+            Key::Named(NamedKey::F3) if self.screen.is_none() && self.play.is_some() => {
+                self.game_speed = (self.game_speed - 0.5).max(0.5);
+            }
+            Key::Named(NamedKey::F4) if self.screen.is_none() && self.play.is_some() => {
+                self.game_speed = (self.game_speed + 0.5).min(3.0);
             }
             Key::Character(c) if self.screen.is_none() && c.eq_ignore_ascii_case("q") => {
                 if let Some(p) = self.play.as_mut() {
@@ -904,10 +1191,10 @@ impl Game {
                     }
                 }
             }
-            Key::Character(c) if self.screen.is_none() && matches!(c.as_str(), "1" | "2" | "3" | "4" | "5") => {
+            Key::Character(_) | Key::Dead(_) | Key::Unidentified(_) if self.screen.is_none() && !self.numpad && matches!(self.digit_of(key), Some(1..=5)) => {
+                let tier = self.digit_of(key).unwrap_or(1) as u32;
                 if let Some(p) = self.play.as_mut() {
-                    let tier: u32 = c.parse().unwrap_or(1);
-                    p.placing = (p.world.turret_flags[0][tier as usize - 1] && p.world.credits[0] >= 200 * tier as i32).then_some(tier);
+                    p.turret_key(tier);
                 }
             }
             Key::Character(c) if self.screen.is_none() && matches!(c.to_ascii_lowercase().as_str(), "b" | "m" | "c" | "y" | "f") => {
@@ -920,7 +1207,9 @@ impl Game {
                         "y" => F::Tripler,
                         _ => F::Fighter,
                     };
-                    p.strike = Some(f);
+                    if p.world.strike_lock == 0 {
+                        p.strike = Some(f);
+                    }
                 }
             }
             Key::Character(c) if self.screen.is_none() && c.eq_ignore_ascii_case("t") => {
@@ -947,9 +1236,64 @@ struct App {
     window: Option<Arc<Window>>,
     surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
     last: Instant,
+    /// The mission pointer as the system's cursor (moved by the compositor at the mouse's rate, not once per frame): the
+    /// pictures made so far and the one that is set.
+    cursors: std::collections::HashMap<(usize, u32), CustomCursor>,
+    cursor_key: Option<(usize, u32)>,
+    /// `OPENSOW_PERF=1`: per second frames and the milliseconds spent in update / cursor / draw / present.
+    perf: Option<Perf>,
+}
+
+#[derive(Default)]
+struct Perf {
+    since: Option<Instant>,
+    frames: u32,
+    ms: [f64; 4],
 }
 
 impl App {
+    /// In a mission the pointer is a custom system cursor made from `cursor.ps6` (the same frame and hotspot the software
+    /// pointer uses); elsewhere, or when the system refuses the image, the normal arrow (menus) / the frame's own drawing.
+    fn update_cursor(&mut self, el: &ActiveEventLoop, h: usize) {
+        let Some(win) = self.window.clone() else { return };
+        // `OPENSOW_SOFT_POINTER=1` keeps the old pointer drawn into the frame
+        let want = self.game.custom_pointer() && std::env::var_os("OPENSOW_SOFT_POINTER").is_none();
+        if let Some(p) = self.game.play.as_mut() {
+            p.system_pointer = false;
+        }
+        if !want {
+            if self.cursor_key.take().is_some() {
+                win.set_cursor(Cursor::default());
+            }
+            // the software pointer (menus: none) is drawn into the frame, so the system's one is hidden behind it
+            win.set_cursor_visible(!self.game.custom_pointer());
+            return;
+        }
+        let ui = (h as f32 / 768.0).max(1.0);
+        // macOS sizes a custom cursor in points, the other systems in pixels
+        let ui_img = if cfg!(target_os = "macos") { ui / self.game.scale.max(1.0) } else { ui };
+        let Some(play) = self.game.play.as_ref() else { return };
+        let Some((key, hot, w, h2, rgba)) = play.pointer_cursor(&mut self.game.assets, ui_img) else {
+            win.set_cursor_visible(false);
+            return;
+        };
+        if self.cursor_key != Some(key) {
+            if !self.cursors.contains_key(&key) {
+                if let Ok(src) = CustomCursor::from_rgba(rgba, w as u16, h2 as u16, hot.0 as u16, hot.1 as u16) {
+                    self.cursors.insert(key, el.create_custom_cursor(src));
+                }
+            }
+            if let Some(c) = self.cursors.get(&key) {
+                win.set_cursor(Cursor::Custom(c.clone()));
+                self.cursor_key = Some(key);
+            }
+        }
+        win.set_cursor_visible(self.cursor_key.is_some());
+        if let Some(p) = self.game.play.as_mut() {
+            p.system_pointer = self.cursor_key.is_some();
+        }
+    }
+
     fn size(&self) -> (usize, usize) {
         self.window.as_ref().map_or((1280, 800), |w| (w.inner_size().width.max(1) as usize, w.inner_size().height.max(1) as usize))
     }
@@ -987,17 +1331,34 @@ impl ApplicationHandler for App {
                 let now = Instant::now();
                 let dt = now.duration_since(self.last).as_secs_f32().min(0.1);
                 self.last = now;
+                let t0 = Instant::now();
                 self.game.update(dt, w, h);
+                let t1 = Instant::now();
+                self.update_cursor(el, h);
+                let t2 = Instant::now();
                 let Some(surface) = self.surface.as_mut() else { return };
                 if surface.resize(NonZeroU32::new(w as u32).unwrap(), NonZeroU32::new(h as u32).unwrap()).is_err() {
                     return;
                 }
-                if let Some(win) = &self.window {
-                    win.set_cursor_visible(!self.game.custom_pointer());
-                }
+                let (mut t3, mut t4) = (t2, t2);
                 if let Ok(mut buf) = surface.buffer_mut() {
                     self.game.draw(&mut buf, w, h);
+                    t3 = Instant::now();
                     let _ = buf.present();
+                    t4 = Instant::now();
+                }
+                if let Some(p) = self.perf.as_mut() {
+                    let ms = |a: Instant, b: Instant| b.duration_since(a).as_secs_f64() * 1000.0;
+                    for (k, v) in [ms(t0, t1), ms(t1, t2), ms(t2, t3), ms(t3, t4)].into_iter().enumerate() {
+                        p.ms[k] += v;
+                    }
+                    p.frames += 1;
+                    let since = *p.since.get_or_insert(now);
+                    if now.duration_since(since).as_secs_f64() >= 1.0 {
+                        let f = p.frames.max(1) as f64;
+                        eprintln!("PERF {w}x{h}: {} fps; per frame update {:.1} ms, cursor {:.1} ms, draw {:.1} ms, present {:.1} ms", p.frames, p.ms[0] / f, p.ms[1] / f, p.ms[2] / f, p.ms[3] / f);
+                        *p = Perf { since: Some(now), ..Perf::default() };
+                    }
                 }
             }
             WindowEvent::CursorMoved { position, .. } => self.game.mouse_moved(position.x as i32, position.y as i32, w, h),
@@ -1016,7 +1377,21 @@ impl ApplicationHandler for App {
                     }
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } => self.game.key(&event.logical_key, event.state == ElementState::Pressed, w, h),
+            WindowEvent::KeyboardInput { event, .. } => {
+                self.game.numpad = event.location == winit::keyboard::KeyLocation::Numpad;
+                use winit::keyboard::{KeyCode as K, PhysicalKey};
+                self.game.digit = match event.physical_key {
+                    PhysicalKey::Code(c) => [K::Digit0, K::Digit1, K::Digit2, K::Digit3, K::Digit4, K::Digit5, K::Digit6, K::Digit7, K::Digit8, K::Digit9]
+                        .iter()
+                        .position(|&d| d == c)
+                        .or_else(|| [K::Numpad0, K::Numpad1, K::Numpad2, K::Numpad3, K::Numpad4, K::Numpad5, K::Numpad6, K::Numpad7, K::Numpad8, K::Numpad9].iter().position(|&d| d == c))
+                        .map(|d| d as u8),
+                    _ => None,
+                };
+                self.game.key(&event.logical_key, event.state == ElementState::Pressed, w, h);
+                self.game.numpad = false;
+                self.game.digit = None;
+            }
             _ => {}
         }
     }
@@ -1046,6 +1421,12 @@ fn main() {
     game.language = get("--lang").and_then(|l| intro::LANGUAGES.iter().position(|n| n.eq_ignore_ascii_case(&l))).unwrap_or(0);
 
     if let Some(path) = get("--screenshot") {
+        if let Some(n) = get("--boot-page").and_then(|n| n.parse().ok()) {
+            game.boot = boot::Boot::open(&game.assets.game);
+            if let Some(b) = game.boot.as_mut() {
+                b.jump(n);
+            }
+        }
         if let Some(n) = get("--intro-frame").and_then(|n| n.parse().ok()) {
             match intro::Intro::open(&game.assets.game, &get("--movie").unwrap_or_else(|| "mI".into()), game.language) {
                 Ok(mut i) => {
@@ -1074,11 +1455,38 @@ fn main() {
                         u.selected = true;
                     }
                 }
+                if let Some((px, py)) = get("--mouse-px").and_then(pair) {
+                    // headless: the pointer sits on this screen pixel (HUD hover)
+                    p.cursor = (px as i32, py as i32);
+                    p.edge_scroll = true;
+                }
                 if let Some((cx, cy)) = get("--mouse-cell").and_then(pair) {
                     // headless: the pointer sprite hovers this cell (its type follows the selection and the object there)
                     let (sx, sy) = p.view.to_screen(cx * 32.0 + 16.0, cy * 32.0 + 16.0);
                     p.cursor = (sx, sy);
                     p.edge_scroll = true;
+                }
+                if let Some(c) = get("--arm-strike").and_then(|c| c.parse::<i32>().ok()) {
+                    // headless: the air-strike mode is armed for this force (the pointer and the stock pill show it)
+                    p.strike = opensow_formats::air::AirForce::from_code(c);
+                }
+                if let Some(spec) = get("--strike") {
+                    // headless: --strike CODE,CX,CY (30 bomber .. 34 asteroid) launches that air force for the player at the cell centre
+                    let f: Vec<i32> = spec.split(',').filter_map(|v| v.parse().ok()).collect();
+                    if let (Some(&c), Some(&cx), Some(&cy)) = (f.first(), f.get(1), f.get(2)) {
+                        if let Some(force) = opensow_formats::air::AirForce::from_code(c) {
+                            if let Some(g) = opensow_formats::air::HEADER_ORDER.iter().position(|&x| x == force) {
+                                p.world.air_stock[0][g] += 1;
+                            }
+                            p.world.launch_strike(0, force, cx * 32 + 16, cy * 32 + 16);
+                            if has("--strike-god") {
+                                // headless: the aircraft cannot be shot down on its way
+                                if let Some(a) = p.world.aircraft.last_mut() {
+                                    a.hp = 1_000_000;
+                                }
+                            }
+                        }
+                    }
                 }
                 if has("--select-all") {
                     p.world.select_all();
@@ -1099,6 +1507,36 @@ fn main() {
                         p.world.set_rally(b, 0, cx as i32 * 32 + 16, cy as i32 * 32 + 16);
                     }
                 }
+                if let Some(t) = get("--turret").and_then(|t| t.parse::<u32>().ok()) {
+                    // headless: builds a turret of this tier on the first good cell near the player's first building and looks at it
+                    p.world.credits[0] += 1000 * t as i32;
+                    let own = p.world.structures.iter().find(|s| s.owner == opensow_formats::level::Owner::Player).map(|s| s.cell);
+                    if let Some((ox, oy)) = own {
+                        'find: for r in 1..12 {
+                            for dy in -r..=r {
+                                for dx in -r..=r {
+                                    let c = (ox + dx, oy + dy);
+                                    if p.world.turret_cells(0, t, c).iter().all(|&ok| ok) && p.world.place_turret(0, t, c) {
+                                        eprintln!("turret placed at {c:?}");
+                                        p.look_at(c.0 as f32 * 32.0 + 16.0, c.1 as f32 * 32.0 + 16.0);
+                                        break 'find;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(c) = get("--credits").and_then(|c| c.parse::<i32>().ok()) {
+                    // headless: the player's purse (turret tabs dim below 200 * tier)
+                    p.world.turret_flags[0] = [true; 5];
+                    p.world.credits[0] = c;
+                }
+                if let Some(t) = get("--arm-turret").and_then(|t| t.parse::<u32>().ok()) {
+                    // headless: the turret of this tier is armed (the placement tiles follow the pointer cell)
+                    p.world.turret_flags[0] = [true; 5];
+                    p.world.credits[0] = 5000;
+                    p.turret_key(t);
+                }
                 if has("--arm-rally") {
                     p.arm_rally();
                 }
@@ -1111,11 +1549,23 @@ fn main() {
                         }
                     }
                 }
+                if let Some((cx, cy)) = get("--destroy").and_then(pair) {
+                    // headless: the building covering this cell runs out of hit points (shows the destruction burst)
+                    p.world.debug_destroy_at(cx as i32, cy as i32);
+                }
                 for spec in args.iter().enumerate().filter(|(_, a)| *a == "--unit").filter_map(|(i, _)| args.get(i + 1)) {
-                    // headless: --unit KIND,PLAYER,PX,PY puts a unit on a map pixel (repeatable)
+                    // headless: --unit KIND,PLAYER,PX,PY[,SELECTED[,HP]] puts a unit on a map pixel (repeatable)
                     let f: Vec<i32> = spec.split(',').filter_map(|v| v.parse().ok()).collect();
-                    if let [kind, player, x, y] = f[..] {
-                        p.world.add_unit(kind, player, x, y);
+                    // a fifth number selects the new unit; with damage: a sixth sets its hit points
+                    if let [kind, player, x, y, rest @ ..] = &f[..] {
+                        let (kind, player, x, y) = (*kind, *player, *x, *y);
+                        let id = p.world.add_unit(kind, player, x, y);
+                        if let Some(u) = p.world.units.iter_mut().find(|u| u.id == id) {
+                            u.selected = rest.first().is_some_and(|&v| v != 0);
+                            if let Some(&hp) = rest.get(1) {
+                                u.hp = hp;
+                            }
+                        }
                     }
                 }
                 for spec in args.iter().enumerate().filter(|(_, a)| *a == "--fx").filter_map(|(i, _)| args.get(i + 1)) {
@@ -1172,8 +1622,13 @@ fn main() {
                         p.world.order_attack_selected(t);
                     }
                 }
+                // --clouds D: the options' CLOUDS detail 0..=4 (the first-run default is 0 = none)
+                if let Some(d) = get("--clouds").and_then(|d| d.parse().ok()) {
+                    game.settings.cloud_detail = d;
+                }
                 for _ in 0..get("--ticks").and_then(|t| t.parse().ok()).unwrap_or(0) {
                     p.world.step();
+                    p.world.sky_step(game.settings.cloud_detail);
                     p.take_tutorial_events();
                 }
                 game.settings.show_range = has("--range");
@@ -1187,6 +1642,13 @@ fn main() {
                     if let Some(t) = &p.world.tutorial {
                         println!("tutorial step {} arrow {} entered {}", t.step, t.arrow, t.entered);
                     }
+                    for b in &p.world.bullets {
+                        println!("bullet type {} strength {} owner {} index {}/{} from {:?} to {:?}", b.bullet_type, b.strength, b.owner, b.index, b.path.points.len(), b.path.points.first(), b.path.points.last());
+                    }
+                    for a in &p.world.aircraft {
+                        println!("aircraft {:?} at ({}, {}) alt {} hp {} frame {}", a.force, a.x, a.y, a.altitude, a.hp, a.frame);
+                    }
+                    println!("turret tiers player {:?} enemy {:?}", p.world.turret_flags[0], p.world.turret_flags[1]);
                     println!("bullets {} tick {} outcome {:?}", p.world.bullets.len(), p.world.tick, p.world.outcome);
                 }
             }
@@ -1269,6 +1731,10 @@ fn main() {
                         if let Some(t) = get("--type") {
                             m.type_text(&t);
                         }
+                        // --age N: N ticks of the page's update first (the sparks run along the table lines)
+                        for _ in 0..get("--age").and_then(|a| a.parse::<u32>().ok()).unwrap_or(0) {
+                            m.update(1);
+                        }
                         if has("--confirm") {
                             println!("{:?}", m.confirm());
                         }
@@ -1313,6 +1779,52 @@ fn main() {
             game.hover = get("--hover").and_then(|h| h.parse().ok());
         }
         let mut buf = vec![0u32; w * h];
+        if let Some(spec) = get("--dev") {
+            // headless dev tools: --dev show,unlock,god,rich,freeze,x2|x5|x10,enemy,arm=KIND (a hidden panel only shows its badge)
+            for t in spec.split(',') {
+                match t {
+                    "show" => game.dev.visible = true,
+                    "unlock" => game.dev.unlock_all = true,
+                    "god" => game.dev.invulnerable = true,
+                    "rich" => game.dev.rich = true,
+                    "freeze" => game.dev.freeze_enemy = true,
+                    "enemy" => game.dev.side = 1,
+                    "air" => {
+                        let side = game.dev.side;
+                        if let Some(p) = game.play.as_mut() {
+                            p.world.air_stock[side] = [5; 5];
+                        }
+                    }
+                    t if t.starts_with('x') => game.dev.speed = t[1..].parse().unwrap_or(1),
+                    t if t.starts_with("place=") => {
+                        // place=KIND:CX:CY puts a turret / building / unit of the chosen side on a cell (like a click with the tool armed)
+                        let side = game.dev.side;
+                        let v: Vec<i32> = t[6..].split(':').filter_map(|n| n.parse().ok()).collect();
+                        if let (Some(p), [kind, cx, cy]) = (game.play.as_mut(), v.as_slice()) {
+                            if devtools::is_structure(*kind) {
+                                p.world.dev_place_structure(*kind, side, (*cx, *cy));
+                            } else {
+                                p.world.add_unit_near(*kind, side as i32, cx * 32 + 16, cy * 32 + 16);
+                            }
+                        }
+                    }
+                    t if t.starts_with("arm=") => {
+                        let side = game.dev.side;
+                        if let Some(p) = game.play.as_mut() {
+                            p.dev_spawn = t[4..].parse().ok().map(|k| (k, side));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if has("--mouse-px") {
+            // the HUD layout exists only after a draw: draw once, let the pointer hover, draw again
+            game.draw(&mut buf, w, h);
+            if let Some(p) = game.play.as_mut() {
+                p.update(0.0, &game.settings, w, h);
+            }
+        }
         game.draw(&mut buf, w, h);
         write_png(&path, &buf, w, h);
         println!("-> {path} ({w}x{h})");
@@ -1323,10 +1835,19 @@ fn main() {
     game.sfx.enabled = !game.mute;
     if !has("--no-intro") {
         game.movies = true;
-        game.play_movie("mI", Then::Menu);
+        match boot::Boot::open(&game.assets.game) {
+            Some(b) => {
+                game.boot = Some(b);
+                game.boot_music();
+            }
+            None => game.play_movie("mI", Then::Menu),
+        }
+    }
+    if let Ok(m) = std::env::var("OPENSOW_START") {
+        game.start(&m);
     }
     let event_loop = EventLoop::new().expect("event loop");
-    let mut app = App { game, window: None, surface: None, last: Instant::now() };
+    let mut app = App { game, window: None, surface: None, last: Instant::now(), cursors: std::collections::HashMap::new(), cursor_key: None, perf: std::env::var_os("OPENSOW_PERF").map(|_| Perf::default()) };
     event_loop.run_app(&mut app).expect("run");
 }
 
@@ -1366,6 +1887,95 @@ mod tests {
         let mut buf = vec![0u32; w * h];
         g.draw(&mut buf, w, h);
         assert!(buf.iter().any(|&p| p != 0));
+    }
+
+    /// The bridge to the original's state stream (docs/savegame.md "The sim bridge"): a running mission is written as the exe's
+    /// stream, read back, applied to a fresh world of the level and written again; the two streams are identical, so everything
+    /// the bridge carries survives, and the restored world still runs.
+    #[test]
+    fn a_mission_round_trips_through_the_original_state_stream() {
+        use opensow_formats::{config::PassedLevels, save::State};
+        let Some(mut g) = game() else { return };
+        for mission in ["M01", "M05", "M10", "M16", "M22"] {
+            mission_trip(&mut g, mission);
+        }
+    }
+
+    fn mission_trip(g: &mut Game, mission: &str) {
+        use opensow_formats::{config::PassedLevels, save::State};
+        g.start(mission);
+        let (mut airborne, mut shots) = (0, 0);
+        let (bytes, units, structures, credits) = {
+            let p = g.play.as_mut().unwrap();
+            let adv = p.world.player_units().find(|u| u.kind == 40).map(|u| u.id);
+            if let Some(id) = adv {
+                p.world.order_move(id, (20, 20), None);
+            }
+            // a bomber and a tripler in flight, and let the armies shoot
+            p.world.air_stock[0][0] = 1;
+            p.world.air_stock[0][3] = 1;
+            let (cx, cy) = (p.world.cells.0 * 16, p.world.cells.1 * 16);
+            p.world.launch_strike(0, opensow_formats::air::AirForce::Bomber, cx, cy);
+            p.world.launch_strike(0, opensow_formats::air::AirForce::Tripler, cx / 2, cy / 2);
+            for _ in 0..900 {
+                p.world.step();
+            }
+            airborne += p.world.aircraft.len();
+            shots += p.world.bullets.len() + p.world.beams.len();
+            let number: u32 = mission[1..].parse().unwrap();
+            let st = p.world.to_state(number, &PassedLevels::initial(), (64, 96));
+            let bytes = st.to_bytes().expect("the state can be written");
+            let key = |w: &sim::World| {
+                let mut v: Vec<_> = w.units.iter().map(|u| (u.kind, u.player, u.x as i32, u.y as i32, u.hp)).collect();
+                v.sort();
+                v
+            };
+            let s: Vec<_> = p.world.structures.iter().map(|s| (s.cell, s.kind_id, s.hp.max(0), s.active)).collect();
+            (bytes, key(&p.world), s, p.world.credits)
+        };
+        // the stream is valid and re-writes itself
+        if let Some(dir) = std::env::var_os("OPENSOW_DUMP_STATES") {
+            // scripts/verify_save_load.py runs the exe's load branch on these
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(std::path::Path::new(&dir).join(format!("{mission}.state")), &bytes);
+        }
+        let parsed = State::parse(&bytes, 1).expect("the written stream parses");
+        assert_eq!(parsed.to_bytes().unwrap(), bytes);
+        assert_eq!(parsed.squads.iter().map(|g| g.1.len()).sum::<usize>(), airborne, "{mission}: squads");
+        assert_eq!(parsed.bullets.iter().map(|g| g.1.len()).sum::<usize>(), shots, "{mission}: bullets");
+        assert!(!units.is_empty() && !structures.is_empty(), "{mission}: nothing to save");
+        assert!(parsed.buildings.iter().map(|b| b.1.len()).sum::<usize>() > 0, "{mission}: no building in the stream");
+        assert_eq!((parsed.map.scroll_x, parsed.map.scroll_y, parsed.head.level), (64, 96, mission[1..].parse().unwrap()));
+        // a fresh world of the level takes it
+        g.start(mission);
+        let p = g.play.as_mut().unwrap();
+        p.world.apply_state(&parsed).expect("the state applies");
+        let mut got: Vec<_> = p.world.units.iter().map(|u| (u.kind, u.player, u.x as i32, u.y as i32, u.hp)).collect();
+        got.sort();
+        assert_eq!(got, units, "{mission}: units differ after the trip");
+        let s: Vec<_> = p.world.structures.iter().map(|s| (s.cell, s.kind_id, s.hp.max(0), s.active)).collect();
+        assert_eq!(s, structures, "{mission}");
+        assert_eq!((p.world.aircraft.len(), p.world.bullets.len() + p.world.beams.len()), (airborne, shots), "{mission}: shots in flight");
+        assert_eq!(p.world.credits, credits);
+        let again = p.world.to_state(mission[1..].parse().unwrap(), &PassedLevels::initial(), (64, 96)).to_bytes().unwrap();
+        assert_eq!(again.len(), bytes.len());
+        assert!(again == bytes, "{mission}: the second stream differs from the first");
+        for _ in 0..300 {
+            p.world.step();
+        }
+        // through the save container as a file of the original (no OpenSOW extension): the level comes from the head, the stream applies
+        let dir = std::env::temp_dir().join(format!("opensow-bridge-{}-{}", mission, std::process::id()));
+        let store = saveui::Store { write: dir.clone(), also: None };
+        store.write(2, "t", mission, &saveui::pack_payload(&bytes, &[]), &vec![0u16; 160 * 120]).unwrap();
+        let (level, payload) = store.level_of(2).unwrap();
+        assert_eq!(level, mission);
+        g.start(mission);
+        let p = g.play.as_mut().unwrap();
+        p.restore(&payload).unwrap();
+        let mut got: Vec<_> = p.world.units.iter().map(|u| (u.kind, u.player, u.x as i32, u.y as i32, u.hp)).collect();
+        got.sort();
+        assert_eq!(got, units, "{mission}: units differ after loading the file");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1421,6 +2031,33 @@ mod tests {
     }
 
     #[test]
+    fn f5_quick_saves_to_slot_zero_and_shift_f5_loads_it() {
+        let Some(mut g) = game() else { return };
+        let dir = std::env::temp_dir().join(format!("opensow-quick-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("OPENSOW_SAVE_DIR", &dir);
+        let (w, h) = (1024, 768);
+        g.start("M05");
+        g.update(0.0, w, h);
+        for _ in 0..50 {
+            g.play.as_mut().unwrap().world.step();
+        }
+        g.key(&Key::Named(NamedKey::F5), true, w, h);
+        let mut buf = vec![0u32; w * h];
+        g.draw(&mut buf, w, h); // the grab happens on the next drawn frame
+        assert!(dir.join("savegame_048.info").exists() || std::fs::read_dir(&dir).map_or(false, |d| d.count() >= 2), "slot 0 written");
+        for _ in 0..70 {
+            g.play.as_mut().unwrap().world.step();
+        }
+        assert_eq!(g.play.as_ref().unwrap().world.tick, 120);
+        g.key(&Key::Named(NamedKey::Shift), true, w, h);
+        g.key(&Key::Named(NamedKey::F5), true, w, h);
+        assert_eq!(g.play.as_ref().unwrap().world.tick, 50, "back at the quick save");
+        std::env::remove_var("OPENSOW_SAVE_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_advancers_beam_sparks_are_drawn_under_its_body() {
         // exe order (0x420xxx): ground units, then bullets and effects, then the hovering Advancer's body (0x46a310) last
         let Some(mut g) = game() else { return };
@@ -1469,12 +2106,171 @@ mod tests {
         }
     }
 
+    /// The scripted events of the real missions (docs/ai.md "Win, lose and mission scripts", docs/air.md "Mission-script launches"):
+    /// start carryalls and their squads, the countdown messages and rewards of the survival missions, the timer defeats.
+    #[test]
+    fn mission_scripts_on_the_real_levels() {
+        let Some(mut g) = game() else { return };
+        // a started mission with the computer switched off (only the scripts are under test) and, when `clock` is given, a
+        // shortened countdown of that many seconds (the real ones are 20..50 minutes of ticks)
+        let mut start = |m: &str, clock: Option<i32>| {
+            g.start(m);
+            let mut w = std::mem::take(&mut g.play).unwrap().world;
+            w.ai = false;
+            if let (Some(sec), Some((_, _, mode))) = (clock, w.timer) {
+                w.timer = Some((sec / 60, sec % 60, mode));
+            }
+            w
+        };
+        let steps = |w: &mut sim::World, n: u64| (0..n).for_each(|_| w.step());
+        let player = |w: &sim::World, kind: i32| w.units.iter().filter(|u| u.player == 0 && u.hp > 0 && u.kind == kind).count();
+        let ids = |w: &sim::World, of: &[u8]| w.log.iter().map(|&(_, id)| id).filter(|id| of.contains(id)).collect::<Vec<_>>();
+
+        // the clocks the levels start with (header words 65/66/67: enabled, minutes, end mode)
+        for (m, want) in [("M07", (20, 0, 2)), ("M12", (20, 0, 2)), ("M17", (30, 0, 2)), ("M15", (30, 0, 1)), ("M16", (40, 0, 1)), ("M21", (50, 0, 1)), ("M22", (50, 0, 1)), ("M01", (0, 0, 9))] {
+            let w = start(m, None);
+            assert_eq!(w.timer.unwrap_or((0, 0, 9)), want, "{m} clock");
+        }
+
+        // mission 1: two carryalls land six units each (4 x cannon 7 + 2 x flamer 10), mission 4 one carryall with two walkers
+        let mut w = start("M01", None);
+        steps(&mut w, 1500);
+        assert_eq!((player(&w, 7), player(&w, 10)), (8, 4), "mission 1 airlift");
+        // each carryall plays `carryall-land` (62) when it arrives and again when it leaves (`0x467592`, flags `[+0x8c]`, `[+0x8d]`)
+        assert_eq!(w.sounds.iter().filter(|s| s.0 == 62).count(), 4, "carryall sounds");
+        // mission 1: both tech-levels of the medium factory at their limit pay 8 fighters and 3 carryalls once (`0x42e6f5`), message 13
+        let stock = w.air_stock[0];
+        assert!(ids(&w, &[13]).is_empty());
+        for s in w.structures.iter_mut().filter(|s| s.owner == opensow_formats::level::Owner::Player && s.kind_id == 102) {
+            s.slots.iter_mut().take(2).for_each(|sl| sl.level = sl.max_level);
+        }
+        steps(&mut w, 125);
+        assert_eq!((w.air_stock[0][4] - stock[4], w.air_stock[0][2] - stock[2]), (8, 3), "mission 1 reward");
+        assert_eq!(ids(&w, &[13]), vec![13]);
+        steps(&mut w, 300);
+        assert_eq!(w.air_stock[0][4] - stock[4], 8, "paid only once");
+        let mut w = start("M04", None);
+        steps(&mut w, 1500);
+        assert_eq!(player(&w, 41), 2, "mission 4 airlift");
+
+        // missions 7 and 17: 5000 credits (17: and 5000 research) and two carryalls with squads 11 / 10, one second after the
+        // clock shows 0:00 (`0x42ebd0` looks at the clock, then counts a second off); messages 13, 11 (and 12)
+        for (m, squad, research, announced) in [("M07", 11, 0, vec![13, 11]), ("M17", 10, 5000, vec![13, 11, 12])] {
+            let mut w = start(m, Some(150));
+            steps(&mut w, 150 * 60 - 1);
+            assert!(w.aircraft.is_empty() && ids(&w, &[13]).is_empty(), "{m} too early");
+            let (credits, rp) = (w.credits[0], w.research[0]);
+            steps(&mut w, 62);
+            assert_eq!(w.aircraft.iter().map(|a| a.squad).collect::<Vec<_>>(), vec![squad, squad], "{m} carryalls");
+            assert!(w.credits[0] - credits >= 5000, "{m} credits");
+            assert!(w.research[0] - rp >= research, "{m} research");
+            assert_eq!(ids(&w, &[11, 12, 13]), announced, "{m} messages");
+            // the 2-minutes message sits at the clock value 2:01
+            if let Some(&(t, _)) = w.log.iter().find(|&&(_, id)| id == 17) {
+                assert!((t as i64 - 29 * 60).abs() <= 61, "{m} 2 minutes message at tick {t}");
+            }
+            assert_eq!(w.outcome, None, "{m}: mode 2 ends nothing");
+        }
+        // mission 12: 10000 credits, 2500 research, 6 asteroids, 3 bombers, 3 carryalls (squad 16), message 13 only
+        let mut w = start("M12", Some(150));
+        steps(&mut w, 150 * 60 - 1);
+        let (credits, rp, stock) = (w.credits[0], w.research[0], w.air_stock[0]);
+        steps(&mut w, 62);
+        assert_eq!(w.aircraft.iter().map(|a| a.squad).collect::<Vec<_>>(), vec![16, 16, 16]);
+        assert!(w.credits[0] - credits >= 10_000 && w.research[0] - rp >= 2500);
+        assert_eq!((w.air_stock[0][0] - stock[0], w.air_stock[0][1] - stock[1]), (3, 6));
+        assert_eq!(ids(&w, &[11, 12, 13]), vec![13]);
+
+        // the timed defeats (mode 1): M15, M16, M21, M22 are lost when the clock has run out, and not before
+        for m in ["M15", "M16", "M21", "M22"] {
+            let mut w = start(m, Some(60));
+            steps(&mut w, 60 * 60 - 1);
+            assert_eq!(w.outcome, None, "{m} must still run");
+            steps(&mut w, 125);
+            assert_eq!(w.outcome, Some(sim::Outcome::Defeat), "{m} timer defeat");
+        }
+    }
+
+    /// The dev tools overlay: F12 shows it, its buttons set the cheats and the speed, a unit button plus a map click places a unit,
+    /// UNLOCK ALL opens every land of the campaign map without touching the real progress.
+    #[test]
+    fn dev_tools_panel_flow() {
+        use devtools::Item;
+        let Some(mut g) = game() else { return };
+        let (w, h) = (1024, 768);
+        g.start("M01");
+        g.update(0.0, w, h);
+        let mut buf = vec![0u32; w * h];
+        g.draw(&mut buf, w, h);
+        assert!(!g.dev.visible);
+        g.key(&Key::Named(NamedKey::F12), true, w, h);
+        assert!(g.dev.visible);
+        let fonts = g.assets.font("small");
+        let click = |g: &mut Game, item: Item| {
+            let r = g.dev.rect_of(&devtools::Fonts::clone(&fonts), item, w, h).expect("item");
+            let (x, y) = (r.x + r.w / 2, r.y + r.h / 2);
+            g.mouse_moved(x, y, w, h);
+            g.mouse_button(MouseButton::Left, true, x, y, w, h);
+            g.mouse_button(MouseButton::Left, false, x, y, w, h);
+        };
+        click(&mut g, Item::Rich);
+        click(&mut g, Item::Invulnerable);
+        click(&mut g, Item::Freeze);
+        click(&mut g, Item::Speed(10));
+        g.update(1.0 / 60.0, w, h);
+        let p = g.play.as_ref().unwrap();
+        assert_eq!(p.world.cheats, sim::Cheats { invulnerable: true, rich: true, freeze_enemy: true });
+        assert_eq!(p.world.credits[0], opensow_formats::production::CREDITS_CAP);
+        assert!(p.world.tick >= 8, "10x runs several ticks in one frame (ran {})", p.world.tick);
+        // an air force button adds one to the stock of the chosen side
+        let stock = g.play.as_ref().unwrap().world.air_stock;
+        click(&mut g, Item::Air(4));
+        assert_eq!(g.play.as_ref().unwrap().world.air_stock[0][4], stock[0][4] + 1);
+        // a unit button arms the placement, a click on open ground puts the unit there (and not on a panel click)
+        let before = g.play.as_ref().unwrap().world.units.len();
+        click(&mut g, Item::Side(1));
+        click(&mut g, Item::Kind(7));
+        assert_eq!(g.play.as_ref().unwrap().dev_spawn, Some((7, 1)));
+        assert_eq!(g.play.as_ref().unwrap().world.units.len(), before, "pressing the button places nothing");
+        let panel_right = g.dev.rect_of(&fonts, Item::Title, w, h).unwrap().x + 400;
+        let (x, y) = (panel_right, h as i32 / 2);
+        g.mouse_moved(x, y, w, h);
+        g.mouse_button(MouseButton::Left, true, x, y, w, h);
+        g.mouse_button(MouseButton::Left, false, x, y, w, h);
+        let p = g.play.as_ref().unwrap();
+        assert!(p.world.units.len() > before || p.world.is_blocked(p.to_map(x, y).0 / 32, p.to_map(x, y).1 / 32), "a unit was placed");
+        // Esc stops the placement before it opens the pause menu
+        g.key(&Key::Named(NamedKey::Escape), true, w, h);
+        assert_eq!(g.play.as_ref().unwrap().dev_spawn, None);
+        assert!(g.screen.is_none(), "Esc did not pause");
+        // the campaign map: locked lands open with the switch and close again without it
+        g.dev.visible = false;
+        g.play = None;
+        g.open_lands(false);
+        assert_eq!(g.lands.as_ref().unwrap().progress.states[3], 0);
+        g.dev.unlock_all = true;
+        g.dev_event(Item::UnlockAll);
+        assert_eq!(g.lands.as_ref().unwrap().progress.states[3], 2);
+        assert_eq!(g.progress.states[3], 0, "the saved progress is untouched");
+        g.dev.unlock_all = false;
+        g.dev_event(Item::UnlockAll);
+        assert_eq!(g.lands.as_ref().unwrap().progress.states[3], 0);
+    }
+
     #[test]
     fn playing_a_mission() {
         let Some(mut g) = game() else { return };
         let (w, h) = (1024, 768);
         g.start("M01");
         assert!(g.play.is_some() && g.screen.is_none());
+        // the mission starts with the Advancer only (the squad arrives by carryall): give the test four units beside it
+        {
+            let world = &mut g.play.as_mut().unwrap().world;
+            let (x, y) = world.player_units().find(|u| u.kind == 40).map(|u| u.px()).unwrap();
+            for _ in 0..4 {
+                world.add_unit_near(7, 0, x, y + 48);
+            }
+        }
         g.update(0.0, w, h);
         let mut buf = vec![0u32; w * h];
         g.draw(&mut buf, w, h);
@@ -1617,6 +2413,103 @@ mod tests {
     }
 
     #[test]
+    fn mission_hotkeys_follow_the_exes_key_handler() {
+        let Some(mut g) = game() else { return };
+        let (w, h) = (1024, 768);
+        g.start("M01");
+        g.update(0.0, w, h);
+        let chr = |c: &str| Key::Character(SmolStr::new(c));
+        // 1-5 (`0x415d7c`): drop the selection and arm the turret, only with the turret available and 200 * tier credits
+        {
+            let p = g.play.as_mut().unwrap();
+            p.world.turret_flags[0] = [true; 5];
+            p.world.credits[0] = 399;
+            p.world.select_all();
+        }
+        g.key(&chr("2"), true, w, h);
+        assert_eq!(g.play.as_ref().unwrap().placing, None, "tier 2 costs 400");
+        g.play.as_mut().unwrap().world.credits[0] = 400;
+        g.key(&chr("2"), true, w, h);
+        let p = g.play.as_ref().unwrap();
+        assert_eq!(p.placing, Some(2));
+        assert!(!p.world.units.iter().any(|u| u.selected), "the key deselects everything");
+        // the physical key counts, not the character: Czech layouts make the number row "+ ě š č ř" without shift
+        g.play.as_mut().unwrap().placing = None;
+        g.digit = Some(3);
+        g.key(&chr("š"), true, w, h);
+        g.digit = None;
+        assert_eq!(g.play.as_ref().unwrap().placing, None, "tier 3 costs 600");
+        g.play.as_mut().unwrap().world.credits[0] = 600;
+        g.digit = Some(3);
+        g.key(&chr("š"), true, w, h);
+        g.digit = None;
+        assert_eq!(g.play.as_ref().unwrap().placing, Some(3));
+        // building one plays sound 72 (turret-place) at the cell
+        {
+            let wd = &mut g.play.as_mut().unwrap().world;
+            let own = wd.structures.iter().find(|s| s.owner == opensow_formats::level::Owner::Player).map(|s| s.cell).unwrap();
+            wd.sounds.clear();
+            let placed = (-8..8).flat_map(|dy| (-8..8).map(move |dx| (own.0 + dx, own.1 + dy))).any(|c| wd.place_turret(0, 1, c));
+            assert!(placed && wd.sounds.iter().any(|s| s.0 == 72), "turret-place sound");
+        }
+        // placement tiles: one verdict per footprint cell (tier 5 is a 1x2 turret), all refused far from the own buildings
+        assert_eq!(g.play.as_ref().unwrap().world.turret_cells(0, 5, (3, 3)).len(), 2);
+        assert!(g.play.as_ref().unwrap().world.turret_cells(0, 3, (0, 0)).iter().all(|&ok| !ok));
+        g.play.as_mut().unwrap().world.credits[0] = 400;
+        g.play.as_mut().unwrap().placing = Some(2);
+        // P pauses (scan code 0x19) and only P resumes; Space does neither
+        g.key(&chr("p"), true, w, h);
+        assert!(g.play.as_ref().unwrap().paused);
+        g.key(&Key::Named(NamedKey::Space), true, w, h);
+        assert!(g.play.as_ref().unwrap().paused);
+        g.key(&chr("p"), true, w, h);
+        assert!(!g.play.as_ref().unwrap().paused);
+        // Tab selects one live own unit at a time and walks the list; H the Advancers
+        g.key(&Key::Named(NamedKey::Tab), true, w, h);
+        let sel = |g: &Game| g.play.as_ref().unwrap().world.units.iter().enumerate().filter(|(_, u)| u.selected).map(|(i, _)| i).collect::<Vec<_>>();
+        let first = sel(&g);
+        assert_eq!(first.len(), 1);
+        let own = g.play.as_ref().unwrap().world.units.iter().filter(|u| u.player == 0 && u.hp > 0).count();
+        g.key(&Key::Named(NamedKey::Tab), true, w, h);
+        assert_eq!(sel(&g) != first, own > 1, "{own} own units");
+        // Space: nothing without a shown message; with one, the view goes to the last event position
+        g.play.as_mut().unwrap().look_at(100.0, 100.0);
+        let before = g.play.as_ref().unwrap().view;
+        g.key(&Key::Named(NamedKey::Space), true, w, h);
+        assert_eq!((g.play.as_ref().unwrap().view.x, g.play.as_ref().unwrap().view.y), (before.x, before.y));
+        {
+            let wd = &mut g.play.as_mut().unwrap().world;
+            wd.last_event = Some((1200, 1000));
+            wd.log.push((wd.tick, 3));
+        }
+        g.key(&Key::Named(NamedKey::Space), true, w, h);
+        let v = g.play.as_ref().unwrap().view;
+        assert!((v.x + w as f32 / v.zoom / 2.0 - 1200.0).abs() < 2.0 && (v.y + h as f32 / v.zoom / 2.0 - 1000.0).abs() < 2.0, "{:?}", (v.x, v.y));
+        // numpad bookmarks: shift sets, plain jumps
+        g.numpad = true;
+        g.shift = true;
+        g.play.as_mut().unwrap().look_at(500.0, 400.0);
+        g.key(&chr("3"), true, w, h);
+        g.shift = false;
+        g.play.as_mut().unwrap().look_at(900.0, 900.0);
+        g.key(&chr("3"), true, w, h);
+        let v = g.play.as_ref().unwrap().view;
+        assert!((v.x + w as f32 / v.zoom / 2.0 - 500.0).abs() < 2.0 || v.x == 0.0 || v.y == 0.0, "the bookmark brings the view back");
+        assert_eq!(g.play.as_ref().unwrap().placing, Some(2), "numpad digits are not turret keys");
+        // numpad * selects what is on screen, F3 / F4 move the game speed in halves between 0.5 and 3
+        g.key(&chr("*"), true, w, h);
+        g.numpad = false;
+        for _ in 0..6 {
+            g.key(&Key::Named(NamedKey::F4), true, w, h);
+        }
+        assert_eq!(g.game_speed, 3.0);
+        for _ in 0..9 {
+            g.key(&Key::Named(NamedKey::F3), true, w, h);
+        }
+        assert_eq!(g.game_speed, 0.5);
+    }
+
+    #[test]
     fn hud_clicks_reach_the_panel_not_the_map() {
         let Some(mut g) = game() else { return };
         let (w, h) = (640, 480);
@@ -1698,7 +2591,7 @@ mod tests {
     }
 
     #[test]
-    fn any_building_shows_its_slots_when_hovered_or_clicked() {
+    fn any_building_shows_its_slots_when_hovered_and_only_own_ones_open_the_info_box() {
         let Some(mut g) = game() else { return };
         let (w, h) = (1024, 768);
         g.start("M01");
@@ -1722,22 +2615,26 @@ mod tests {
                 }
             }
             let (x, y) = at.expect("building on screen");
-            // hovering alone shows nothing
+            // hovering shows the production slots of any building, but no info box
             g.mouse_moved(x, y, w, h);
             g.update(0.0, w, h);
             let mut buf = vec![0u32; w * h];
             g.draw(&mut buf, w, h);
-            assert!(g.play.as_ref().unwrap().hud_layout().unwrap().slots.is_empty());
-            assert!(g.play.as_ref().unwrap().infobox.kind.is_none(), "hover alone opens no info box");
-            // a click selects it: slots and info box appear
-            g.mouse_button(MouseButton::Left, true, x, y, w, h);
-            g.mouse_button(MouseButton::Left, false, x, y, w, h);
-            assert_eq!(g.play.as_ref().unwrap().sel_building, Some(target));
-            g.update(0.0, w, h);
-            g.draw(&mut buf, w, h);
             let n = g.play.as_ref().unwrap().hud_layout().unwrap().slots.len();
             assert!(n > 0 && (target != own || n == 2), "M01's blue medium factory has two slots, got {n}");
-            assert!(g.play.as_ref().unwrap().infobox.visible());
+            assert!(g.play.as_ref().unwrap().infobox.kind.is_none(), "hover alone opens no info box");
+            // a click selects only an own building (info box); an enemy's or the neutral one stays hover-only
+            g.mouse_button(MouseButton::Left, true, x, y, w, h);
+            g.mouse_button(MouseButton::Left, false, x, y, w, h);
+            assert_eq!(g.play.as_ref().unwrap().sel_building, (target == own).then_some(target));
+            g.update(0.0, w, h);
+            g.draw(&mut buf, w, h);
+            assert!(g.play.as_ref().unwrap().hud_layout().unwrap().slots.len() > 0);
+            if target == own {
+                assert!(g.play.as_ref().unwrap().infobox.visible());
+            } else {
+                assert!(g.play.as_ref().unwrap().infobox.kind.is_none(), "only the selected own building gets the page");
+            }
             g.mouse_button(MouseButton::Right, true, 5, 5, w, h);
             g.mouse_button(MouseButton::Right, false, 5, 5, w, h);
             g.play.as_mut().unwrap().sel_building = None;
@@ -1802,14 +2699,14 @@ mod tests {
     }
 
     #[test]
-    fn space_pauses_and_only_space_resumes() {
+    fn p_pauses_and_only_p_resumes() {
         let Some(mut g) = game() else { return };
         let (w, h) = (640, 480);
         g.mute = true;
         g.start("M01");
         g.update(0.5, w, h);
         let tick = g.play.as_ref().unwrap().world.tick;
-        g.key(&Key::Named(NamedKey::Space), true, w, h);
+        g.key(&Key::Character(SmolStr::new("p")), true, w, h);
         assert!(g.play.as_ref().unwrap().paused);
         g.update(1.0, w, h);
         assert_eq!(g.play.as_ref().unwrap().world.tick, tick, "the game stands still");
@@ -1822,7 +2719,7 @@ mod tests {
         g.draw(&mut buf, w, h);
         assert!(buf[100 * w..101 * w].iter().all(|&p| p == 0), "even rows are black");
         assert!(buf[101 * w..102 * w].iter().any(|&p| p != 0));
-        g.key(&Key::Named(NamedKey::Space), true, w, h);
+        g.key(&Key::Character(SmolStr::new("p")), true, w, h);
         assert!(!g.play.as_ref().unwrap().paused);
         g.update(0.5, w, h);
         assert!(g.play.as_ref().unwrap().world.tick > tick);

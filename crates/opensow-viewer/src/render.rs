@@ -18,11 +18,13 @@ pub struct Overlays {
     pub fire: Option<u32>,
     /// Draw the foreground (tree tops etc.) over the sprites; a caller that draws units itself does it after them.
     pub foreground: bool,
+    /// A minimap in the top-right corner ([`draw_minimap`]): terrain, objects by owner, the camera.
+    pub minimap: bool,
 }
 
 impl Default for Overlays {
     fn default() -> Self {
-        Overlays { blocked: false, grid: false, objects: true, markers: true, sprites: true, muzzles: false, walk: None, fire: None, foreground: true }
+        Overlays { blocked: false, grid: false, objects: true, markers: true, sprites: true, muzzles: false, walk: None, fire: None, foreground: true, minimap: false }
     }
 }
 
@@ -48,6 +50,7 @@ impl View {
     }
 }
 
+#[inline(always)]
 pub fn pack(r: u8, g: u8, b: u8) -> u32 {
     (r as u32) << 16 | (g as u32) << 8 | b as u32
 }
@@ -190,39 +193,81 @@ pub fn blit_blend_masked(buf: &mut [u32], w: usize, h: usize, view: &View, f: &F
     let z = view.zoom;
     let (x0, y0) = view.to_screen((ax - f.hot_x as i32) as f32, (ay - f.hot_y as i32) as f32);
     let (x1, y1) = view.to_screen((ax - f.hot_x as i32 + f.width as i32) as f32, (ay - f.hot_y as i32 + f.height as i32) as f32);
-    for dy in y0.max(0)..y1.min(h as i32) {
-        let sy = (((dy - y0) as f32 / z) as usize).min(f.height as usize - 1);
-        for dx in x0.max(0)..x1.min(w as i32) {
-            let sx = (((dx - x0) as f32 / z) as usize).min(f.width as usize - 1);
-            let i = sy * f.width as usize + sx;
-            if !f.mask[i] {
-                continue;
-            }
-            let [r, g, b] = rgb565_to_rgb8(f.pixels[i]);
-            let idx = dy as usize * w + dx as usize;
-            if mask.is_some_and(|m| m[idx]) {
-                continue;
-            }
-            let out = match mode {
-                Blit::Plain => pack(r, g, b),
-                // the exe works on RGB565 words; do the same and expand the result back to 8 bits
-                _ => {
-                    // the lens mode brightens the picture pixel 2 columns right and 3 rows down instead of the covered one
-                    let q = if mode == Blit::Lens {
-                        let zi = z.round().max(1.0) as usize;
-                        let (qx, qy) = ((dx as usize + 2 * zi).min(w - 1), (dy as usize + 3 * zi).min(h - 1));
-                        buf[qy * w + qx]
-                    } else {
-                        buf[dy as usize * w + dx as usize]
-                    };
-                    let d = ((q >> 19 & 31) << 11 | (q >> 10 & 63) << 5 | (q >> 3 & 31)) as u16;
-                    let s = f.pixels[i];
-                    let o = mode.apply565(d, s);
-                    let (or, og, ob) = ((o >> 11) as u32, (o >> 5 & 63) as u32, (o & 31) as u32);
-                    pack((or << 3 | or >> 2) as u8, (og << 2 | og >> 4) as u8, (ob << 3 | ob >> 2) as u8)
+    let (xs, xe, ys, ye) = (x0.max(0), x1.min(w as i32), y0.max(0), y1.min(h as i32));
+    if xs >= xe || ys >= ye {
+        return;
+    }
+    let fw = f.width as usize;
+    // the source column of every screen column, once (the picture is sampled nearest-neighbour)
+    let cols: Vec<usize> = (xs..xe).map(|dx| (((dx - x0) as f32 / z) as usize).min(fw - 1)).collect();
+    // the loop is written once and instantiated per blend mode, so the mode is not tested per pixel; big sprites (the clouds, at a
+    // high resolution) are split into bands of rows over several threads
+    let parallel = (xe - xs) as usize * (ye - ys) as usize > 150_000;
+    let zi = z.round().max(1.0) as usize;
+    macro_rules! run {
+        ($pixel:expr) => {{
+            par_bands(buf, w, ys as usize, ye as usize, parallel, |band, r0| {
+                for (k, out) in band.chunks_mut(w).enumerate() {
+                    let dy = (r0 + k) as i32;
+                    let row = (((dy - y0) as f32 / z) as usize).min(f.height as usize - 1) * fw;
+                    let drow = dy as usize * w;
+                    for (kx, dx) in (xs..xe).enumerate() {
+                        let i = row + cols[kx];
+                        if !f.mask[i] {
+                            continue;
+                        }
+                        if mask.is_some_and(|m| m[drow + dx as usize]) {
+                            continue;
+                        }
+                        out[dx as usize] = $pixel(out[dx as usize], f.pixels[i]);
+                    }
                 }
-            };
-            buf[idx] = out;
+            })
+        }};
+    }
+    // the exe works on RGB565 words; do the same and expand the result back to 8 bits
+    macro_rules! blend {
+        ($m:expr) => {
+            run!(|q: u32, s: u16| {
+                let d = ((q >> 19 & 31) << 11 | (q >> 10 & 63) << 5 | (q >> 3 & 31)) as u16;
+                let o = $m.apply565(d, s);
+                let (or, og, ob) = ((o >> 11) as u32, (o >> 5 & 63) as u32, (o & 31) as u32);
+                pack((or << 3 | or >> 2) as u8, (og << 2 | og >> 4) as u8, (ob << 3 | ob >> 2) as u8)
+            })
+        };
+    }
+    match mode {
+        Blit::Plain => run!(|_q: u32, s: u16| {
+            let [r, g, b] = rgb565_to_rgb8(s);
+            pack(r, g, b)
+        }),
+        Blit::Additive => blend!(Blit::Additive),
+        Blit::AddHalf => blend!(Blit::AddHalf),
+        Blit::Average => blend!(Blit::Average),
+        Blit::Smoke => blend!(Blit::Smoke),
+        Blit::Darken => blend!(Blit::Darken),
+        Blit::Shade => blend!(Blit::Shade),
+        Blit::Lens => {
+            // the lens mode brightens the picture pixel 2 columns right and 3 rows down instead of the covered one
+            for dy in ys..ye {
+                let row = (((dy - y0) as f32 / z) as usize).min(f.height as usize - 1) * fw;
+                for (k, dx) in (xs..xe).enumerate() {
+                    let i = row + cols[k];
+                    if !f.mask[i] {
+                        continue;
+                    }
+                    let idx = dy as usize * w + dx as usize;
+                    if mask.is_some_and(|m| m[idx]) {
+                        continue;
+                    }
+                    let (qx, qy) = ((dx as usize + 2 * zi).min(w - 1), (dy as usize + 3 * zi).min(h - 1));
+                    let q = buf[qy * w + qx];
+                    let d = ((q >> 19 & 31) << 11 | (q >> 10 & 63) << 5 | (q >> 3 & 31)) as u16;
+                    let o = Blit::Lens.apply565(d, f.pixels[i]);
+                    let (or, og, ob) = ((o >> 11) as u32, (o >> 5 & 63) as u32, (o & 31) as u32);
+                    buf[idx] = pack((or << 3 | or >> 2) as u8, (og << 2 | og >> 4) as u8, (ob << 3 | ob >> 2) as u8);
+                }
+            }
         }
     }
 }
@@ -234,19 +279,22 @@ pub fn stamp_foreground(scene: &Scene, view: &View, mask: &mut [bool], w: usize,
         return;
     }
     let inv = 1.0 / view.zoom;
-    for sy in 0..h {
-        let my = view.y + sy as f32 * inv;
-        if my < 0.0 || my >= scene.bg_h as f32 {
-            continue;
-        }
-        let row = my as usize * scene.bg_w;
-        for sx in 0..w {
-            let mx = view.x + sx as f32 * inv;
-            if mx >= 0.0 && (mx as usize) < scene.bg_w && scene.foreground[row + mx as usize] {
-                mask[sy * w + sx] = true;
+    let cols = column_map(view, w, scene.bg_w);
+    let (bg_w, bg_h, foreground, view_y) = (scene.bg_w, scene.bg_h, &scene.foreground[..], view.y);
+    par_bands(mask, w, 0, h, w * h > 400_000, |band, r0| {
+        for (k, out) in band.chunks_mut(w).enumerate() {
+            let my = view_y + (r0 + k) as f32 * inv;
+            if my < 0.0 || my >= bg_h as f32 {
+                continue;
+            }
+            let row = my as usize * bg_w;
+            for (sx, &mx) in cols.iter().enumerate() {
+                if mx >= 0 && foreground[row + mx as usize] {
+                    out[sx] = true;
+                }
             }
         }
-    }
+    });
 }
 
 /// Marks the screen pixels covered by the set pixels of `f` (a building's `builds\mask` frame, `0x460120`).
@@ -275,11 +323,50 @@ pub fn draw_foreground_row(scene: &Scene, view: &View, buf: &mut [u32], w: usize
     foreground_rows(scene, view, buf, w, h, row * CELL as usize, (row + 1) * CELL as usize);
 }
 
+/// Runs `f(band, first_row)` over horizontal bands of rows `y0..y1` of a `w`-wide picture, on several threads when `parallel` (the
+/// per-pixel passes over a whole high-resolution screen are the frame's main cost). Every band is disjoint, so the result is the
+/// same as one sequential pass.
+pub fn par_bands<T: Send, F: Fn(&mut [T], usize) + Sync>(buf: &mut [T], w: usize, y0: usize, y1: usize, parallel: bool, f: F) {
+    let rows = y1.saturating_sub(y0);
+    if rows == 0 {
+        return;
+    }
+    let threads = if parallel { std::thread::available_parallelism().map_or(1, |n| n.get()).min(8).min(rows) } else { 1 };
+    let region = &mut buf[y0 * w..y1 * w];
+    if threads <= 1 {
+        f(region, y0);
+        return;
+    }
+    let per = rows.div_ceil(threads);
+    std::thread::scope(|s| {
+        for (k, band) in region.chunks_mut(per * w).enumerate() {
+            let f = &f;
+            s.spawn(move || f(band, y0 + k * per));
+        }
+    });
+}
+
+/// For every screen column the background pixel column it shows (`-1` outside the picture): computed once per call instead of per pixel.
+fn column_map(view: &View, w: usize, bg_w: usize) -> Vec<i32> {
+    let inv = 1.0 / view.zoom;
+    (0..w)
+        .map(|sx| {
+            let mx = view.x + sx as f32 * inv;
+            if mx >= 0.0 && (mx as usize) < bg_w {
+                mx as i32
+            } else {
+                -1
+            }
+        })
+        .collect()
+}
+
 fn foreground_rows(scene: &Scene, view: &View, buf: &mut [u32], w: usize, h: usize, y0: usize, y1: usize) {
     if scene.foreground.is_empty() {
         return;
     }
     let inv = 1.0 / view.zoom;
+    let cols = column_map(view, w, scene.bg_w);
     let (s0, s1) = (((y0 as f32 - view.y) * view.zoom).floor().max(0.0) as usize, (((y1 as f32 - view.y) * view.zoom).ceil().max(0.0) as usize).min(h));
     for sy in s0..s1 {
         let my = view.y + sy as f32 * inv;
@@ -287,11 +374,11 @@ fn foreground_rows(scene: &Scene, view: &View, buf: &mut [u32], w: usize, h: usi
             continue;
         }
         let row = my as usize * scene.bg_w;
-        for sx in 0..w {
-            let mx = view.x + sx as f32 * inv;
-            if mx >= 0.0 && (mx as usize) < scene.bg_w && scene.foreground[row + mx as usize] {
+        let out = &mut buf[sy * w..(sy + 1) * w];
+        for (sx, &mx) in cols.iter().enumerate() {
+            if mx >= 0 && scene.foreground[row + mx as usize] {
                 let i = (row + mx as usize) * 3;
-                buf[sy * w + sx] = pack(scene.bg[i], scene.bg[i + 1], scene.bg[i + 2]);
+                out[sx] = pack(scene.bg[i], scene.bg[i + 1], scene.bg[i + 2]);
             }
         }
     }
@@ -300,20 +387,23 @@ fn foreground_rows(scene: &Scene, view: &View, buf: &mut [u32], w: usize, h: usi
 pub fn render(scene: &Scene, view: &View, ov: Overlays, buf: &mut [u32], w: usize, h: usize) {
     buf.fill(pack(12, 12, 16));
     let inv = 1.0 / view.zoom;
-    for sy in 0..h {
-        let my = view.y + sy as f32 * inv;
-        if my < 0.0 || my >= scene.bg_h as f32 {
-            continue;
-        }
-        let row = my as usize * scene.bg_w;
-        for sx in 0..w {
-            let mx = view.x + sx as f32 * inv;
-            if mx >= 0.0 && (mx as usize) < scene.bg_w {
-                let i = (row + mx as usize) * 3;
-                buf[sy * w + sx] = pack(scene.bg[i], scene.bg[i + 1], scene.bg[i + 2]);
+    let cols = column_map(view, w, scene.bg_w);
+    let (bg_w, bg_h, bg, view_y) = (scene.bg_w, scene.bg_h, &scene.bg[..], view.y);
+    par_bands(buf, w, 0, h, w * h > 400_000, |band, r0| {
+        for (k, out) in band.chunks_mut(w).enumerate() {
+            let my = view_y + (r0 + k) as f32 * inv;
+            if my < 0.0 || my >= bg_h as f32 {
+                continue;
+            }
+            let row = my as usize * bg_w;
+            for (sx, &mx) in cols.iter().enumerate() {
+                if mx >= 0 {
+                    let i = (row + mx as usize) * 3;
+                    out[sx] = pack(bg[i], bg[i + 1], bg[i + 2]);
+                }
             }
         }
-    }
+    });
 
     let cell = CELL as f32;
     if ov.blocked {
@@ -388,7 +478,7 @@ pub fn render(scene: &Scene, view: &View, ov: Overlays, buf: &mut [u32], w: usiz
                 if let (Some(flash), Some(t)) = (&r.flash, fire_tick(r)) {
                     if let Some(f) = r.seq.flash_frame(t, r.facing as u32, r.steps as u32) {
                         if let Some(fr) = flash.get(f as usize) {
-                            blit(buf, w, h, view, fr, p.ax, p.ay, false);
+                            blit_blend(buf, w, h, view, fr, p.ax, p.ay, opensow_formats::effects::Blit::Additive);
                         }
                     }
                 }
@@ -440,6 +530,54 @@ pub fn render(scene: &Scene, view: &View, ov: Overlays, buf: &mut [u32], w: usiz
             rect(buf, w, h, cx - r - 1, cy - r - 1, cx + r + 2, cy + r + 2, team, 255);
             rect(buf, w, h, cx - r + 1, cy - r + 1, cx + r, cy + r, fill, 255);
         }
+    }
+    if ov.minimap {
+        draw_minimap(scene, view, buf, w, h);
+    }
+}
+
+/// Pixels per map cell of the minimap: as large as fits a quarter of the shorter screen side, at least 1.
+pub fn minimap_scale(scene: &Scene, w: usize, h: usize) -> usize {
+    let cells = scene.map.width.max(scene.map.height).max(1) as usize;
+    (w.min(h) / 4 / cells).clamp(1, 6)
+}
+
+/// The minimap (the exe's radar draws 1 px per cell, docs/hud.md): blocked terrain, every building and turret in its owner's
+/// colour, unit markers as single dots, and the camera rectangle. Top-right corner with a 1 px frame.
+pub fn draw_minimap(scene: &Scene, view: &View, buf: &mut [u32], w: usize, h: usize) {
+    let (mw, mh) = (scene.map.width as i32, scene.map.height as i32);
+    let k = minimap_scale(scene, w, h) as i32;
+    let (pw, ph) = (mw * k, mh * k);
+    if pw + 4 > w as i32 || ph + 4 > h as i32 {
+        return;
+    }
+    let (ox, oy) = (w as i32 - pw - 3, 3);
+    rect(buf, w, h, ox - 1, oy - 1, ox + pw + 1, oy + ph + 1, (230, 230, 230), 255);
+    rect(buf, w, h, ox, oy, ox + pw, oy + ph, (16, 24, 20), 255);
+    for c in scene.map.cells.iter().filter(|c| c.blocked) {
+        let (x, y) = (ox + c.x as i32 * k, oy + c.y as i32 * k);
+        rect(buf, w, h, x, y, x + k, y + k, (70, 80, 96), 255);
+    }
+    if let Some(level) = &scene.level {
+        for o in &level.objects {
+            let (x, y) = (ox + o.cell_x * k, oy + o.cell_y * k);
+            let big = o.object_kind().is_building();
+            let n = if big { (k * 2).max(2) } else { k.max(1) };
+            rect(buf, w, h, x, y, x + n, y + n, owner_color(o.owner()), 255);
+        }
+        for m in &level.markers {
+            let (x, y) = (ox + m.x.div_euclid(CELL as i32) * k, oy + m.y.div_euclid(CELL as i32) * k);
+            let team = if m.player == 0 { (110, 150, 255) } else { (110, 240, 130) };
+            rect(buf, w, h, x, y, x + k.max(1), y + k.max(1), team, 255);
+        }
+    }
+    // camera rectangle: the visible map area, clamped to the map
+    let cell = CELL as f32;
+    let (x0, y0) = (view.x / cell * k as f32, view.y / cell * k as f32);
+    let (x1, y1) = ((view.x + w as f32 / view.zoom) / cell * k as f32, (view.y + h as f32 / view.zoom) / cell * k as f32);
+    let (x0, y0, x1, y1) = ((x0.max(0.0)) as i32, (y0.max(0.0)) as i32, (x1.min(pw as f32)) as i32, (y1.min(ph as f32)) as i32);
+    for (ax, ay, bx, by) in [(x0, y0, x1, y0 + 1), (x0, y1 - 1, x1, y1), (x0, y0, x0 + 1, y1), (x1 - 1, y0, x1, y1)] {
+        rect(buf, w, h, ox + ax, oy + ay, ox + bx, oy + by, (255, 255, 255), 255);
     }
 }
 

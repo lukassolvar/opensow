@@ -17,7 +17,8 @@ pub enum Action {
 }
 
 /// Maximum hit points of a building kind (constructor `0x40a330`, jump table `0x40afb8`): turrets 25-29, every
-/// building 100-108 (headquarters included) 13536, kinds 109-113 and the rest.
+/// building 100-108 (headquarters included) 13536, everything else (kinds 109-113 included: their table index is past
+/// the `cmp edi, 0x53` bound at `0x40a988`, so `ja 0x40a9f4`) 50.
 pub fn building_max_hp(kind: i32) -> i32 {
     match kind {
         25 => 900,
@@ -26,7 +27,6 @@ pub fn building_max_hp(kind: i32) -> i32 {
         28 => 2100,
         29 => 2600,
         100..=108 => 13536,
-        109..=113 => 200, // docs/levels.md: constructed at runtime only
         _ => 50,
     }
 }
@@ -284,6 +284,8 @@ mod tests {
         assert_eq!(building_max_hp(27), 1540);
         assert_eq!(building_max_hp(100), 13536);
         assert_eq!(building_max_hp(103), 13536);
+        assert_eq!(building_max_hp(109), 50);
+        assert_eq!(building_max_hp(113), 50);
     }
 
     #[test]

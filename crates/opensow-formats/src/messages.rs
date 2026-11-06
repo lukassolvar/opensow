@@ -58,6 +58,7 @@ pub fn force_ready(code: i32) -> Option<u8> {
     })
 }
 
+/// The exe numbers strings from 1 (`strings.rs`): subtract 1 for `LangFile::get`.
 pub fn lang_index(id: u8) -> Option<usize> {
     MESSAGES.iter().find(|m| m.0 == id).map(|m| m.1)
 }
