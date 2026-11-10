@@ -1,4 +1,5 @@
 use crate::art::Source;
+use crate::{fx, record, upscale};
 use crate::scene::{Scene, CELL};
 use opensow_formats::effects::Blit;
 use opensow_formats::level::{Object, ObjectKind, Owner, UnitKind};
@@ -101,12 +102,31 @@ pub fn object_at<'a>(scene: &'a Scene, mx: f32, my: f32) -> Option<&'a Object> {
 }
 
 pub fn rect(buf: &mut [u32], w: usize, h: usize, x0: i32, y0: i32, x1: i32, y1: i32, c: (u8, u8, u8), a: u32) {
+    if record::active() {
+        record::fill(record::op::FILL, x0, y0, x1, y1, pack(c.0, c.1, c.2), a);
+        return;
+    }
     for y in y0.max(0)..y1.min(h as i32) {
         for x in x0.max(0)..x1.min(w as i32) {
             let p = &mut buf[y as usize * w + x as usize];
             *p = blend(*p, c.0, c.1, c.2, a);
         }
     }
+}
+
+/// Above zoom 1 the world's sprites are drawn from their 2x enhanced copy (`upscale`): same map position, half the zoom, doubled
+/// coordinates (powers of two, so every screen coordinate comes out exactly as before).
+fn hires<'a>(view: &View, f: &'a Frame) -> Option<(View, &'a Frame)> {
+    if !upscale::wanted(view.zoom) {
+        return None;
+    }
+    Some((View { x: view.x * 2.0, y: view.y * 2.0, zoom: view.zoom / 2.0 }, upscale::enhanced(f)?))
+}
+
+/// The frame column / row a screen column / row of a blit at screen `(x0, y0)` and zoom `z` shows (the blit loops' formula).
+fn sample_fns(f: &Frame, x0: i32, y0: i32, z: f32) -> (impl Fn(i32) -> usize, impl Fn(i32) -> usize) {
+    let (fw, fh) = (f.width as usize, f.height as usize);
+    (move |dx: i32| (((dx - x0) as f32 / z) as usize).min(fw - 1), move |dy: i32| (((dy - y0) as f32 / z) as usize).min(fh - 1))
 }
 
 /// Nearest-neighbour blit of `f` with its hotspot at map pixel (ax, ay); `shadow` darkens instead of copying.
@@ -116,9 +136,30 @@ pub fn blit(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, ax: i32
 
 /// [`blit`] restricted to the screen rectangle `clip = (x0, y0, x1, y1)`.
 pub fn blit_clip(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, ax: i32, ay: i32, shadow: bool, clip: (i32, i32, i32, i32)) {
+    // soft shadows (docs/fx.md): nine blits a pixel or two apart that together darken like the one
+    if shadow && fx::soft_shadows() {
+        for (k, (dx, dy)) in fx::taps(view.zoom).into_iter().enumerate() {
+            blit_clip_core(buf, w, h, &fx::shifted(view, dx, dy), f, ax, ay, true, clip, fx::TAP_ALPHA[k]);
+        }
+        return;
+    }
+    blit_clip_core(buf, w, h, view, f, ax, ay, shadow, clip, fx::SHADOW_ALPHA);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn blit_clip_core(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, ax: i32, ay: i32, shadow: bool, clip: (i32, i32, i32, i32), alpha: u32) {
+    if let Some((v, e)) = hires(view, f) {
+        return blit_clip_core(buf, w, h, &v, e, ax * 2, ay * 2, shadow, clip, alpha);
+    }
     let z = view.zoom;
     let (x0, y0) = view.to_screen((ax - f.hot_x as i32) as f32, (ay - f.hot_y as i32) as f32);
     let (x1, y1) = view.to_screen((ax - f.hot_x as i32 + f.width as i32) as f32, (ay - f.hot_y as i32 + f.height as i32) as f32);
+    if record::active() {
+        let (op, p0) = if shadow { (record::op::SHADOW, alpha) } else { (record::op::PLAIN, 0) };
+        let (col, row) = sample_fns(f, x0, y0, z);
+        record::sprite(op, f, x0.max(clip.0), y0.max(clip.1), x1.min(clip.2), y1.min(clip.3), col, row, [p0, 0, 0, 0, 0, 0, 0], None);
+        return;
+    }
     for dy in y0.max(0).max(clip.1)..y1.min(h as i32).min(clip.3) {
         let sy = (((dy - y0) as f32 / z) as usize).min(f.height as usize - 1);
         for dx in x0.max(0).max(clip.0)..x1.min(w as i32).min(clip.2) {
@@ -129,7 +170,7 @@ pub fn blit_clip(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, ax
             }
             let p = &mut buf[dy as usize * w + dx as usize];
             if shadow {
-                *p = blend(*p, 0, 0, 0, 110);
+                *p = blend(*p, 0, 0, 0, alpha);
             } else {
                 let [r, g, b] = rgb565_to_rgb8(f.pixels[i]);
                 *p = pack(r, g, b);
@@ -141,16 +182,35 @@ pub fn blit_clip(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, ax
 /// A shadow blit ([`blit`] with `shadow`) that skips the screen pixels `mask` marks: the exe's masked shade blit `0x462110` for the
 /// shadows of weapon tops (docs/effects.md, "The screen mask").
 pub fn blit_shadow_masked(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, ax: i32, ay: i32, mask: &[bool]) {
+    if fx::soft_shadows() {
+        for (k, (dx, dy)) in fx::taps(view.zoom).into_iter().enumerate() {
+            blit_shadow_masked_core(buf, w, h, &fx::shifted(view, dx, dy), f, ax, ay, mask, fx::TAP_ALPHA[k]);
+        }
+        return;
+    }
+    blit_shadow_masked_core(buf, w, h, view, f, ax, ay, mask, fx::SHADOW_ALPHA);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn blit_shadow_masked_core(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, ax: i32, ay: i32, mask: &[bool], alpha: u32) {
+    if let Some((v, e)) = hires(view, f) {
+        return blit_shadow_masked_core(buf, w, h, &v, e, ax * 2, ay * 2, mask, alpha);
+    }
     let z = view.zoom;
     let (x0, y0) = view.to_screen((ax - f.hot_x as i32) as f32, (ay - f.hot_y as i32) as f32);
     let (x1, y1) = view.to_screen((ax - f.hot_x as i32 + f.width as i32) as f32, (ay - f.hot_y as i32 + f.height as i32) as f32);
+    if record::active() {
+        let (col, row) = sample_fns(f, x0, y0, z);
+        record::sprite(record::op::SHADOW, f, x0, y0, x1, y1, col, row, [alpha, 1, 0, 0, 0, 0, 0], Some(mask.as_ptr() as usize));
+        return;
+    }
     for dy in y0.max(0)..y1.min(h as i32) {
         let sy = (((dy - y0) as f32 / z) as usize).min(f.height as usize - 1);
         for dx in x0.max(0)..x1.min(w as i32) {
             let sx = (((dx - x0) as f32 / z) as usize).min(f.width as usize - 1);
             let idx = dy as usize * w + dx as usize;
             if f.mask[sy * f.width as usize + sx] && !mask[idx] {
-                buf[idx] = blend(buf[idx], 0, 0, 0, 110);
+                buf[idx] = blend(buf[idx], 0, 0, 0, alpha);
             }
         }
     }
@@ -158,9 +218,19 @@ pub fn blit_shadow_masked(buf: &mut [u32], w: usize, h: usize, view: &View, f: &
 
 /// [`blit_clip`] that only draws the pixels of `f` where the building mask `m` (same hotspot frame of `builds\\mask`) is set.
 pub fn blit_masked(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, m: &Frame, ax: i32, ay: i32, clip: (i32, i32, i32, i32)) {
+    if let (Some((v, e)), true) = (hires(view, f), upscale::wanted(view.zoom)) {
+        if let Some(em) = upscale::enhanced(m) {
+            return blit_masked(buf, w, h, &v, e, em, ax * 2, ay * 2, clip);
+        }
+    }
     let z = view.zoom;
     let (x0, y0) = view.to_screen((ax - f.hot_x as i32) as f32, (ay - f.hot_y as i32) as f32);
     let (x1, y1) = view.to_screen((ax - f.hot_x as i32 + f.width as i32) as f32, (ay - f.hot_y as i32 + f.height as i32) as f32);
+    if record::active() {
+        let (col, row) = sample_fns(f, x0, y0, z);
+        record::sprite_masked(f, m, x0.max(clip.0), y0.max(clip.1), x1.min(clip.2), y1.min(clip.3), col, row);
+        return;
+    }
     for dy in y0.max(0).max(clip.1)..y1.min(h as i32).min(clip.3) {
         let sy = (((dy - y0) as f32 / z) as usize).min(f.height as usize - 1);
         for dx in x0.max(0).max(clip.0)..x1.min(w as i32).min(clip.2) {
@@ -190,11 +260,33 @@ pub fn blit_blend(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, a
 /// only where the byte is below the frame's stamp, i.e. where no building or foreground tile was stamped this frame).
 #[allow(clippy::too_many_arguments)]
 pub fn blit_blend_masked(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, ax: i32, ay: i32, mode: Blit, mask: Option<&[bool]>) {
+    // an additive effect (explosion, muzzle flash) also lights the ground around it (docs/fx.md)
+    if mode == Blit::Additive && fx::glow_on() {
+        fx::glow(buf, w, h, view, f, ax, ay);
+    }
+    blit_blend_core(buf, w, h, view, f, ax, ay, mode, mask);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn blit_blend_core(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, ax: i32, ay: i32, mode: Blit, mask: Option<&[bool]>) {
+    // (the lens blend refracts by the integer zoom, so it keeps the exe's pixels)
+    if mode != Blit::Lens {
+        if let Some((v, e)) = hires(view, f) {
+            return blit_blend_core(buf, w, h, &v, e, ax * 2, ay * 2, mode, mask);
+        }
+    }
     let z = view.zoom;
     let (x0, y0) = view.to_screen((ax - f.hot_x as i32) as f32, (ay - f.hot_y as i32) as f32);
     let (x1, y1) = view.to_screen((ax - f.hot_x as i32 + f.width as i32) as f32, (ay - f.hot_y as i32 + f.height as i32) as f32);
     let (xs, xe, ys, ye) = (x0.max(0), x1.min(w as i32), y0.max(0), y1.min(h as i32));
     if xs >= xe || ys >= ye {
+        return;
+    }
+    if record::active() {
+        let (col, row) = sample_fns(f, x0, y0, z);
+        let masked = mask.is_some() as u32;
+        let (op, p0) = if mode == Blit::Lens { (record::op::LENS, z.round().max(1.0) as u32) } else { (record::op::BLEND, record::blit_code(mode)) };
+        record::sprite(op, f, x0, y0, x1, y1, col, row, [p0, masked, 0, 0, 0, 0, 0], mask.map(|m| m.as_ptr() as usize));
         return;
     }
     let fw = f.width as usize;
@@ -275,12 +367,18 @@ pub fn blit_blend_masked(buf: &mut [u32], w: usize, h: usize, view: &View, f: &F
 /// Marks the screen pixels whose map pixel has something standing in front of the ground (the foreground tiles: tree tops, rock tops).
 /// The exe stamps the same pixels into its screen mask while it draws the tiles (`0x459666`, `0x460120`).
 pub fn stamp_foreground(scene: &Scene, view: &View, mask: &mut [bool], w: usize, h: usize) {
-    if scene.foreground.is_empty() {
+    let (g, view) = scene.ground(view);
+    let view = &view;
+    if g.fg.is_empty() {
+        return;
+    }
+    if record::active() {
+        record::stamp_ground(&g, view, h, mask.as_ptr() as usize);
         return;
     }
     let inv = 1.0 / view.zoom;
-    let cols = column_map(view, w, scene.bg_w);
-    let (bg_w, bg_h, foreground, view_y) = (scene.bg_w, scene.bg_h, &scene.foreground[..], view.y);
+    let cols = column_map(view, w, g.w);
+    let (bg_w, bg_h, foreground, view_y) = (g.w, g.h, g.fg, view.y);
     par_bands(mask, w, 0, h, w * h > 400_000, |band, r0| {
         for (k, out) in band.chunks_mut(w).enumerate() {
             let my = view_y + (r0 + k) as f32 * inv;
@@ -299,9 +397,17 @@ pub fn stamp_foreground(scene: &Scene, view: &View, mask: &mut [bool], w: usize,
 
 /// Marks the screen pixels covered by the set pixels of `f` (a building's `builds\mask` frame, `0x460120`).
 pub fn stamp_frame(mask: &mut [bool], w: usize, h: usize, view: &View, f: &Frame, ax: i32, ay: i32) {
+    if let Some((v, e)) = hires(view, f) {
+        return stamp_frame(mask, w, h, &v, e, ax * 2, ay * 2);
+    }
     let z = view.zoom;
     let (x0, y0) = view.to_screen((ax - f.hot_x as i32) as f32, (ay - f.hot_y as i32) as f32);
     let (x1, y1) = view.to_screen((ax - f.hot_x as i32 + f.width as i32) as f32, (ay - f.hot_y as i32 + f.height as i32) as f32);
+    if record::active() {
+        let (col, row) = sample_fns(f, x0, y0, z);
+        record::sprite(record::op::STAMP, f, x0, y0, x1, y1, col, row, [0; 7], Some(mask.as_ptr() as usize));
+        return;
+    }
     for dy in y0.max(0)..y1.min(h as i32) {
         let sy = (((dy - y0) as f32 / z) as usize).min(f.height as usize - 1);
         for dx in x0.max(0)..x1.min(w as i32) {
@@ -362,33 +468,52 @@ fn column_map(view: &View, w: usize, bg_w: usize) -> Vec<i32> {
 }
 
 fn foreground_rows(scene: &Scene, view: &View, buf: &mut [u32], w: usize, h: usize, y0: usize, y1: usize) {
-    if scene.foreground.is_empty() {
+    let (g, view) = scene.ground(view);
+    let view = &view;
+    let (y0, y1) = (y0 * g.k, y1 * g.k);
+    if g.fg.is_empty() {
         return;
     }
     let inv = 1.0 / view.zoom;
-    let cols = column_map(view, w, scene.bg_w);
+    let cols = column_map(view, w, g.w);
     let (s0, s1) = (((y0 as f32 - view.y) * view.zoom).floor().max(0.0) as usize, (((y1 as f32 - view.y) * view.zoom).ceil().max(0.0) as usize).min(h));
+    if record::active() {
+        record::foreground_rows(&g, view, s0, s1, y0, y1);
+        return;
+    }
     for sy in s0..s1 {
         let my = view.y + sy as f32 * inv;
-        if my < y0 as f32 || my >= y1.min(scene.bg_h) as f32 {
+        if my < y0 as f32 || my >= y1.min(g.h) as f32 {
             continue;
         }
-        let row = my as usize * scene.bg_w;
+        let row = my as usize * g.w;
         let out = &mut buf[sy * w..(sy + 1) * w];
         for (sx, &mx) in cols.iter().enumerate() {
-            if mx >= 0 && scene.foreground[row + mx as usize] {
+            if mx >= 0 && g.fg[row + mx as usize] {
                 let i = (row + mx as usize) * 3;
-                out[sx] = pack(scene.bg[i], scene.bg[i + 1], scene.bg[i + 2]);
+                out[sx] = pack(g.bg[i], g.bg[i + 1], g.bg[i + 2]);
             }
         }
     }
 }
 
 pub fn render(scene: &Scene, view: &View, ov: Overlays, buf: &mut [u32], w: usize, h: usize) {
+    if record::active() {
+        let (g, v) = scene.ground(view);
+        record::background(&g, &v, w, h);
+    } else {
+        draw_background(scene, view, buf, w, h);
+    }
+    render_rest(scene, view, ov, buf, w, h);
+}
+
+fn draw_background(scene: &Scene, view: &View, buf: &mut [u32], w: usize, h: usize) {
     buf.fill(pack(12, 12, 16));
+    let (g, view) = scene.ground(view);
+    let view = &view;
     let inv = 1.0 / view.zoom;
-    let cols = column_map(view, w, scene.bg_w);
-    let (bg_w, bg_h, bg, view_y) = (scene.bg_w, scene.bg_h, &scene.bg[..], view.y);
+    let cols = column_map(view, w, g.w);
+    let (bg_w, bg_h, bg, view_y) = (g.w, g.h, g.bg, view.y);
     par_bands(buf, w, 0, h, w * h > 400_000, |band, r0| {
         for (k, out) in band.chunks_mut(w).enumerate() {
             let my = view_y + (r0 + k) as f32 * inv;
@@ -404,7 +529,9 @@ pub fn render(scene: &Scene, view: &View, ov: Overlays, buf: &mut [u32], w: usiz
             }
         }
     });
+}
 
+fn render_rest(scene: &Scene, view: &View, ov: Overlays, buf: &mut [u32], w: usize, h: usize) {
     let cell = CELL as f32;
     if ov.blocked {
         for c in scene.map.cells.iter().filter(|c| c.blocked) {
@@ -467,9 +594,24 @@ pub fn render(scene: &Scene, view: &View, ov: Overlays, buf: &mut [u32], w: usiz
             }
             _ => p.frame,
         };
+        if fx::contact() {
+            // contact shadow: the building's own silhouette as a faint shade on a few rings around it (docs/fx.md)
+            let full = (0, 0, w as i32, h as i32);
+            for p in scene.placed.iter().filter(|p| p.layer == 0 && matches!(p.source, Source::Object(_))) {
+                let f = &p.set[frame_of(p)];
+                for (dx, dy, a) in fx::contact_taps(view.zoom) {
+                    blit_clip_core(buf, w, h, &fx::shifted(view, dx, dy), f, p.ax, p.ay, true, full, a);
+                }
+            }
+        }
         for p in &scene.placed {
             if let Some((set, i)) = &p.shadow {
                 blit(buf, w, h, view, &set[frame_of(p).min(set.len() - 1).max(if p.walk.is_some() || p.anim.is_some() { 0 } else { *i })], p.ax, p.ay, true);
+            } else if fx::turret_shadows() && matches!(p.source, Source::Object(oi) if level.objects.get(oi).is_some_and(|o| (25..=29).contains(&o.kind))) {
+                // a turret part with no shadow art: its own silhouette, moved right and up (docs/fx.md)
+                let f = &p.set[frame_of(p).min(p.set.len() - 1)];
+                let (dx, dy) = fx::turret_shadow_offset(f.height);
+                blit(buf, w, h, view, f, p.ax + dx, p.ay + dy, true);
             }
         }
         for p in &scene.placed {
@@ -587,7 +729,7 @@ mod mask_tests {
     use opensow_formats::sprite::Frame;
 
     fn frame(w: u16, h: u16, px: u16) -> Frame {
-        Frame { width: w, height: h, hot_x: 0, hot_y: 0, extra: [0; 4], pixels: vec![px; (w * h) as usize], mask: vec![true; (w * h) as usize] }
+        Frame { width: w, height: h, hot_x: 0, hot_y: 0, extra: [0; 4], pixels: vec![px; (w * h) as usize], mask: vec![true; (w * h) as usize], enhanced: Default::default() }
     }
 
     /// The screen mask (docs/effects.md): a masked blit leaves the marked pixels alone, an unmasked one draws them; stamping a frame

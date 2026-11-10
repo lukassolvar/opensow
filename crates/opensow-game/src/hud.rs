@@ -201,6 +201,13 @@ impl Layout {
         None
     }
 
+    /// Whether a screen position lies on the radar widget (picture or frame).
+    pub fn on_radar_frame(&self, x: i32, y: i32) -> bool {
+        let u = |v: i32| (v as f32 * self.s).round() as i32;
+        let (fw, fh) = if self.radar_frame_index == 0 { (76, 76) } else { (108, 92) };
+        self.radar_on && (Rect { x: self.radar_frame.0, y: self.radar_frame.1, w: u(fw), h: u(fh) }).contains(x, y)
+    }
+
     /// Map pixel under a screen position on the radar (clamped to the map; one radar pixel is one 32 px cell).
     pub fn radar_to_map(&self, x: i32, y: i32) -> (f32, f32) {
         let fx = ((x - self.radar.x) as f32 / self.s).clamp(0.0, self.map_cells.0 as f32);
@@ -242,6 +249,8 @@ fn counter(assets: &mut Assets, buf: &mut [u32], w: usize, h: usize, pos: (i32, 
     }
     let u = |v: i32| (v as f32 * s).round() as i32;
     ui::sprite(buf, w, h, &set[base], pos.0, pos.1, s);
+    // the language packs' tiles are wider when the label is longer (SK: 145 / 184 instead of 133); the digit slots sit at the right end
+    let first = first + (set[base].width as i32 - 133).max(0);
     let modulus = 10i32.pow(n as u32);
     let v = value.max(0) % modulus;
     for k in 0..n {

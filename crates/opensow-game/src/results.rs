@@ -56,8 +56,8 @@ fn frames(assets: &Assets, path: &str) -> Vec<Frame> {
 impl Results {
     /// `language`: the index into `intro::LANGUAGES` (the banner picture has a copy per language under `DiffData`).
     pub fn new(assets: &mut Assets, won: bool, tutorial: bool, stats: [SideStats; 2], language: usize) -> Results {
-        let lang_id = assets.game.resolve("Data\\lang.dat").and_then(|p| std::fs::read(p).ok()).and_then(|d| lang::read_lang_dat(&d)).unwrap_or(lang::Language::English);
-        let strings = assets.game.resolve(&format!("Data\\Language\\{}", lang_id.file_name())).and_then(|p| std::fs::read(p).ok()).and_then(|d| LangFile::parse(&d).ok());
+        let lang_id = assets.game.language();
+        let strings = assets.game.resolve(&format!("Data\\Language\\{}", lang_id.file_name())).and_then(|p| std::fs::read(p).ok()).and_then(|d| LangFile::parse(&d).ok()).map(|f| f.with_supplement(lang_id));
         let dir = crate::intro::LANGUAGES.get(language).copied().unwrap_or("");
         let local = (!dir.is_empty()).then(|| frames(assets, &format!("Data\\DiffData\\{dir}\\Sprites2\\Extras\\WinLoose.tsp"))).filter(|f| f.len() >= 2);
         let banner = local.unwrap_or_else(|| frames(assets, "Data\\Sprites2\\Extras\\WinLoose.tsp"));
@@ -160,6 +160,9 @@ impl Results {
     /// The banner: `buf` already holds the frozen game frame; every even row is tinted dark red, every odd row is black, and the
     /// picture (frame 0 won, frame 1 lost) sits at the screen centre minus its hot spot.
     pub fn draw_banner(&self, buf: &mut [u32], w: usize, h: usize) {
+        if opensow_viewer::record::active() {
+            opensow_viewer::record::fill(opensow_viewer::record::op::TINT_ROWS, 0, 0, w as i32, h as i32, 0, 0);
+        } else {
         for y in 0..h {
             let row = &mut buf[y * w..(y + 1) * w];
             if y % 2 == 1 {
@@ -173,6 +176,7 @@ impl Results {
                 *px = pack(r, g, b);
             }
         }
+        }
         if let Some(f) = self.banner.get(if self.won { 0 } else { 1 }) {
             let s = (h as f32 / 768.0).max(1.0);
             let (x, y) = (w as i32 / 2 - (f.hot_x as f32 * s) as i32, h as i32 / 2 - (f.hot_y as f32 * s) as i32);
@@ -184,22 +188,33 @@ impl Results {
     /// The layout is the exe's 640x480 one; it is drawn at that size and scaled to the largest centred 4:3 rectangle, like the
     /// other screens, over the background covering the whole window.
     pub fn draw_statistics(&self, buf: &mut [u32], w: usize, h: usize) {
-        buf.fill(0);
+        ui::clear(buf, w, h, 0);
         if let Some(bg) = &self.bg {
             ui::backdrop(buf, w, h, bg);
         }
-        if (w, h) == (640, 480) {
+        let recording = opensow_viewer::record::active();
+        if (w, h) == (640, 480) && !recording {
             self.draw_layout(buf, w, h);
             return;
         }
+        // the 640x480 page is drawn on the CPU (also while a frame is recorded) and handed over scaled
         let mut small = vec![0u32; 640 * 480];
-        if let Some(bg) = &self.bg {
-            ui::backdrop(&mut small, 640, 480, bg);
-        }
-        self.draw_layout(&mut small, 640, 480);
+        opensow_viewer::record::cpu(|| {
+            if let Some(bg) = &self.bg {
+                ui::backdrop(&mut small, 640, 480, bg);
+            }
+            self.draw_layout(&mut small, 640, 480);
+        });
         let s = (w as f32 / 640.0).min(h as f32 / 480.0);
         let (dw, dh) = (((640.0 * s) as usize).max(1), ((480.0 * s) as usize).max(1));
         let (ox, oy) = ((w - dw.min(w)) / 2, (h - dh.min(h)) / 2);
+        if recording {
+            let (ax, ay) = (ox as i32, oy as i32);
+            let col = |x: i32| ((x - ax) as usize * 640 / dw).min(639) as i32;
+            let row = |y: i32| ((y - ay) as usize * 480 / dh).min(479) as i32;
+            opensow_viewer::record::picture_words(&small, 640, ax, ay, ax + dw.min(w) as i32, ay + dh.min(h) as i32, col, row);
+            return;
+        }
         for y in 0..dh.min(h) {
             for x in 0..dw.min(w) {
                 buf[(oy + y) * w + ox + x] = small[(y * 480 / dh).min(479) * 640 + (x * 640 / dw).min(639)];

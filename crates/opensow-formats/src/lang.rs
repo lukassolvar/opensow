@@ -39,6 +39,15 @@ impl Language {
         Language::ChineseTraditional,
     ];
 
+    /// The languages the port offers: the ones whose shipped text and language-pack art are complete. The Polish and Russian
+    /// files are English text with placeholders and the Hungarian one is damaged, with no art of their own (docs/text.md); a
+    /// launcher setting, `lang.dat` or `--lang` naming one of those falls back to English.
+    pub const SUPPORTED: [Language; 5] = [Language::English, Language::Slovak, Language::Czech, Language::ChineseSimplified, Language::ChineseTraditional];
+
+    pub fn supported(self) -> bool {
+        Language::SUPPORTED.contains(&self)
+    }
+
     pub fn id(self) -> u8 {
         Language::ALL.iter().position(|&l| l == self).unwrap() as u8
     }
@@ -55,6 +64,19 @@ impl Language {
         Language::ALL.into_iter().find(|l| l.code().eq_ignore_ascii_case(code))
     }
 
+    /// The folder below `Data/DiffData` with this language's voices and pictures (both Chinese scripts share one); English has none.
+    pub fn diff_dir(self) -> Option<&'static str> {
+        match self {
+            Language::English => None,
+            Language::Slovak => Some("SK"),
+            Language::Czech => Some("CZ"),
+            Language::Polish => Some("PL"),
+            Language::Hungarian => Some("HU"),
+            Language::Russian => Some("RU"),
+            Language::ChineseSimplified | Language::ChineseTraditional => Some("CHINNESSE"),
+        }
+    }
+
     /// `langEN.txt` etc., relative to `Data/Language`.
     pub fn file_name(self) -> String {
         format!("lang{}.txt", self.code())
@@ -66,6 +88,34 @@ pub fn read_lang_dat(data: &[u8]) -> Option<Language> {
     let b = *data.first()?;
     b.checked_sub(b'0').and_then(Language::from_id)
 }
+
+/// The English text of the strings `with_supplement` may replace (file indices).
+const SUPPLEMENT_ENGLISH: &[(usize, &str)] = &[
+    (262, "Selected level:"), (265, "2Green player has joined the game"), (266, "2Green player has left the game"), (267, "On"), (268, "Off"),
+    (278, "Green Player has left the game"), (279, "Blue Player has left the game"), (282, "No Info Available"), (283, "NAME: %s"),
+    (284, "BLAST: %s"), (285, "SHELL: %s"), (286, "TYPE: Ground unit"), (287, "TYPE: Walker robot"), (288, "TYPE: Production"),
+    (289, "TYPE: Sentry Building"), (290, "TYPE: Air Forces"), (291, "TYPE: Advancer"), (292, "TYPE: Building"), (293, "OFFENCE: %d"),
+    (294, "DEFENCE: %d"), (295, "OFFENCE: n/a"), (296, "OFFENCE: special"), (297, "OFFENCE: ultimate"), (298, "SCOPE: %s"),
+    (299, "SPEED: %s"), (300, "SPEED: %d"), (301, "cargo: reinforcements"),
+];
+
+const SUPPLEMENT_SK: &[(usize, &str)] = &[
+    (262, "Vybraná úroveň:"), (265, "2Zelený hráč sa pripojil k hre"), (266, "2Zelený hráč opustil hru"), (267, "Zap"), (268, "Vyp"),
+    (278, "Zelený hráč opustil hru"), (279, "Modrý hráč opustil hru"), (282, "Informácie nie sú k dispozícii"), (283, "NÁZOV: %s"),
+    (284, "VÝBUCH: %s"), (285, "NÁBOJ: %s"), (286, "TYP: Pozemná jednotka"), (287, "TYP: Kráčajúci robot"), (288, "TYP: Výroba"),
+    (289, "TYP: Strážna veža"), (290, "TYP: Letectvo"), (291, "TYP: Advancer"), (292, "TYP: Budova"), (293, "ÚTOK: %d"),
+    (294, "OBRANA: %d"), (295, "ÚTOK: n/a"), (296, "ÚTOK: špeciálny"), (297, "ÚTOK: najvyšší"), (298, "DOSAH: %s"),
+    (299, "RÝCHLOSŤ: %s"), (300, "RÝCHLOSŤ: %d"), (301, "náklad: posily"),
+];
+
+const SUPPLEMENT_CZ: &[(usize, &str)] = &[
+    (262, "Vybraná úroveň:"), (265, "2Zelený hráč se připojil ke hře"), (266, "2Zelený hráč opustil hru"), (267, "Zap"), (268, "Vyp"),
+    (278, "Zelený hráč opustil hru"), (279, "Modrý hráč opustil hru"), (282, "Informace nejsou k dispozici"), (283, "NÁZEV: %s"),
+    (284, "VÝBUCH: %s"), (285, "NÁBOJ: %s"), (286, "TYP: Pozemní jednotka"), (287, "TYP: Kráčející robot"), (288, "TYP: Výroba"),
+    (289, "TYP: Strážní věž"), (290, "TYP: Letectvo"), (291, "TYP: Advancer"), (292, "TYP: Budova"), (293, "ÚTOK: %d"),
+    (294, "OBRANA: %d"), (295, "ÚTOK: n/a"), (296, "ÚTOK: speciální"), (297, "ÚTOK: nejvyšší"), (298, "DOSAH: %s"),
+    (299, "RYCHLOST: %s"), (300, "RYCHLOST: %d"), (301, "náklad: posily"),
+];
 
 #[derive(Debug, Clone)]
 pub struct LangFile {
@@ -82,6 +132,24 @@ impl LangFile {
             return Err(Error::Invalid("language file has no strings".into()));
         }
         Ok(LangFile { strings })
+    }
+
+    /// Fills in strings the shipped file leaves in English where the original game never had a translation (info box labels,
+    /// On/Off, a few lobby lines). These are this port's own translations, not data from the install: only Slovak and Czech, and only
+    /// strings that equal the English one (so a later fixed install file wins). `docs/text.md`.
+    pub fn with_supplement(mut self, language: Language) -> LangFile {
+        let table: &[(usize, &str)] = match language {
+            Language::Slovak => SUPPLEMENT_SK,
+            Language::Czech => SUPPLEMENT_CZ,
+            _ => return self,
+        };
+        for &(i, text) in table {
+            let is_english = SUPPLEMENT_ENGLISH.iter().any(|&(k, e)| k == i && self.strings.get(i).is_some_and(|s| s.trim() == e));
+            if is_english {
+                self.strings[i] = text.to_owned();
+            }
+        }
+        self
     }
 
     pub fn get(&self, index: usize) -> Option<&str> {
@@ -103,6 +171,13 @@ impl LangFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_complete_translations_are_offered() {
+        assert!(Language::Czech.supported() && Language::Slovak.supported() && Language::ChineseTraditional.supported());
+        assert!(!Language::Polish.supported() && !Language::Hungarian.supported() && !Language::Russian.supported());
+        assert_eq!(Language::SUPPORTED[0], Language::English);
+    }
 
     #[test]
     fn language_ids() {
@@ -132,5 +207,17 @@ mod tests {
         assert_eq!(f.damaged(), [1, 2]);
         assert!(LangFile::parse(b"@bad\xE1\x20@").is_err());
         assert!(LangFile::parse(b"@@").is_err());
+    }
+}
+
+#[cfg(test)]
+mod diff_dir_tests {
+    use super::*;
+
+    #[test]
+    fn language_packs() {
+        assert_eq!(Language::English.diff_dir(), None);
+        assert_eq!(Language::Slovak.diff_dir(), Some("SK"));
+        assert_eq!(Language::ChineseTraditional.diff_dir(), Language::ChineseSimplified.diff_dir());
     }
 }

@@ -13,12 +13,74 @@ pub const W: usize = 640;
 pub const H: usize = 480;
 
 /// The screen sizes the resolution arrows step through (`0x49ce68`).
-pub const RESOLUTIONS: [(u32, u32); 5] = [(640, 480), (800, 600), (1024, 768), (1600, 900), (1920, 1080)];
+/// The exe's table ends at 1920x1080; 2560x1440 (2K), 3840x2160 (4K) and [`NATIVE`] are additions of this port (the game
+/// scales to any size).
+pub const RESOLUTIONS: [(u32, u32); 8] = [(640, 480), (800, 600), (1024, 768), (1600, 900), (1920, 1080), (2560, 1440), (3840, 2160), NATIVE];
 
-/// Everything the menu edits: the settings file (`COptions`) and the audio object's volumes and switches.
+/// The size stored for NATIVE: the game draws at the window's own pixel size (the whole screen when fullscreen). Our
+/// first-run default; the exe never writes 0 x 0 (it reads only its own table's sizes).
+pub const NATIVE: (u32, u32) = (0, 0);
+
+/// Options of this port (page 2 of the menu). They are not in the exe's settings file (its layout is fixed), so they live in
+/// their own small text file next to it: `opensow.cfg`, one `name=0|1` per line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Extra {
+    /// Run-time texture enhancement of the zoomed-in world (docs/enhance.md).
+    pub enhance: bool,
+    /// Blurred shadow edges (docs/fx.md).
+    pub soft_shadows: bool,
+    /// Dark halo where buildings and units meet the ground (docs/fx.md).
+    pub contact_shadows: bool,
+    /// Explosions and muzzle flashes light the ground (docs/fx.md).
+    pub glow: bool,
+    /// Every turret casts a shadow, not only the A.A. turret (docs/fx.md); off by default (the original has none for the others).
+    pub turret_shadows: bool,
+    /// Run-time sound enhancement: sinc resampling, short fades, a limiter on the effects mix (`hifi`, docs/audio.md).
+    pub sound: bool,
+}
+
+impl Default for Extra {
+    fn default() -> Self {
+        Extra { enhance: true, soft_shadows: true, contact_shadows: true, glow: true, turret_shadows: false, sound: true }
+    }
+}
+
+/// The port's own settings file (current directory, like the exe's).
+pub const EXTRA_FILE: &str = "opensow.cfg";
+
+impl Extra {
+    pub fn parse(text: &str) -> Extra {
+        let mut e = Extra::default();
+        for line in text.lines() {
+            if let Some((k, v)) = line.split_once('=') {
+                let on = v.trim() != "0";
+                match k.trim() {
+                    "enhance_textures" => e.enhance = on,
+                    "soft_shadows" => e.soft_shadows = on,
+                    "contact_shadows" => e.contact_shadows = on,
+                    "explosion_glow" => e.glow = on,
+                    "turret_shadows" => e.turret_shadows = on,
+                    "enhance_sound" => e.sound = on,
+                    _ => {}
+                }
+            }
+        }
+        e
+    }
+
+    pub fn write(&self) -> String {
+        format!(
+            "enhance_textures={}\nsoft_shadows={}\ncontact_shadows={}\nexplosion_glow={}\nturret_shadows={}\nenhance_sound={}\n",
+            self.enhance as u8, self.soft_shadows as u8, self.contact_shadows as u8, self.glow as u8, self.turret_shadows as u8, self.sound as u8
+        )
+    }
+}
+
+/// Everything the menu edits: the settings file (`COptions`) and the audio object's volumes and switches, plus this port's [`Extra`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GameOptions {
     pub cfg: Options,
+    pub extra: Extra,
     pub music_volume: i32,
     pub voice_volume: i32,
     pub fx_volume: i32,
@@ -42,7 +104,7 @@ pub const FILE: &str = "State of War_1.cfg";
 impl GameOptions {
     pub fn from_file(f: &SettingsFile) -> GameOptions {
         let a = &f.audio;
-        GameOptions { cfg: f.options.clone(), music_volume: a.music_volume as i32, voice_volume: a.voice_volume as i32, fx_volume: a.fx_volume as i32, music_on: a.music_on, voice_on: a.voice_on, fx_on: a.fx_on }
+        GameOptions { cfg: f.options.clone(), extra: Extra::default(), music_volume: a.music_volume as i32, voice_volume: a.voice_volume as i32, fx_volume: a.fx_volume as i32, music_on: a.music_on, voice_on: a.voice_on, fx_on: a.fx_on }
     }
 
     pub fn to_file(&self) -> SettingsFile {
@@ -57,18 +119,34 @@ impl GameOptions {
         SettingsFile { options: self.cfg.clone(), audio }
     }
 
-    /// `0x452c30`: the file's values, or the first-run ones when it is missing or unreadable. Tests never touch the disk.
+    /// `0x452c30`: the file's values, or the first-run ones when it is missing or unreadable, except that the resolution
+    /// starts at [`NATIVE`] (the exe's 1024 x 768 would leave most of a modern screen to the scaler). Tests never touch the disk.
     pub fn load() -> GameOptions {
         if cfg!(test) {
             return GameOptions::default();
         }
-        std::fs::read(FILE).ok().and_then(|d| SettingsFile::parse(&d).ok()).map_or_else(GameOptions::default, |f| GameOptions::from_file(&f))
+        let mut o = std::fs::read(FILE).ok().and_then(|d| SettingsFile::parse(&d).ok()).map_or_else(GameOptions::first_run, |f| GameOptions::from_file(&f));
+        o.extra = std::fs::read_to_string(EXTRA_FILE).map(|t| Extra::parse(&t)).unwrap_or_default();
+        o
+    }
+
+    /// The exe's first-run values with the resolution at [`NATIVE`].
+    pub fn first_run() -> GameOptions {
+        let mut o = GameOptions::default();
+        (o.cfg.width, o.cfg.height) = NATIVE;
+        o
+    }
+
+    /// The stored resolution is [`NATIVE`].
+    pub fn native(&self) -> bool {
+        (self.cfg.width, self.cfg.height) == NATIVE
     }
 
     /// `0x453310` (O.K. in the options menu): writes the file; a write error is ignored like a read-only folder would be.
     pub fn save(&self) {
         if !cfg!(test) {
             let _ = std::fs::write(FILE, self.to_file().write());
+            let _ = std::fs::write(EXTRA_FILE, self.extra.write());
         }
     }
 }
@@ -153,6 +231,38 @@ pub enum Hit {
     Arrow(usize),
     Ok,
     Cancel,
+    /// The arrow that switches to page `n` (0 = the exe's page, 1 = this port's options).
+    Page(usize),
+    /// Row `k` of page 2 ([`OWN_ROWS`]).
+    Extra(usize),
+}
+
+/// Pages of the menu: the exe's own, then the port's (`Hit::Page`).
+pub const PAGES: usize = 2;
+
+/// Rows of page 2: (label, one-line explanation). Row `k` sits at [`own_rect`]; the value (On / Off) is written at [`OWN_VALUE_X`].
+pub const OWN_ROWS: [(&str, &str); 6] = [
+    ("Enhanced textures", "Smooths sprites and the ground when you zoom in"),
+    ("Soft shadows", "Blurs the edges of shadows"),
+    ("Contact shadows", "Dark halo where buildings and units meet the ground"),
+    ("Explosion glow", "Explosions and muzzle flashes light the ground"),
+    ("Turret shadows", "Every turret casts a shadow (original: only A.A.)"),
+    ("Enhanced sound", "Cleaner, smoother effects, speech and music"),
+];
+const OWN_VALUE_X: i32 = 235;
+
+/// Click area of row `k` of page 2 (design space).
+fn own_rect(k: usize) -> ui::Rect {
+    ui::Rect { x: 62, y: 135 + 38 * k as i32, w: 300, h: 20 }
+}
+
+/// Click area of the page arrow that leads to page `to` (a right arrow at the right edge going forward, a left one at the left edge back).
+fn page_rect(to: usize) -> ui::Rect {
+    if to == 1 {
+        ui::Rect { x: 596, y: 227, w: 32, h: 28 }
+    } else {
+        ui::Rect { x: 12, y: 227, w: 32, h: 28 }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,7 +290,12 @@ pub struct OptionsMenu {
     tick_rest: f64,
     strings: Option<LangFile>,
     fonts: std::rc::Rc<(opensow_formats::font::Font, opensow_formats::font::Font)>,
+    /// Unicode text for languages other than English (the bitmap fonts only have ASCII, the exe draws GDI Times New Roman Bold).
+    ugdi: Option<crate::gdi::Gdi>,
+    ubig: Option<crate::gdi::Gdi>,
     hover: Option<Hit>,
+    /// Which page is shown (0 = the exe's controls, 1 = this port's).
+    pub page: usize,
     /// Mouse position in the 640x480 design space.
     cursor: (i32, i32),
     canvas: Vec<u32>,
@@ -212,8 +327,8 @@ const LABEL_TEXT: [usize; 11] = [9, 10, 11, 14, 16, 15, 13, 12, 18, 19, 17];
 
 impl OptionsMenu {
     pub fn new(assets: &mut Assets, opts: GameOptions) -> OptionsMenu {
-        let language = assets.game.resolve("Data\\lang.dat").and_then(|p| std::fs::read(p).ok()).and_then(|d| lang::read_lang_dat(&d)).unwrap_or(lang::Language::English);
-        let strings = assets.game.resolve(&format!("Data\\Language\\{}", language.file_name())).and_then(|p| std::fs::read(p).ok()).and_then(|d| LangFile::parse(&d).ok());
+        let language = assets.game.language();
+        let strings = assets.game.resolve(&format!("Data\\Language\\{}", language.file_name())).and_then(|p| std::fs::read(p).ok()).and_then(|d| LangFile::parse(&d).ok()).map(|f| f.with_supplement(language));
         OptionsMenu {
             saved: opts.clone(),
             opts,
@@ -227,7 +342,10 @@ impl OptionsMenu {
             tick_rest: 0.0,
             strings,
             fonts: assets.font("medium"),
+            ugdi: crate::gdi::Gdi::for_language(language, 17.0),
+            ubig: crate::gdi::Gdi::for_language(language, 30.0),
             hover: None,
+            page: 0,
             cursor: (-1, -1),
             canvas: vec![0; W * H],
             sounds: Vec::new(),
@@ -257,6 +375,13 @@ impl OptionsMenu {
         if inside(0) {
             return Some(Hit::Cancel);
         }
+        let to = if self.page == 0 { 1 } else { 0 };
+        if page_rect(to).contains(p.0, p.1) {
+            return Some(Hit::Page(to));
+        }
+        if self.page == 1 {
+            return (0..OWN_ROWS.len()).find(|&k| own_rect(k).contains(p.0, p.1)).map(Hit::Extra);
+        }
         if let Some(k) = (0..14).find(|&k| inside(ARROW0 + k)) {
             return Some(Hit::Arrow(k));
         }
@@ -265,11 +390,20 @@ impl OptionsMenu {
 
     /// Design-space point at the centre of a control (for scripted clicks).
     pub fn centre(&self, hit: Hit) -> (i32, i32) {
+        let own = match hit {
+            Hit::Page(to) => Some(page_rect(to)),
+            Hit::Extra(k) => Some(own_rect(k)),
+            _ => None,
+        };
+        if let Some(r) = own {
+            return (r.x + r.w / 2, r.y + r.h / 2);
+        }
         let frame = match hit {
             Hit::Ok => 1,
             Hit::Cancel => 0,
             Hit::Arrow(k) => ARROW0 + k,
             Hit::Label(k) => LABEL0 + k,
+            Hit::Page(_) | Hit::Extra(_) => unreachable!(),
         };
         self.rect(frame).map_or((0, 0), |r| (r.x + r.w / 2, r.y + r.h / 2))
     }
@@ -316,6 +450,22 @@ impl OptionsMenu {
                 self.opts = back.clone();
                 return Event::Cancel(back);
             }
+            Hit::Page(to) => {
+                self.sounds.push(33); // options-arrow
+                self.page = to.min(PAGES - 1);
+            }
+            Hit::Extra(k) => {
+                self.sounds.push(34); // options-onoff
+                match k {
+                    0 => o.extra.enhance ^= true,
+                    1 => o.extra.soft_shadows ^= true,
+                    2 => o.extra.contact_shadows ^= true,
+                    3 => o.extra.glow ^= true,
+                    4 => o.extra.turret_shadows ^= true,
+                    5 => o.extra.sound ^= true,
+                    _ => {}
+                }
+            }
             Hit::Label(k) => {
                 self.sounds.push(34); // options-onoff
                 match k {
@@ -343,7 +493,7 @@ impl OptionsMenu {
                     10 | 11 => o.cfg.scroll_a = if up { (o.cfg.scroll_a + 1).min(10) } else { o.cfg.scroll_a.saturating_sub(1) },
                     _ => {
                         if let Some(i) = RESOLUTIONS.iter().position(|&r| r == (o.cfg.width, o.cfg.height)) {
-                            let j = if up { (i + 1).min(4) } else { i.saturating_sub(1) };
+                            let j = if up { (i + 1).min(RESOLUTIONS.len() - 1) } else { i.saturating_sub(1) };
                             (o.cfg.width, o.cfg.height) = RESOLUTIONS[j];
                         }
                     }
@@ -355,7 +505,15 @@ impl OptionsMenu {
 
     fn text(&self, canvas: &mut [u32], s: &str, x: i32, y: i32, bright: bool) {
         let fg = if bright { (255, 255, 255) } else { (180, 180, 180) };
+        if let Some(g) = &self.ugdi {
+            g.draw_shadowed(canvas, W, H, s, x as f32, y as f32 - 3.0, 1.0, fg, (0, 0, 0));
+            return;
+        }
         ui::text(canvas, W, H, &self.fonts, s, x, y, 1.0, fg, (0, 30, 0));
+    }
+
+    fn text_w(&self, s: &str) -> i32 {
+        self.ugdi.as_ref().map_or_else(|| ui::text_width(&self.fonts, s, 1.0), |g| g.width(s))
     }
 
     fn number(&self, canvas: &mut [u32], x: i32, y: i32, value: i32) {
@@ -378,6 +536,74 @@ impl OptionsMenu {
         }
     }
 
+    /// The picture has the exe's arrow slots baked in; page 2 has no such arrows, so each slot's rectangle is filled from its
+    /// surroundings (bilinear between the pixels just outside it).
+    fn wipe_arrow_slots(&self, canvas: &mut [u32]) {
+        let at = |c: &[u32], x: i32, y: i32| c[(y.clamp(0, H as i32 - 1) as usize) * W + x.clamp(0, W as i32 - 1) as usize];
+        for k in 0..14 {
+            let Some(r) = self.rect(ARROW0 + k) else { continue };
+            let (x0, y0, x1, y1) = (r.x - 2, r.y - 2, r.x + r.w + 2, r.y + r.h + 2);
+            let copy = canvas.to_vec();
+            for y in y0.max(0)..y1.min(H as i32) {
+                for x in x0.max(0)..x1.min(W as i32) {
+                    let (fy, fx) = ((y - y0) as f32 / (y1 - y0) as f32, (x - x0) as f32 / (x1 - x0) as f32);
+                    let lerp = |a: u32, b: u32, t: f32, sh: u32| (((a >> sh & 255) as f32 * (1.0 - t) + (b >> sh & 255) as f32 * t) as u32) << sh;
+                    let (top, bottom) = (at(&copy, x, y0 - 1), at(&copy, x, y1));
+                    let (left, right) = (at(&copy, x0 - 1, y), at(&copy, x1, y));
+                    let mix = |sh: u32| (lerp(top, bottom, fy, sh) + lerp(left, right, fx, sh)) / 2 & (255 << sh);
+                    canvas[y as usize * W + x as usize] = mix(16) | mix(8) | mix(0);
+                }
+            }
+        }
+    }
+
+    /// Page 2: this port's options (the same picture and cogs; one row per [`OWN_ROWS`] entry, label and On / Off like page 1).
+    fn render_extra(&self, canvas: &mut [u32]) {
+        let t = "Options";
+        let tw = self.text_w(t);
+        self.text(canvas, t, W as i32 / 2 - tw / 2 - 0x2a, 10, true);
+        self.text(canvas, "ENHANCEMENTS", 21, 62, true);
+        let lh = ui::text_height(&self.fonts, 1.0);
+        let e = &self.opts.extra;
+        let values = [e.enhance, e.soft_shadows, e.contact_shadows, e.glow, e.turret_shadows, e.sound];
+        for (k, (label, hint)) in OWN_ROWS.iter().enumerate() {
+            let r = own_rect(k);
+            let hot = self.hover == Some(Hit::Extra(k));
+            self.text(canvas, label, r.x, r.y + (r.h - lh) / 2, hot);
+            let word = self.string(if values[k] { 267 } else { 268 }).to_owned();
+            let word = if word.is_empty() { (if values[k] { "On" } else { "Off" }).to_owned() } else { word };
+            self.text(canvas, &word, OWN_VALUE_X, r.y + (r.h - lh) / 2, hot);
+            self.text(canvas, hint, r.x, r.y + r.h + 4, false);
+        }
+    }
+
+    /// The arrow that leads to the other page, and the page number at the top right.
+    fn render_page_arrow(&self, canvas: &mut [u32]) {
+        let to = if self.page == 0 { 1 } else { 0 };
+        let r = page_rect(to);
+        // a green triangle in the exe's arrow colours, drawn here (the exe's arrow art comes with its own slot)
+        let hot = self.hover == Some(Hit::Page(to));
+        let (fill, edge) = if hot { ((140, 255, 150), (20, 120, 40)) } else { ((40, 220, 70), (10, 80, 25)) };
+        let (cx, cy) = (r.x + r.w / 2, r.y + r.h / 2);
+        let dir = if to == 1 { 1.0f32 } else { -1.0 };
+        for dy in -12i32..=12 {
+            for dx in -12i32..=12 {
+                // distance from the base line towards the apex, 0..=20; half-height shrinks linearly to 0 at the apex
+                let t = (dx as f32 * dir + 10.0) / 20.0;
+                let half = 11.0 * (1.0 - t);
+                let inside = |shrink: f32| (0.0..=1.0).contains(&t) && (dy as f32).abs() <= half - shrink && t >= shrink / 20.0 && t <= 1.0 - shrink / 11.0;
+                if inside(0.0) {
+                    let c = if inside(2.0) { fill } else { edge };
+                    let (x, y) = (cx + dx, cy + dy);
+                    if (0..W as i32).contains(&x) && (0..H as i32).contains(&y) {
+                        canvas[y as usize * W + x as usize] = pack(c.0, c.1, c.2);
+                    }
+                }
+            }
+        }
+        self.text(canvas, &format!("{}/{}", self.page + 1, PAGES), W as i32 - 56, 10, false);
+    }
+
     fn render(&mut self) {
         let mut canvas = std::mem::take(&mut self.canvas);
         canvas.fill(0);
@@ -389,6 +615,9 @@ impl OptionsMenu {
                     canvas[y * W + x] = pack(bg.rgb[i], bg.rgb[i + 1], bg.rgb[i + 2]);
                 }
             }
+        }
+        if self.page == 1 {
+            self.wipe_arrow_slots(&mut canvas);
         }
         // the two turning cogs: both shadows, then both cogs (`0x44afea..0x44b093`), under every button
         let (f1, f2) = self.gears.frames();
@@ -406,10 +635,13 @@ impl OptionsMenu {
         for (f, x, y, mode) in &cogs {
             blit(&mut canvas, f, *x, *y, *mode);
         }
+        if self.page == 1 {
+            self.render_extra(&mut canvas);
+        } else {
         let on = |k: usize| self.hover == Some(Hit::Label(k));
         // title and headings
         let t = self.string(4).to_owned();
-        let tw = ui::text_width(&self.fonts, &t, 1.0);
+        let tw = self.text_w(&t);
         self.text(&mut canvas, &t, W as i32 / 2 - tw / 2 - 0x2a, 10, true);
         for (idx, x, y) in [(6, 21, 62), (7, 21, 255), (8, 343, 62)] {
             let s = self.string(idx).to_owned();
@@ -430,7 +662,7 @@ impl OptionsMenu {
         }
         // resolution caption
         if let Some(r) = self.rect(RES_FRAME) {
-            let cap = format!("{}x{}", o.cfg.width, o.cfg.height);
+            let cap = if o.native() { "NATIVE".to_owned() } else { format!("{}x{}", o.cfg.width, o.cfg.height) };
             self.text(&mut canvas, &cap, r.x, r.y + (r.h - lh) / 2, on(10));
         }
         // arrows
@@ -446,11 +678,20 @@ impl OptionsMenu {
         for (x, k, v) in [(255, 0, o.cfg.detail as i32), (550, 2, o.fx_volume), (550, 4, o.voice_volume), (550, 6, o.music_volume), (284, 8, o.cfg.scroll_b as i32), (284, 10, o.cfg.scroll_a as i32)] {
             self.number(&mut canvas, x, row_y(k), v);
         }
+        }
+        self.render_page_arrow(&mut canvas);
         for (i, hit) in [Hit::Cancel, Hit::Ok].into_iter().enumerate() {
-            let _ = hit;
             if let Some(f) = self.frames.get(i) {
                 let (x, y) = Self::top_left(f);
-                ui::sprite(&mut canvas, W, H, f, x, y, 1.0);
+                // the art carries "O.K." / "CANCEL"; other languages get their string (file 21 / 22) in the same place and colour
+                match &self.ubig {
+                    Some(g) => {
+                        let t = self.string(if hit == Hit::Ok { 21 } else { 22 }).to_uppercase();
+                        let (tx, ty) = (x + (f.width as i32 - g.width(&t)) / 2, y + (f.height as i32 - 30) / 2);
+                        g.draw_shadowed(&mut canvas, W, H, &t, tx as f32, ty as f32, 1.0, (232, 96, 56), (30, 8, 0));
+                    }
+                    None => ui::sprite(&mut canvas, W, H, f, x, y, 1.0),
+                }
             }
         }
         self.canvas = canvas;
@@ -464,35 +705,14 @@ impl OptionsMenu {
             self.tick_rest -= ticks as f64;
             self.gears.step(ticks);
         }
-        self.render();
-        buf.fill(0);
+        opensow_viewer::record::cpu(|| self.render());
+        ui::clear(buf, w, h, 0);
         let (ox, oy, s) = fit(w, h);
         // the larger background fills what the 640x480 picture does not cover (`0x44ade0`)
         if let Some(bg) = &self.bg_full {
-            for y in 0..h {
-                let sy = (y * bg.h / h).min(bg.h - 1);
-                for x in 0..w {
-                    let sx = (x * bg.w / w).min(bg.w - 1);
-                    let i = (sy * bg.w + sx) * 3;
-                    buf[y * w + x] = pack(bg.rgb[i] / 2, bg.rgb[i + 1] / 2, bg.rgb[i + 2] / 2);
-                }
-            }
+            ui::stretch(buf, w, h, bg, true);
         }
-        let (dw, dh) = ((W as f32 * s) as usize, (H as f32 * s) as usize);
-        for y in 0..dh.min(h) {
-            let sy = ((y as f32 / s) as usize).min(H - 1);
-            let dy = y + oy as usize;
-            if dy >= h {
-                break;
-            }
-            for x in 0..dw {
-                let dx = x + ox as usize;
-                if dx >= w {
-                    break;
-                }
-                buf[dy * w + dx] = self.canvas[sy * W + ((x as f32 / s) as usize).min(W - 1)];
-            }
-        }
+        crate::ui::page(buf, w, h, &self.canvas, W, H, ox as usize, oy as usize, s);
     }
 }
 
@@ -514,7 +734,10 @@ mod tests {
             tick_rest: 0.0,
             strings: None,
             fonts: std::rc::Rc::new((opensow_formats::font::Font::new(Default::default()), opensow_formats::font::Font::new(Default::default()))),
+            ugdi: None,
+            ubig: None,
             hover: None,
+            page: 0,
             cursor: (0, 0),
             canvas: vec![0; W * H],
             sounds: Vec::new(),
@@ -574,12 +797,17 @@ mod tests {
     fn resolution_steps_through_the_table() {
         let mut m = menu(GameOptions::default());
         assert_eq!((m.opts.cfg.width, m.opts.cfg.height), (1024, 768));
+        for _ in 0..4 {
+            m.press(Hit::Arrow(13));
+        }
+        assert_eq!((m.opts.cfg.width, m.opts.cfg.height), (3840, 2160));
         m.press(Hit::Arrow(13));
+        assert!(m.opts.native(), "NATIVE comes after 4K");
         m.press(Hit::Arrow(13));
-        m.press(Hit::Arrow(13));
-        assert_eq!((m.opts.cfg.width, m.opts.cfg.height), (1920, 1080), "last entry stays");
+        assert!(m.opts.native(), "last entry stays");
         m.press(Hit::Arrow(12));
-        assert_eq!((m.opts.cfg.width, m.opts.cfg.height), (1600, 900));
+        m.press(Hit::Arrow(12));
+        assert_eq!((m.opts.cfg.width, m.opts.cfg.height), (2560, 1440));
         for _ in 0..10 {
             m.press(Hit::Arrow(12));
         }
@@ -604,6 +832,40 @@ mod tests {
         let Event::Done(d) = m.press(Hit::Ok) else { panic!() };
         assert!(!d.cfg.flag_a);
         assert_eq!(m.sounds.last(), Some(&38));
+    }
+
+    #[test]
+    fn page_arrow_switches_pages_and_row_toggles_enhancement() {
+        let mut m = menu(GameOptions::default());
+        assert_eq!(m.page, 0);
+        assert!(m.opts.extra.enhance, "enhanced textures start on");
+        // page 1: the arrow on the right leads on, and its area is found by the pointer
+        let c = m.centre(Hit::Page(1));
+        assert_eq!(m.hit_at(c), Some(Hit::Page(1)));
+        assert_eq!(m.hit_at(m.centre(Hit::Extra(0))), None, "page 2 rows are not clickable on page 1");
+        m.press(Hit::Page(1));
+        assert_eq!(m.page, 1);
+        assert_eq!(m.hit_at(m.centre(Hit::Extra(0))), Some(Hit::Extra(0)));
+        assert_eq!(m.hit_at(m.centre(Hit::Page(0))), Some(Hit::Page(0)), "the way back is on the left");
+        m.press(Hit::Extra(0));
+        assert!(!m.opts.extra.enhance);
+        // CANCEL puts the file's values back, this port's too
+        let Event::Cancel(c) = m.press(Hit::Cancel) else { panic!() };
+        assert!(c.extra.enhance);
+        m.press(Hit::Page(0));
+        assert_eq!(m.page, 0);
+    }
+
+    #[test]
+    fn own_settings_file_round_trips() {
+        for on in [true, false] {
+            let e = Extra { enhance: on, soft_shadows: !on, contact_shadows: on, glow: !on, turret_shadows: on, sound: !on };
+            assert_eq!(Extra::parse(&e.write()), e);
+        }
+        assert_eq!(Extra::parse(""), Extra::default(), "a missing file keeps the defaults");
+        assert_eq!(Extra::parse("enhance_textures=0\nfuture=1\n"), Extra { enhance: false, ..Extra::default() });
+        assert_eq!(Extra::parse("enhance_sound=0\n"), Extra { sound: false, ..Extra::default() });
+        assert!(Extra::default().sound, "enhanced sound starts on");
     }
 
     #[test]

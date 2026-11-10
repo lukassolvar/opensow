@@ -6,6 +6,7 @@
 //! (the object records of the real state are not decoded far enough to write), so loading restarts that mission.
 
 use opensow_formats::savespark as spark;
+use opensow_formats::Edition;
 use crate::assets::{load_backdrop, Assets};
 use crate::ui::{self, Rect};
 use opensow_formats::lang::{self, LangFile};
@@ -37,6 +38,8 @@ pub enum Mode {
 pub struct Store {
     pub write: PathBuf,
     pub also: Option<PathBuf>,
+    /// The campaign new saves are flagged with (docs/warmonger.md); every edition shares the slots.
+    pub edition: Edition,
 }
 
 impl Store {
@@ -50,7 +53,41 @@ impl Store {
                 home.join(".local/share/opensow/Savegame")
             }
         });
-        Store { write, also: game.resolve("Savegame").filter(|p| p.is_dir()) }
+        // the install's own `Savegame` folder only belongs to the base game
+        let also = (game.edition == Edition::Original).then(|| game.resolve("Savegame").filter(|p| p.is_dir())).flatten();
+        Store { write, also, edition: game.edition }
+    }
+
+    /// The progress file of the campaign: `player.cfg`, Warmonger's own name is `player2.cfg` (its exe, `0x87f24`).
+    fn progress_name(&self) -> &'static str {
+        if self.edition == Edition::Warmonger {
+            "player2.cfg"
+        } else {
+            "player.cfg"
+        }
+    }
+
+    /// The campaign progress (`Savegame\player.cfg`, `CPassedLevels`): our folder first, then the install's own file.
+    pub fn load_progress(&self) -> Option<opensow_formats::config::PassedLevels> {
+        let mut dirs = vec![self.write.clone()];
+        dirs.extend(self.also.clone());
+        dirs.iter().find_map(|d| {
+            let hit = std::fs::read_dir(d).ok()?.flatten().find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(self.progress_name()))?;
+            opensow_formats::config::PassedLevels::parse(&std::fs::read(hit.path()).ok()?).ok()
+        })
+    }
+
+    /// Writes the progress file (`0x456ac0`); the filler bytes are random like the exe's.
+    pub fn save_progress(&self, p: &opensow_formats::config::PassedLevels) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.write)?;
+        let mut x = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64) | 1;
+        let bytes = p.write(|| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 24) as u8
+        });
+        std::fs::write(self.write.join(self.progress_name()), bytes)
     }
 
     fn name(slot: usize, ext: &str) -> String {
@@ -94,17 +131,17 @@ impl Store {
         Some(info.thumbnail.iter().map(|&p| save::thumb_to_565(p, info.extra)).collect())
     }
 
-    /// The level of a slot and the game snapshot it carries (empty for a save of the original game or an old one of ours: the
-    /// level restarts then); `None` when the file is missing or not a savegame.
-    pub fn level_of(&self, slot: usize) -> Option<(String, Vec<u8>)> {
+    /// The level of a slot, the campaign it belongs to and the game snapshot it carries (empty for a save of the original game or an
+    /// old one of ours: the level restarts then); `None` when the file is missing or not a savegame.
+    pub fn level_of(&self, slot: usize) -> Option<(String, Edition, Vec<u8>)> {
         let data = save::huff_decode(&self.read(slot, "data")?).ok()?;
-        Some((level_from_state(&data)?, snapshot_from_state(&data)))
+        Some((level_from_state(&data)?, edition_from_state(&data), snapshot_from_state(&data)))
     }
 
     /// Writes `.data` then `.info` (the exe's order, `0x428bb0`).
     pub fn write(&self, slot: usize, title: &str, level: &str, snapshot: &[u8], thumb: &[u16]) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.write)?;
-        let data = save::huff_encode(&state_bytes(level, snapshot));
+        let data = save::huff_encode(&state_bytes(level, self.edition, snapshot));
         std::fs::write(self.write.join(Self::name(slot, "data")), &data)?;
         let (time, date, weekday) = clock_strings(std::time::SystemTime::now());
         let info = SaveInfo { stamp: save::data_checksum(&data), name: title.to_owned(), time, date, weekday, extra: save::PIXEL_565, thumbnail: thumb.to_vec() };
@@ -128,77 +165,66 @@ pub fn unpack_payload(p: &[u8]) -> Option<(&[u8], &[u8])> {
 }
 
 /// The decompressed state stream we write: **the original's stream** (`World::to_state`, docs/savegame.md) and, after its
-/// `Checksum` tag, where the exe's loader never reads, an OpenSOW extension (`OpenSOW3`, the level's name and our world snapshot)
-/// so that OpenSOW continues exactly where it left off while the exe-layout part stays a valid savegame. An empty payload gives
-/// the old level-only form (head + `OpenSOW1`: the level restarts).
-pub fn state_bytes(level: &str, payload: &[u8]) -> Vec<u8> {
+/// `Checksum` tag, where the exe's loader never reads, an OpenSOW extension (`OpenSOW4`: the level's name, the campaign the save
+/// belongs to (docs/warmonger.md) and our world snapshot) so that OpenSOW continues exactly where it left off while the exe-layout
+/// part stays a valid savegame. An empty payload gives the level-only form: the head and the same extension without a snapshot
+/// (the level restarts). Saves of older builds are not read.
+pub fn state_bytes(level: &str, edition: Edition, payload: &[u8]) -> Vec<u8> {
     let number = level.trim_start_matches(|c: char| !c.is_ascii_digit()).parse::<u32>().unwrap_or(0);
-    let Some((stream, ours)) = unpack_payload(payload).filter(|(s, _)| !s.is_empty()) else {
-        let head = StateHead { level: number, rng_index: 0, v_5baafc: 0, flag_49a339: false, v_5baad8: 0, v_5baadc: 0, v_5baac4: 0, v_5baac8: 0, flag_5baa99: false, v_89cf50: 0, len: 0 };
-        let mut o = head.to_bytes();
-        save::put_mfc_string(&mut o, "OpenSOW1");
-        save::put_mfc_string(&mut o, level);
-        return o;
+    let (mut o, ours) = match unpack_payload(payload).filter(|(s, _)| !s.is_empty()) {
+        Some((stream, ours)) => (stream.to_vec(), ours),
+        None => (StateHead { level: number, rng_index: 0, v_5baafc: 0, flag_49a339: false, v_5baad8: 0, v_5baadc: 0, v_5baac4: 0, v_5baac8: 0, flag_5baa99: false, v_89cf50: 0, len: 0 }.to_bytes(), &[][..]),
     };
-    let mut o = stream.to_vec();
-    if !ours.is_empty() {
-        save::put_mfc_string(&mut o, "OpenSOW3");
-        save::put_mfc_string(&mut o, level);
-        o.extend_from_slice(&(ours.len() as u32).to_le_bytes());
-        o.extend_from_slice(ours);
-    }
+    save::put_mfc_string(&mut o, "OpenSOW4");
+    save::put_mfc_string(&mut o, level);
+    o.push(u8::from(edition == Edition::Warmonger));
+    o.extend_from_slice(&(ours.len() as u32).to_le_bytes());
+    o.extend_from_slice(ours);
     o
 }
 
-/// The extension after a genuine stream: `(level name, our snapshot)`.
-fn extension(tail: &[u8]) -> Option<(String, Vec<u8>)> {
+/// The extension: `(level name, campaign, our snapshot)`.
+fn extension(tail: &[u8]) -> Option<(String, Edition, Vec<u8>)> {
     let mut r = opensow_formats::Reader::new(tail);
-    let tag = opensow_formats::saveobj::mfc_string(&mut r, "tag").ok()?;
-    let name = opensow_formats::saveobj::mfc_string(&mut r, "level").ok()?;
-    if tag != "OpenSOW3" {
+    if opensow_formats::saveobj::mfc_string(&mut r, "tag").ok()? != "OpenSOW4" {
         return None;
     }
+    let name = opensow_formats::saveobj::mfc_string(&mut r, "level").ok()?;
+    let edition = if r.u8("edition").ok()? == 1 { Edition::Warmonger } else { Edition::Original };
     let n = r.u32("length").ok()? as usize;
-    Some((name, r.bytes(n, "snapshot").ok()?.to_vec()))
+    Some((name, edition, r.bytes(n, "snapshot").ok()?.to_vec()))
 }
 
-/// The payload a state stream gives `Play::restore`: a genuine stream (ours or the original's) carries the stream and possibly
-/// our snapshot; a pre-bridge `OpenSOW2` file only its snapshot; anything else (level-only) gives an empty payload.
-pub fn snapshot_from_state(data: &[u8]) -> Vec<u8> {
-    if let Ok((_, used)) = opensow_formats::save::State::parse_prefix(data, 1) {
-        let ours = extension(&data[used..]).map(|e| e.1).unwrap_or_default();
-        return pack_payload(&data[..used], &ours);
-    }
-    let Ok(head) = StateHead::parse(data) else { return Vec::new() };
-    let Some(rest) = data.get(head.len..) else { return Vec::new() };
-    let mut r = opensow_formats::Reader::new(rest);
-    let (Ok(tag), Ok(_)) = (opensow_formats::saveobj::mfc_string(&mut r, "tag"), opensow_formats::saveobj::mfc_string(&mut r, "level")) else { return Vec::new() };
-    if tag != "OpenSOW2" {
-        return Vec::new();
-    }
-    let at = rest.len() - r.remaining();
-    match rest.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize) {
-        Some(n) => rest.get(at + 4..at + 4 + n).map(|s| pack_payload(&[], s)).unwrap_or_default(),
-        None => Vec::new(),
-    }
-}
-
-/// The level name out of a state stream: ours has it after the marker; a genuine one only has the number (`M01`...).
-pub fn level_from_state(data: &[u8]) -> Option<String> {
+/// Splits a state stream into the exe-layout part and the level number its head holds: `(length, number, genuine)` where
+/// `genuine` is a full stream (not just the level-only head).
+fn split_state(data: &[u8]) -> Option<(usize, u32, bool)> {
     if let Ok((st, used)) = opensow_formats::save::State::parse_prefix(data, 1) {
-        if let Some((name, _)) = extension(&data[used..]).filter(|e| !e.0.is_empty()) {
-            return Some(name);
-        }
-        return (st.head.level > 0).then(|| format!("M{:02}", st.head.level));
+        return Some((used, st.head.level, true));
     }
     let head = StateHead::parse(data).ok()?;
-    let mut r = opensow_formats::Reader::new(data.get(head.len..)?);
-    if let (Ok(tag), Ok(name)) = (opensow_formats::saveobj::mfc_string(&mut r, "tag"), opensow_formats::saveobj::mfc_string(&mut r, "level")) {
-        if (tag == "OpenSOW1" || tag == "OpenSOW2") && !name.is_empty() {
-            return Some(name);
-        }
+    Some((head.len, head.level, false))
+}
+
+/// Which campaign a state stream was saved in (a stream without the extension, e.g. the original's, is the base game's).
+pub fn edition_from_state(data: &[u8]) -> Edition {
+    split_state(data).and_then(|(used, ..)| extension(data.get(used..)?)).map_or(Edition::Original, |e| e.1)
+}
+
+/// The payload a state stream gives `Play::restore`: the stream and our snapshot, or empty (the level starts over).
+pub fn snapshot_from_state(data: &[u8]) -> Vec<u8> {
+    match split_state(data) {
+        Some((used, _, true)) => pack_payload(&data[..used], &data.get(used..).and_then(extension).map(|e| e.2).unwrap_or_default()),
+        _ => Vec::new(),
     }
-    (head.level > 0).then(|| format!("M{:02}", head.level))
+}
+
+/// The level name out of a state stream: the extension has it; a stream without one only has the number (`M01`...).
+pub fn level_from_state(data: &[u8]) -> Option<String> {
+    let (used, number, _) = split_state(data)?;
+    if let Some((name, ..)) = data.get(used..).and_then(extension).filter(|e| !e.0.is_empty()) {
+        return Some(name);
+    }
+    (number > 0).then(|| format!("M{number:02}"))
 }
 
 /// `"%X"`, `"%b %d, %Y"` and `"%a %H:%M"` of the exe's info writer (`0x42be20`), in UTC (the exe uses the local time zone).
@@ -273,8 +299,8 @@ pub enum Event {
     None,
     /// CANCEL or Esc: the in-game page resumes the mission (state 7), the one from the main menu goes back (state 0x1c).
     Cancel,
-    /// LOAD on a valid row: this level, with the saved game snapshot (empty = start the level over).
-    Load(String, Vec<u8>),
+    /// LOAD on a valid row: this level of this campaign, with the saved game snapshot (empty = start the level over).
+    Load(String, Edition, Vec<u8>),
     /// LOAD where the state cannot be read: the exe returns to the main menu.
     LoadFailed(usize),
     /// SAVE: written; the game resumes and says "01-game-saved".
@@ -316,6 +342,9 @@ pub struct SaveUi {
     canvas: Vec<u32>,
     /// GDI stand-in for the row text (sharp at any zoom); `None` falls back to the bitmap font.
     gdi: Option<crate::gdi::Gdi>,
+    /// Unicode title (28 px) and button labels (17 px) for languages other than English; the bitmap fonts only have ASCII.
+    utitle: Option<crate::gdi::Gdi>,
+    ubtn: Option<crate::gdi::Gdi>,
     /// Row texts `(text, x, y, colour)` of the last render, drawn by `draw` on the scaled page.
     texts: std::cell::RefCell<Vec<(String, i32, i32, (u8, u8, u8))>>,
     /// Effect ids for the game to play: 30 hover, 38 LOAD/SAVE, 39 CANCEL, 32 typing, 40 screenshot.
@@ -361,11 +390,13 @@ fn fit(w: usize, h: usize) -> (f32, f32, f32) {
 impl SaveUi {
     /// `level` is the running mission (what a save stores); `tick` is not needed to open.
     pub fn new(assets: &mut Assets, mode: Mode, level: &str, store: Store) -> SaveUi {
-        let language = assets.game.resolve("Data\\lang.dat").and_then(|p| std::fs::read(p).ok()).and_then(|d| lang::read_lang_dat(&d)).unwrap_or(lang::Language::English);
-        let strings = assets.game.resolve(&format!("Data\\Language\\{}", language.file_name())).and_then(|p| std::fs::read(p).ok()).and_then(|d| LangFile::parse(&d).ok());
+        let language = assets.game.language();
+        let strings = assets.game.resolve(&format!("Data\\Language\\{}", language.file_name())).and_then(|p| std::fs::read(p).ok()).and_then(|d| LangFile::parse(&d).ok()).map(|f| f.with_supplement(language));
         let frames = assets.game.resolve("Data\\Sprites2\\Menu\\loadsave_b.tsp").and_then(|p| std::fs::read(p).ok()).and_then(|d| sprite::parse(&d, Kind::Color).ok()).unwrap_or_default();
         let mut ui = SaveUi::with_parts(mode, level, store, Texts::from(strings.as_ref()), frames, assets.font("medium"), assets.font("big"));
         ui.gdi = crate::gdi::Gdi::load();
+        ui.utitle = crate::gdi::Gdi::for_language(language, 28.0);
+        ui.ubtn = crate::gdi::Gdi::for_language(language, 17.0);
         ui.limit_font = assets.color_font("font02_light");
         ui.bg = load_backdrop(&assets.game, "Load");
         ui.bg_full = load_backdrop(&assets.game, "Load2");
@@ -375,7 +406,7 @@ impl SaveUi {
 
     pub fn with_parts(mode: Mode, level: &str, store: Store, text: Texts, frames: Vec<Frame>, fonts: std::rc::Rc<(opensow_formats::font::Font, opensow_formats::font::Font)>, big: std::rc::Rc<(opensow_formats::font::Font, opensow_formats::font::Font)>) -> SaveUi {
         let slots = (0..ROWS).map(|i| store.slot(i, &text)).collect();
-        SaveUi { mode, store, text, slots, hover: None, selected: None, hover_btn: None, thumb: vec![0; save::THUMB_W * save::THUMB_H], level: level.to_owned(), snapshot: Vec::new(), needs_capture: mode == Mode::Save, bg: None, bg_full: None, frames, fonts, big, limit_font: None, tick: 0, canvas: vec![0; W * H], gdi: None, texts: Default::default(), sounds: Vec::new(), sparks: Vec::new(), spark_frame: None, spark_rng: 0x2545_f491 }
+        SaveUi { mode, store, text, slots, hover: None, selected: None, hover_btn: None, thumb: vec![0; save::THUMB_W * save::THUMB_H], level: level.to_owned(), snapshot: Vec::new(), needs_capture: mode == Mode::Save, bg: None, bg_full: None, frames, fonts, big, limit_font: None, tick: 0, canvas: vec![0; W * H], gdi: None, utitle: None, ubtn: None, texts: Default::default(), sounds: Vec::new(), sparks: Vec::new(), spark_frame: None, spark_rng: 0x2545_f491 }
     }
 
     /// The level a save stores (headless screenshots have no running mission).
@@ -491,7 +522,7 @@ impl SaveUi {
                 }
                 self.sounds.push(38);
                 match self.store.level_of(row) {
-                    Some((level, snapshot)) => Event::Load(level, snapshot),
+                    Some((level, edition, snapshot)) => Event::Load(level, edition, snapshot),
                     None => Event::LoadFailed(row),
                 }
             }
@@ -696,24 +727,38 @@ impl SaveUi {
         }
         // title and buttons
         let title = if self.mode == Mode::Load { &self.text.load_title } else { &self.text.save_title };
-        ui::text(&mut canvas, W, H, &self.big, title, 213 + 2, 4 + 2, 1.0, (0, 0, 0), (0, 0, 0));
-        ui::text(&mut canvas, W, H, &self.big, title, 213, 4, 1.0, ORANGE, (0, 30, 0));
+        match &self.utitle {
+            Some(g) => g.draw_shadowed(&mut canvas, W, H, title, 213.0, 4.0, 1.0, ORANGE, (0, 0, 0)),
+            None => {
+                ui::text(&mut canvas, W, H, &self.big, title, 213 + 2, 4 + 2, 1.0, (0, 0, 0), (0, 0, 0));
+                ui::text(&mut canvas, W, H, &self.big, title, 213, 4, 1.0, ORANGE, (0, 30, 0));
+            }
+        }
         let lit = |h: Hit| if self.hover_btn == Some(h) { ORANGE } else { ORANGE_DIM };
         let (cancel, main) = (self.text.cancel.clone(), if self.mode == Mode::Load { self.text.load.clone() } else { self.text.save.clone() });
-        self.text(&mut canvas, &cancel, 324, 437, lit(Hit::Cancel));
-        self.text(&mut canvas, &main, 160, 437, lit(Hit::Main));
+        for (label, x, hit) in [(&cancel, 324, Hit::Cancel), (&main, 160, Hit::Main)] {
+            match &self.ubtn {
+                Some(g) => g.draw_shadowed(&mut canvas, W, H, label, x as f32, 434.0, 1.0, lit(hit), (0, 0, 0)),
+                None => self.text(&mut canvas, label, x, 437, lit(hit)),
+            }
+        }
         self.canvas = canvas;
     }
 
     pub fn draw(&mut self, buf: &mut [u32], w: usize, h: usize) {
-        self.render();
-        buf.fill(0);
+        opensow_viewer::record::cpu(|| self.render());
+        crate::ui::clear(buf, w, h, 0);
         let (ox, oy, s) = fit(w, h);
         // On a screen wider than 640 the 1920x1080 picture is cropped around the centre (`0x443500`, no scaling up to
         // 1920x1080; a bigger window stretches it) and the 640x480 page is laid over its middle.
         if let (Some(bg), true) = (&self.bg_full, w > W) {
             let crop = w <= bg.w && h <= bg.h;
             let (x0, y0) = if crop { ((bg.w - w) / 2, (bg.h - h) / 2) } else { (0, 0) };
+            if opensow_viewer::record::active() {
+                let col = |x: i32| if crop { (x0 + x as usize) as i32 } else { (x as usize * bg.w / w).min(bg.w - 1) as i32 };
+                let row = |y: i32| if crop { (y0 + y as usize) as i32 } else { (y as usize * bg.h / h).min(bg.h - 1) as i32 };
+                opensow_viewer::record::picture_rgb8(&bg.rgb, bg.w, 0, 0, w as i32, h as i32, col, row, false);
+            } else {
             for y in 0..h {
                 let sy = if crop { y0 + y } else { (y * bg.h / h).min(bg.h - 1) };
                 for x in 0..w {
@@ -722,22 +767,9 @@ impl SaveUi {
                     buf[y * w + x] = pack(bg.rgb[i], bg.rgb[i + 1], bg.rgb[i + 2]);
                 }
             }
-        }
-        let (dw, dh) = ((W as f32 * s) as usize, (H as f32 * s) as usize);
-        for y in 0..dh.min(h) {
-            let sy = ((y as f32 / s) as usize).min(H - 1);
-            let dy = y + oy as usize;
-            if dy >= h {
-                break;
-            }
-            for x in 0..dw {
-                let dx = x + ox as usize;
-                if dx >= w {
-                    break;
-                }
-                buf[dy * w + dx] = self.canvas[sy * W + ((x as f32 / s) as usize).min(W - 1)];
             }
         }
+        crate::ui::page(buf, w, h, &self.canvas, W, H, ox as usize, oy as usize, s);
         if let Some(g) = &self.gdi {
             for (text, x, y, rgb) in self.texts.borrow().iter() {
                 g.draw_rgb(buf, w, h, text, ox + *x as f32 * s, oy + *y as f32 * s, s, *rgb);
@@ -748,6 +780,18 @@ impl SaveUi {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn progress_survives_a_restart() {
+        let dir = std::env::temp_dir().join(format!("opensow-progress-{}", std::process::id()));
+        let store = Store { write: dir.clone(), also: None, edition: Edition::Original };
+        assert!(store.load_progress().is_none());
+        let mut p = opensow_formats::config::PassedLevels::initial();
+        p.pass(1);
+        store.save_progress(&p).unwrap();
+        assert_eq!(store.load_progress(), Some(p));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     use super::*;
     use opensow_formats::font::Font;
 
@@ -766,7 +810,7 @@ mod tests {
     }
 
     fn ui(mode: Mode, dir: &PathBuf) -> SaveUi {
-        SaveUi::with_parts(mode, "M03", Store { write: dir.clone(), also: None }, texts(), Vec::new(), fonts(), fonts())
+        SaveUi::with_parts(mode, "M03", Store { write: dir.clone(), also: None, edition: Edition::Original }, texts(), Vec::new(), fonts(), fonts())
     }
 
     #[test]
@@ -798,13 +842,35 @@ mod tests {
 
     #[test]
     fn state_stream_carries_the_level() {
-        let s = state_bytes("M03", &[]);
+        let s = state_bytes("M03", Edition::Original, &[]);
         assert_eq!(StateHead::parse(&s).unwrap().level, 3);
         assert_eq!(level_from_state(&s).as_deref(), Some("M03"));
         // a genuine stream has no marker: the number gives the level
         let head = StateHead { level: 7, rng_index: 0, v_5baafc: 0, flag_49a339: false, v_5baad8: 0, v_5baadc: 0, v_5baac4: 0, v_5baac8: 0, flag_5baa99: false, v_89cf50: 0, len: 0 };
         assert_eq!(level_from_state(&head.to_bytes()).as_deref(), Some("M07"));
         assert_eq!(level_from_state(&[1, 2, 3]), None);
+    }
+
+    #[test]
+    fn the_state_stream_flags_the_campaign() {
+        for edition in [Edition::Original, Edition::Warmonger] {
+            let s = state_bytes("M03", edition, &[]);
+            assert_eq!((level_from_state(&s).as_deref(), edition_from_state(&s)), (Some("M03"), edition));
+            assert!(snapshot_from_state(&s).is_empty(), "a level-only file restarts the level");
+        }
+        // a stream without the extension (the original's) and garbage are the base game's
+        let head = StateHead { level: 7, rng_index: 0, v_5baafc: 0, flag_49a339: false, v_5baad8: 0, v_5baadc: 0, v_5baac4: 0, v_5baac8: 0, flag_5baa99: false, v_89cf50: 0, len: 0 };
+        assert_eq!((level_from_state(&head.to_bytes()).as_deref(), edition_from_state(&head.to_bytes())), (Some("M07"), Edition::Original));
+        assert_eq!((level_from_state(&[1, 2, 3]), edition_from_state(&[1, 2, 3])), (None, Edition::Original));
+        // the extension gives level, campaign and snapshot back
+        let mut tail = Vec::new();
+        save::put_mfc_string(&mut tail, "OpenSOW4");
+        save::put_mfc_string(&mut tail, "M12");
+        tail.push(1);
+        tail.extend(3u32.to_le_bytes());
+        tail.extend([7, 8, 9]);
+        assert_eq!(extension(&tail), Some(("M12".to_owned(), Edition::Warmonger, vec![7, 8, 9])));
+        assert_eq!(extension(&tail[..tail.len() - 1]), None, "a truncated snapshot is rejected");
     }
 
     #[test]
@@ -852,7 +918,7 @@ mod tests {
         l.select(4);
         assert_eq!(l.sounds, vec![40]);
         assert_eq!(l.thumb[0], save::rgb565(0, 255, 0));
-        assert_eq!(l.confirm(), Event::Load("M03".into(), Vec::new()));
+        assert_eq!(l.confirm(), Event::Load("M03".into(), Edition::Original, Vec::new()));
         // corrupt the data: the row turns into "damaged" and cannot be loaded
         let data = dir.join("savegame_052.data");
         let mut bytes = std::fs::read(&data).unwrap();

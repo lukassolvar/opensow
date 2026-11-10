@@ -88,11 +88,18 @@ impl Boot {
 
     /// The picture centred on black, scaled to fit the buffer with its aspect kept.
     pub fn draw(&self, buf: &mut [u32], w: usize, h: usize) {
-        buf.fill(0);
+        crate::ui::clear(buf, w, h, 0);
         let Some((img, _)) = self.pages.get(self.index) else { return };
         let s = (w as f32 / img.w as f32).min(h as f32 / img.h as f32);
         let (dw, dh) = (((img.w as f32 * s) as usize).max(1), ((img.h as f32 * s) as usize).max(1));
         let (ox, oy) = ((w.saturating_sub(dw)) / 2, (h.saturating_sub(dh)) / 2);
+        if opensow_viewer::record::active() {
+            let (x0, y0) = (ox as i32, oy as i32);
+            let col = |x: i32| (((x - x0) as f32 / s) as usize).min(img.w - 1) as i32;
+            let row = |y: i32| (((y - y0) as f32 / s) as usize).min(img.h - 1) as i32;
+            opensow_viewer::record::picture_rgb8(&img.rgb, img.w, x0, y0, x0 + dw.min(w) as i32, y0 + dh.min(h) as i32, col, row, false);
+            return;
+        }
         for y in 0..dh.min(h) {
             let sy = ((y as f32 / s) as usize).min(img.h - 1);
             for x in 0..dw.min(w) {

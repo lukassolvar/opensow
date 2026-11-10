@@ -32,6 +32,8 @@ pub fn preferred_connection(names: &[String]) -> usize {
 pub const AIR_ROWS: [&str; 5] = ["Fighter", "Bomber", "Tripler", "Carryall", "Asteroid"];
 /// Index into the level header's air groups (`level::HEADER_ORDER`: bomber, asteroid, carryall, tripler, fighter) of each row.
 const ROW_GROUP: [usize; 5] = [4, 0, 3, 2, 1];
+/// The carryall's group in the level header (`air::HEADER_ORDER`: bomber, asteroid, carryall, tripler, fighter).
+const CARRYALL_GROUP: usize = 2;
 pub const MAX_AIR: i32 = 20;
 pub const MAX_CREDITS: i32 = 19000;
 pub const MAX_RESEARCH: i32 = 2000;
@@ -79,6 +81,42 @@ impl Setup {
             }
         }
         s
+    }
+
+    /// The default of a skirmish: [`Setup::from_level`], and the turret tiers the map's own header allows (First Spark offers tiers 1 and 2
+    /// only; the sim reads those bytes, `World::from_level`) instead of the lobby's all-available assumption.
+    pub fn skirmish_default(level: &Level) -> Setup {
+        let mut s = Setup::from_level(level);
+        for side in 0..2 {
+            for t in 0..5 {
+                let b = 84 + 10 * side + t;
+                s.sides[side].turrets[t] = (level.header[b / 4 + 2] >> (8 * (b % 4))) & 0xff != 0;
+            }
+            // skirmishes start without carryalls (a map's own stock, e.g. 3 each on Ice Blizzard, let the computer drop
+            // squads into the player's base at once); air bases still build them and the lobby can add some
+            if let Some(row) = ROW_GROUP.iter().position(|&g| g == CARRYALL_GROUP) {
+                s.sides[side].air[row] = 0;
+            }
+        }
+        s
+    }
+
+    /// The inverse of [`Setup::from_level`]: writes both sides' credits, research, air forces and turret switches into the level's
+    /// header words (the turret switches are bytes `84..89` / `94..99` of the header block, `header[i]` is block word `i - 2`).
+    pub fn apply(&self, level: &mut Level) {
+        for side in 0..2 {
+            let (s, h) = (&self.sides[side], &mut level.header);
+            h[2 + side] = s.credits;
+            h[37 + side] = s.research;
+            for (row, g) in ROW_GROUP.iter().enumerate() {
+                h[4 + 3 * g + 1 + side] = s.air[row];
+            }
+            for t in 0..5 {
+                let b = 84 + 10 * side + t;
+                let (word, shift) = (b / 4 + 2, 8 * (b % 4));
+                h[word] = (h[word] & !(0xff << shift)) | (i32::from(s.turrets[t]) << shift);
+            }
+        }
     }
 
     /// An arrow of the lobby (`0x448a0b` jump table, 28 of them: 14 per side, "-" then "+" for each of fighter, bomber, tripler,
@@ -182,11 +220,38 @@ pub struct NetMenu {
     digits: Vec<Frame>,
     strings: Option<LangFile>,
     fonts: std::rc::Rc<(opensow_formats::font::Font, opensow_formats::font::Font)>,
+    /// Unicode text for languages other than English (see `options.rs`).
+    ugdi: Option<crate::gdi::Gdi>,
     hover: Option<Hit>,
     cursor: (i32, i32),
     canvas: Vec<u32>,
     /// Effect ids for the game to play: 30 hover, 33 arrows and turrets, 38 ACCEPT, 39 the other buttons, 29 a player joining.
     pub sounds: Vec<u8>,
+}
+
+/// The names the skirmish list shows. The base game's maps keep their names (`01-First Spark`); Warmonger's, which are numbered from
+/// 00 in their own files and in lower case, continue the numbering (`09-The First Step`), in the order of the list.
+pub fn display_names(maps: &[String], game: &opensow_formats::GameDir) -> Vec<String> {
+    let from_warmonger = |m: &str| match (game.resolve(&format!("Data\\Levels\\{m}.net")), &game.warmonger) {
+        (Some(p), Some(w)) => p.starts_with(w),
+        _ => false,
+    };
+    let base = maps.iter().filter(|m| !from_warmonger(m)).count();
+    let mut next = base;
+    maps.iter()
+        .map(|m| {
+            if !from_warmonger(m) {
+                return m.clone();
+            }
+            next += 1;
+            let title = m.split_once('-').map_or(m.as_str(), |(_, t)| t);
+            let title: Vec<String> = title.split_whitespace().map(|w| {
+                let mut c = w.chars();
+                c.next().map_or(String::new(), |f| f.to_uppercase().chain(c).collect())
+            }).collect();
+            format!("{next:02}-{}", title.join(" "))
+        })
+        .collect()
 }
 
 fn load(assets: &Assets, name: &str) -> Vec<Frame> {
@@ -230,22 +295,23 @@ impl NetMenu {
     }
 
     pub fn with_connections(assets: &mut Assets, connections: Vec<String>) -> NetMenu {
-        let language = assets.game.resolve("Data\\lang.dat").and_then(|p| std::fs::read(p).ok()).and_then(|d| lang::read_lang_dat(&d)).unwrap_or(lang::Language::English);
-        let strings = assets.game.resolve(&format!("Data\\Language\\{}", language.file_name())).and_then(|p| std::fs::read(p).ok()).and_then(|d| LangFile::parse(&d).ok());
+        let language = assets.game.language();
+        let strings = assets.game.resolve(&format!("Data\\Language\\{}", language.file_name())).and_then(|p| std::fs::read(p).ok()).and_then(|d| LangFile::parse(&d).ok()).map(|f| f.with_supplement(language));
         let mut maps: Vec<String> = assets
             .game
-            .resolve("Data\\Levels")
-            .and_then(|d| std::fs::read_dir(d).ok())
+            .level_files()
             .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|e| {
-                let n = e.file_name().to_string_lossy().into_owned();
+            .filter_map(|n| {
                 let (stem, ext) = n.rsplit_once('.')?;
                 ext.eq_ignore_ascii_case("net").then(|| stem.to_owned())
             })
             .collect();
-        maps.sort_by_key(|m| m.to_lowercase());
+        // the base game's maps first, Warmonger's own (docs/warmonger.md) after them
+        let from_warmonger = |m: &str| match (assets.game.resolve(&format!("Data\\Levels\\{m}.net")), &assets.game.warmonger) {
+            (Some(p), Some(w)) => p.starts_with(w),
+            _ => false,
+        };
+        maps.sort_by_key(|m| (from_warmonger(m), m.to_lowercase()));
         let mut m = NetMenu {
             page: Page::Connections,
             conn_sel: -1,
@@ -269,6 +335,7 @@ impl NetMenu {
             digits: load(assets, "options_numbers"),
             strings,
             fonts: assets.font("medium"),
+            ugdi: crate::gdi::Gdi::for_language(language, 17.0),
             hover: None,
             cursor: (-1, -1),
             canvas: vec![0; W * H],
@@ -550,11 +617,15 @@ impl NetMenu {
     // ---- drawing ----
 
     fn text(&self, canvas: &mut [u32], s: &str, x: i32, y: i32, fg: (u8, u8, u8)) {
+        if let Some(g) = &self.ugdi {
+            g.draw_shadowed(canvas, W, H, s, x as f32, y as f32 - 3.0, 1.0, fg, (0, 0, 0));
+            return;
+        }
         ui::text(canvas, W, H, &self.fonts, s, x, y, 1.0, fg, (0, 0, 0));
     }
 
     fn centred(&self, canvas: &mut [u32], s: &str, cx: i32, y: i32, fg: (u8, u8, u8)) {
-        let w = ui::text_width(&self.fonts, s, 1.0);
+        let w = self.ugdi.as_ref().map_or_else(|| ui::text_width(&self.fonts, s, 1.0), |g| g.width(s));
         self.text(canvas, s, cx - w / 2, y, fg);
     }
 
@@ -576,6 +647,30 @@ impl NetMenu {
             let r = frame_rect(f);
             ui::sprite(canvas, W, H, f, r.x, r.y, 1.0);
         }
+    }
+
+    /// Non-English: the art buttons carry English words. Paints over the word (a gradient between the pixels left and right of it, so the
+    /// oval/strip keeps its look) and writes the language's string (`0x467060`, Times New Roman bold) centred on the button.
+    fn relabel(&self, canvas: &mut [u32], f: Option<&Frame>, text: &str, fg: (u8, u8, u8), lit: bool) {
+        let (Some(g), Some(f)) = (&self.ugdi, f) else { return };
+        let r = frame_rect(f);
+        // strips (the long session / side buttons) have letters out to the border, the green ovals keep their rim
+        let wide = r.w > r.h * 3;
+        let (x0, x1) = if wide { (r.x, r.x + r.w) } else { (r.x + r.w / 8, r.x + r.w * 7 / 8) };
+        let (y0, y1) = if wide { (r.y, r.y + r.h) } else { (r.y + r.h / 5, r.y + r.h * 4 / 5) };
+        // colours to blend between: just outside a strip, the rim of an oval
+        let (ea, eb) = if wide { (-1, r.w) } else { (r.w / 10, r.w - 1 - r.w / 10) };
+        for y in y0..y1 {
+            let (a, b) = (canvas[(y * W as i32 + r.x + ea) as usize], canvas[(y * W as i32 + r.x + eb) as usize]);
+            for x in x0..x1 {
+                let t = (x - x0) as u32 * 256 / (x1 - x0).max(1) as u32;
+                let mix = |sh: u32| ((a >> sh & 255) * (256 - t) + (b >> sh & 255) * t) >> 8;
+                canvas[(y * W as i32 + x) as usize] = (mix(16) << 16) | (mix(8) << 8) | mix(0);
+            }
+        }
+        let tw = g.width(text);
+        let c = |v: u8| if lit { v } else { (v as u32 * 4 / 5) as u8 };
+        g.draw_shadowed(canvas, W, H, text, (r.x + (r.w - tw) / 2) as f32, (r.y + r.h / 2 - 11) as f32, 1.0, (c(fg.0), c(fg.1), c(fg.2)), (0, 0, 0));
     }
 
     /// A `net_join` button: frame `normal`, or the highlighted one after it under the pointer.
@@ -610,8 +705,10 @@ impl NetMenu {
                 }
             }
             Page::Sessions => {
-                for (f, hit) in [(J_CREATE, Hit::Create), (J_SHOW, Hit::ShowAll)] {
+                for (f, hit, idx) in [(J_CREATE, Hit::Create, 263), (J_SHOW, Hit::ShowAll, 264)] {
                     self.pair(&mut canvas, f, hit);
+                    let fr = self.join.get(if self.hover == Some(hit) { f + 1 } else { f });
+                    self.relabel(&mut canvas, fr, self.string(idx + 1), (60, 220, 70), self.hover == Some(hit));
                 }
                 for (i, name) in self.sessions.iter().enumerate() {
                     // selected: red, others grey (`0x446ca0`); the exe's x is `W - width / 2`, the list is drawn centred on its click column instead
@@ -668,13 +765,17 @@ impl NetMenu {
         }
         for (s, f) in [(0, O_BLUE), (1, O_GREEN)] {
             // the local side's selector stays lit
-            let f = if self.local == s || hot(Hit::Side(s)) { f + 1 } else { f };
+            let lit = self.local == s || hot(Hit::Side(s));
+            let f = if lit { f + 1 } else { f };
             self.put(canvas, self.others.get(f));
+            self.relabel(canvas, self.others.get(f), self.string(274 + s), if s == 0 { (120, 150, 255) } else { (110, 230, 110) }, lit);
         }
         if self.local == 0 {
             self.put(canvas, self.others.get(O_ACCEPT));
+            self.relabel(canvas, self.others.get(O_ACCEPT), self.string(353), white, hot(Hit::Accept));
         }
         self.put(canvas, self.others.get(O_BACK));
+        self.relabel(canvas, self.others.get(O_BACK), self.string(354), white, hot(Hit::Back));
         // the map: the host picks from the list, a guest sees "Selected level:" and the name
         if self.local == 0 {
             for (i, m) in self.maps.iter().enumerate() {
@@ -685,7 +786,8 @@ impl NetMenu {
                 } else {
                     white
                 };
-                self.text(canvas, m, MAP_ROWS_X, MAP_ROWS_Y + i as i32 * MAP_ROW_H, colour);
+                let y = MAP_ROWS_Y + i as i32 * MAP_ROW_H;
+                self.text(canvas, m, MAP_ROWS_X, y, colour);
             }
         } else {
             self.text(canvas, self.string(263), MAP_ROWS_X, MAP_ROWS_Y, (0xeb, 0xeb, 0xeb));
@@ -709,35 +811,14 @@ impl NetMenu {
     }
 
     pub fn draw(&mut self, buf: &mut [u32], w: usize, h: usize) {
-        self.render();
-        buf.fill(0);
+        opensow_viewer::record::cpu(|| self.render());
+        crate::ui::clear(buf, w, h, 0);
         // the picture behind the 640x480 screen: `NetworkBackground(2).srf`, centre-cropped to the window in the exe (`0x446ca0`), stretched here
         if let Some(bg) = &self.bg_full[usize::from(self.page == Page::Lobby)] {
-            for y in 0..h {
-                let sy = (y * bg.h / h).min(bg.h - 1);
-                for x in 0..w {
-                    let sx = (x * bg.w / w).min(bg.w - 1);
-                    let i = (sy * bg.w + sx) * 3;
-                    buf[y * w + x] = pack(bg.rgb[i], bg.rgb[i + 1], bg.rgb[i + 2]);
-                }
-            }
+            crate::ui::stretch(buf, w, h, bg, false);
         }
         let (ox, oy, s) = fit(w, h);
-        let (dw, dh) = ((W as f32 * s) as usize, (H as f32 * s) as usize);
-        for y in 0..dh.min(h) {
-            let sy = ((y as f32 / s) as usize).min(H - 1);
-            let dy = y + oy as usize;
-            if dy >= h {
-                break;
-            }
-            for x in 0..dw {
-                let dx = x + ox as usize;
-                if dx >= w {
-                    break;
-                }
-                buf[dy * w + dx] = self.canvas[sy * W + ((x as f32 / s) as usize).min(W - 1)];
-            }
-        }
+        crate::ui::page(buf, w, h, &self.canvas, W, H, ox as usize, oy as usize, s);
     }
 }
 

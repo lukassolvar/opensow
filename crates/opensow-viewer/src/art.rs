@@ -7,7 +7,7 @@ use opensow_formats::megafile::MegaFile;
 use opensow_formats::recoil::{fire_sequence, FireSequence, FLASH_SETS};
 use opensow_formats::buildings::BuildingAnim;
 use opensow_formats::sprite::{self, Frame, Kind};
-use opensow_formats::units::unit_art;
+use opensow_formats::units::{unit_art, SheetSizes};
 use opensow_formats::GameDir;
 use std::collections::HashMap;
 use std::path::Path;
@@ -123,6 +123,8 @@ impl Placed {
 
 pub struct Art {
     mega: MegaFile,
+    /// The language pack's own `sprites.data` (`Data\DiffData\<pack>`): its files (HUD frame, pause menu, money, shortcuts ...) replace the base ones.
+    local: Option<MegaFile>,
     cache: HashMap<String, Option<Rc<Vec<Frame>>>>,
 }
 
@@ -144,7 +146,11 @@ fn building_stem(kind: ObjectKind) -> Option<&'static str> {
 impl Art {
     pub fn open(game: &GameDir) -> Option<Art> {
         let mega = MegaFile::open(&game.data().join("sprites.info"), &game.data().join("sprites.data")).ok()?;
-        Some(Art { mega, cache: HashMap::new() })
+        let local = game.language().diff_dir().and_then(|d| {
+            let (i, b) = (game.resolve(&format!("Data\\DiffData\\{d}\\sprites.info"))?, game.resolve(&format!("Data\\DiffData\\{d}\\sprites.data"))?);
+            MegaFile::open(&i, &b).ok()
+        });
+        Some(Art { mega, local, cache: HashMap::new() })
     }
 
     /// Sprite file `name` (e.g. `units\\chA_blue.ps6`) from `sprites.data`, cached.
@@ -153,15 +159,34 @@ impl Art {
             return c.clone();
         }
         let kind = Kind::from_extension(Path::new(name))?;
-        let parsed = self
-            .mega
-            .find(name)
-            .and_then(|e| self.mega.read(e).ok())
+        let pack = self.local.as_ref().and_then(|m| m.find(name).and_then(|e| m.read(e).ok()));
+        let parsed = pack
+            .or_else(|| self.mega.find(name).and_then(|e| self.mega.read(e).ok()))
             .and_then(|d| sprite::parse(&d, kind).ok())
             .filter(|f| !f.is_empty())
             .map(Rc::new);
         self.cache.insert(name.to_owned(), parsed.clone());
         parsed
+    }
+
+    /// The header words `extra[0]`, `extra[1]` of frame 0 of every unit sheet (`units\\{name}_blue.ps6`), read without decoding the pixels:
+    /// the numbers the exe's unit initialiser turns into the sprite size fields of a saved unit (`formats::units::SheetSizes`).
+    pub fn sheet_sizes(&mut self) -> SheetSizes {
+        let mut words = |name: &str| -> Option<(u16, u16)> {
+            let e = self.mega.find(&format!("units\\{name}_blue.ps6"))?;
+            let d = self.mega.read(e).ok()?;
+            // u32 frame size, then width, height, hot x, hot y, extra[0], extra[1]
+            let w = |at: usize| d.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+            Some((w(12)?, w(14)?))
+        };
+        let mut out = SheetSizes::default();
+        for (i, n) in opensow_formats::units::CHASSIS.iter().enumerate() {
+            out.chassis[i] = words(n);
+        }
+        for (i, n) in opensow_formats::units::TOPS.iter().enumerate() {
+            out.tops[i] = words(n);
+        }
+        out
     }
 
     /// Sprite for an object, or `None` when the game has no art for it (e.g. turret 4).
@@ -271,7 +296,7 @@ mod tests {
     use super::*;
 
     fn set(n: usize, tag: u16) -> Rc<Vec<Frame>> {
-        Rc::new((0..n).map(|_| Frame { width: 1, height: 1, hot_x: 0, hot_y: 0, extra: [0; 4], pixels: vec![tag], mask: vec![true] }).collect())
+        Rc::new((0..n).map(|_| Frame { width: 1, height: 1, hot_x: 0, hot_y: 0, extra: [0; 4], pixels: vec![tag], mask: vec![true], enhanced: Default::default() }).collect())
     }
 
     fn placed(owner: Owner) -> Placed {

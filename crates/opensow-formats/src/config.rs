@@ -189,6 +189,9 @@ pub enum Passed {
 /// The lands (missions) in the order `Pass` unlocks them: the first one still at state 0 becomes available.
 pub const UNLOCK_ORDER: [usize; 18] = [6, 4, 7, 3, 10, 11, 12, 13, 14, 15, 5, 16, 17, 18, 19, 8, 20, 21];
 
+/// Warmonger's unlock order (the exe checks them in this sequence).
+pub const WARMONGER_UNLOCK_ORDER: [usize; 6] = [4, 6, 7, 11, 12, 20];
+
 impl PassedLevels {
     /// The object after a failed load (`0x456a6f`): lands 1, 2 and 9 are available (state 2), everything else locked.
     pub fn initial() -> PassedLevels {
@@ -197,6 +200,32 @@ impl PassedLevels {
         states[2] = 2;
         states[9] = 2;
         PassedLevels { states }
+    }
+
+    /// The Warmonger progress at its start (ctor `0x450f3f`): lands 1, 2 and 3 are available.
+    pub fn initial_warmonger() -> PassedLevels {
+        let mut states = [0u8; LEVELS];
+        states[1..=3].fill(2);
+        PassedLevels { states }
+    }
+
+    /// Warmonger's `Pass` (`0x450b00`): the land becomes passed; if land 15 is passed land 22 opens, else when lands 1, 2, 3, 4, 6,
+    /// 7, 11, 12 and 20 are all passed land 15 opens, else the first locked land of 4, 6, 7, 11, 12, 20 does. Land 22 ends the campaign.
+    pub fn pass_warmonger(&mut self, level: usize) -> Passed {
+        if level == 22 {
+            return Passed::Ending;
+        }
+        if self.states.get(level) == Some(&2) {
+            self.states[level] = 1;
+            if self.states[15] == 1 {
+                self.states[22] = 2;
+            } else if [1, 2, 3, 4, 6, 7, 11, 12, 20].iter().all(|&l| self.states[l] == 1) {
+                self.states[15] = 2;
+            } else if let Some(&l) = WARMONGER_UNLOCK_ORDER.iter().find(|&&l| self.states[l] == 0) {
+                self.states[l] = 2;
+            }
+        }
+        Passed::Map
     }
 
     /// `CPassedLevels::Pass(level)` (`0x4565a0`), `level` = 1..=22: an available land (2) becomes passed (1), then the next
@@ -280,6 +309,26 @@ mod tests {
         let mut bad = bytes.clone();
         bad[2] = 0;
         assert!(Options::parse(&bad).is_err());
+    }
+
+    #[test]
+    fn warmonger_progress_follows_the_exes_chain() {
+        let mut p = PassedLevels::initial_warmonger();
+        assert_eq!(&p.states[1..=4], &[2, 2, 2, 0]);
+        for l in [1, 2, 3] {
+            p.pass_warmonger(l);
+        }
+        assert_eq!((p.states[3], p.states[4]), (1, 2), "each pass opens the next of 4, 6, 7, 11, 12, 20");
+        for l in [4, 6, 7, 11, 12] {
+            assert_eq!(p.pass_warmonger(l), Passed::Map);
+        }
+        assert_eq!((p.states[20], p.states[15]), (2, 0));
+        p.pass_warmonger(20);
+        assert_eq!(p.states[15], 2, "land 15 opens when the nine before it are passed");
+        p.pass_warmonger(15);
+        assert_eq!(p.states[22], 2);
+        assert_eq!(p.pass_warmonger(22), Passed::Ending);
+        assert_eq!(p.states[5], 0, "lands without a Warmonger mission never open");
     }
 
     #[test]

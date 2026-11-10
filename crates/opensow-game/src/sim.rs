@@ -8,13 +8,19 @@
 use opensow_formats::cursor::Pointer;
 use opensow_formats::wave::{find_targets, Seen};
 mod tutorial;
+pub mod defence;
+pub mod advancer_ai;
+pub mod airlift_ai;
+pub mod air_ai;
 pub mod savestate;
 mod building_defaults;
+mod unit_defaults;
 pub use tutorial::{text_index as tutorial_text_index, TutEvent, Tutorial};
 use opensow_formats::advancer::{action_for_pointer, pointer_over_building, building_max_hp, capture_winner, hp_per_event, rate as advancer_rate, removed_when_destroyed, upgrade_per_event, fragment, fragment_count, Action, BODKY_B, BODKY_R, BODKY_Y, HEAL_PER_TICK, BeamTimer};
 use opensow_formats::aim::{aim_params, TopAim};
 use opensow_formats::buildings::{blocked_cells, can_place, footprint};
 use opensow_formats::air::{AirForce, HEADER_ORDER};
+use opensow_formats::cheats::{self, Cheat};
 use opensow_formats::aircraft::{launch_counter, squad, MODE1_SQUAD, Aircraft, Event as AirEvent};
 use opensow_formats::anim::{walk_params, ChassisAnim, HOVER_ALTITUDE, HOVER_PERIOD, HOVER_PHASES, HOVER_TABLE};
 use opensow_formats::effects::{flame_trail, gun_trail, spark_trail, trail as shell_trail, blast, impact_anims, impact_leaves_decal, impact_smoke, smoke_puff, UNIT_DEATH_PUFFS, AnimSpec, BulletAnim, AIR_DESTROYED, BUILDING_DESTROYED, TURRET_DESTROYED, UNIT_CLOUD, UNIT_WRECK, debris, debris_variant, DEBRIS_STRENGTH, destruction_bursts, BURST_GAP, BURST_JITTER, DESTRUCTION_PASSES, UNIT_DEATH_CLOUDS, CORPSE_LIFE, CORPSE_BLAST_BELOW, corpse_blasts, WRECK_SMOKE_COLUMNS, WRECK_SMOKE_FIRST, WRECK_SMOKE_PERIOD, WRECK_SMOKE_TYPE, SATLASER_STRENGTH, SATLASER_START_DY, SATLASER_END_DY};
@@ -130,13 +136,12 @@ pub struct Unit {
     pub look: i32,
 }
 
-/// Bresenham state of the path segment a unit is walking.
-#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+/// The pixel line of the path segment a unit is walking (`0x46ee80` builds it into the chassis' local route `[chassis+0x9c]`,
+/// `0x46f550` pops one point per step): the points still to walk, the next one **last**.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Line {
     goal: (i32, i32),
-    major: i32,
-    minor: i32,
-    err: i32,
+    rest: Vec<(i32, i32)>,
 }
 
 impl Unit {
@@ -445,7 +450,7 @@ pub struct Effect {
 /// middle and spans middle-15 .. middle+10 vertically, the text starts `text_dx` left of the middle at middle-7.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Hint {
-    /// Index of the string in the language file (281 / 282).
+    /// Index of the string in the language file (280 / 281, 0-based).
     pub text: usize,
     pub half: i32,
     pub text_dx: i32,
@@ -476,10 +481,83 @@ pub struct Cheats {
     pub freeze_enemy: bool,
 }
 
+/// Computer opponent strength for skirmishes (docs/skirmish.md). The original has no such setting: `Normal` is the decoded AI exactly,
+/// the others change only how rich and fast the computer is and how often it re-decides, never what it decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum Difficulty {
+    Easy,
+    #[default]
+    Normal,
+    Hard,
+    Brutal,
+}
+
+/// What a [`Difficulty`] changes for the computer's side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Handicap {
+    /// Gold and research income per second, percent of the buildings' normal yield.
+    pub income_pct: u32,
+    /// Factory and air base production speed, percent (the rate row is scaled, windtraps still add to it).
+    pub production_pct: u32,
+    /// Idle units and Advancers are re-ordered only on every n-th tick (1 = every tick, as the exe does).
+    pub think_every: u32,
+    /// Ticks between the computer's air strikes (the exe's 600).
+    pub strike_period: i32,
+}
+
+impl Difficulty {
+    pub const ALL: [Difficulty; 4] = [Difficulty::Easy, Difficulty::Normal, Difficulty::Hard, Difficulty::Brutal];
+
+    pub fn handicap(self) -> Handicap {
+        match self {
+            Difficulty::Easy => Handicap { income_pct: 60, production_pct: 70, think_every: 120, strike_period: 1200 },
+            Difficulty::Normal => Handicap { income_pct: 100, production_pct: 100, think_every: 1, strike_period: 600 },
+            Difficulty::Hard => Handicap { income_pct: 150, production_pct: 130, think_every: 1, strike_period: 420 },
+            Difficulty::Brutal => Handicap { income_pct: 250, production_pct: 180, think_every: 1, strike_period: 240 },
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Difficulty::Easy => "Easy",
+            Difficulty::Normal => "Normal",
+            Difficulty::Hard => "Hard",
+            Difficulty::Brutal => "Brutal",
+        }
+    }
+
+    /// The previous level, wrapping from Easy to Brutal.
+    pub fn prev(self) -> Difficulty {
+        Difficulty::ALL[(Difficulty::ALL.iter().position(|&d| d == self).unwrap_or(1) + 3) % 4]
+    }
+
+    /// The next level, wrapping from Brutal to Easy (the lobby's selector).
+    pub fn next(self) -> Difficulty {
+        Difficulty::ALL[(Difficulty::ALL.iter().position(|&d| d == self).unwrap_or(1) + 1) % 4]
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct World {
+    /// Strength of the computer opponent (side 1); `Normal` outside skirmishes.
+    #[serde(default)]
+    pub difficulty: Difficulty,
+    /// Dev tool (`--spectate`): the computer plays side 0 (blue) too, with `difficulty0`; the camera is free.
+    pub spectate: bool,
+    pub difficulty0: Difficulty,
+    /// The first side's copy of the computer's timers while the second side runs (see `step_ai_spectate`).
+    spectate_ai: (u32, i32, i32, i32),
+    /// A skirmish: the computer defends itself with `defence::decide` (player-like, docs/skirmish.md) instead of the exe's routine.
+    #[serde(default)]
+    pub skirmish: bool,
+    /// Fractions of a credit / research point the scaled income has not paid out yet (hundredths, per side).
+    #[serde(default)]
+    income_rest: [[u32; 2]; 2],
     #[serde(skip)]
     pub cheats: Cheats,
+    /// The install's unit sprite sheet sizes (`Play::new` fills them): the sprite size words of a saved unit (docs/savegame.md).
+    #[serde(skip)]
+    pub sheet_sizes: opensow_formats::units::SheetSizes,
     pub cells: (i32, i32),
     blocked: Vec<bool>,
     /// The terrain Advancers cannot enter: the `.map` border layer (the outer ring and, on a few maps, no-fly areas).
@@ -509,6 +587,10 @@ pub struct World {
     pub effects: Vec<Effect>,
     /// Sound effects raised this tick (effect id, map x, map y, pitch jitter); the game drains them (`sfx.rs`).
     pub sounds: Vec<(u8, i32, i32, bool)>,
+    /// The local player's own action sounds raised this tick (air strike launch, turret placed): played unpositioned in the
+    /// priority pool, so they are heard wherever the view is (`Sfx::play`).
+    #[serde(skip)]
+    pub player_sounds: Vec<u8>,
     pub decals: Vec<Decal>,
     /// The exe's visual generator (`0x437cd0`), kept apart from the lockstep one.
     fx_rng: u32,
@@ -578,6 +660,9 @@ pub struct World {
     pub corpses: Vec<Corpse>,
     /// Messages for the local player: (tick, event id of `formats::messages`).
     pub log: Vec<(u64, u8)>,
+    /// Chat lines of the local player (tick, text): typed with Enter, shown like the messages (docs/chat.md).
+    #[serde(default)]
+    pub chat: Vec<(u64, String)>,
     /// Where the last message event with a position happened (`[0x6bf6b0 + 0x20*player + 4/8]`, kept when later events pass -1).
     pub last_event: Option<(i32, i32)>,
     /// Level header words 34 / 35: no replacement Advancer for the player / the enemy (`[0x5baab8 + p*4]`).
@@ -596,6 +681,19 @@ pub struct World {
     ai_strategy: u32,
     ai_timer: i32,
     ai_strike: i32,
+    /// Skirmish: ticks until the turret planner (`defence::decide`) looks again.
+    #[serde(default)]
+    ai_defence: i32,
+    /// Skirmish: what the computer remembers about its Advancers' jobs (`advancer_ai::Mind`), per side.
+    #[serde(default)]
+    adv_mind: [advancer_ai::Mind; 2],
+    /// Skirmish: the computer's carryalls in flight (side, drop cell, aircraft id) and each side's last launch tick.
+    #[serde(default)]
+    airlifts: Vec<(usize, (i32, i32), u32)>,
+    #[serde(default)]
+    last_airlift: [Option<u64>; 2],
+    /// Tick of the computer's last air launch per side (`ai_air`, Hard and Brutal skirmishes).
+    last_air: [u64; 2],
     /// Sum of the active levels of each side's windtrap (`[0x5baaa0 + p*4]`), refreshed every tick.
     wind: [u32; 2],
     /// Whether any enemy existed when the first tick ran (a world without enemies is a sandbox, never won).
@@ -633,6 +731,7 @@ impl World {
         let air_blocked = (0..cells.0 * cells.1).map(|i| { let (x, y) = (i % cells.0, i / cells.0); x == 0 || y == 0 || x == cells.0 - 1 || y == cells.1 - 1 }).collect();
         World {
             cheats: Cheats::default(),
+            sheet_sizes: Default::default(),
             cells,
             blocked,
             air_blocked,
@@ -648,6 +747,7 @@ impl World {
             turret_muzzles: HashMap::new(),
             effects: Vec::new(),
             sounds: Vec::new(),
+            player_sounds: Vec::new(),
             decals: Vec::new(),
             fx_rng: 0x9E3779B9,
             sky: Default::default(),
@@ -680,6 +780,7 @@ impl World {
             wrecks: Vec::new(),
             corpses: Vec::new(),
             log: Vec::new(),
+            chat: Vec::new(),
             last_event: None,
             no_advancer_respawn: [false; 2],
             weather: 0,
@@ -691,6 +792,17 @@ impl World {
             ai_strategy: 0,
             ai_timer: 0,
             ai_strike: 600,
+            ai_defence: 0,
+            adv_mind: Default::default(),
+            airlifts: Vec::new(),
+            last_airlift: [None; 2],
+            last_air: [0; 2],
+            difficulty: Difficulty::Normal,
+            spectate: false,
+            difficulty0: Difficulty::Normal,
+            spectate_ai: (0, 0, 600, 0),
+            skirmish: false,
+            income_rest: [[0; 2]; 2],
             wind: [0; 2],
             enemy_at_start: None,
             hint_phase: 0,
@@ -1075,15 +1187,21 @@ impl World {
     pub fn order_attack_selected(&mut self, target: Target) {
         // the pods of missions 3 and 8 take no attack orders (0x46a10b: they are driven by the script)
         let scripted = matches!(self.mission_no, Some(3 | 8));
-        for u in self.units.iter_mut().filter(|u| u.selected && u.player == 0 && u.kind != 40 && !(scripted && u.kind == 46)) {
+        for u in self.units.iter_mut().filter(|u| u.selected && u.player == 0 && !(scripted && u.kind == 46)) {
             u.chase = Some(target);
             u.queued = None;
         }
     }
 
+    /// Can the pointer over `t` show the attack pointer while an Advancer is selected? The exe (`0x417a8c`) shows go-to over an
+    /// enemy unit that is neither a flyer (`[unit+0x4b]`, the Advancer) nor anti-air (`[unit+0x4c]`).
+    pub fn advancer_can_attack(&self, t: Target) -> bool {
+        matches!(t, Target::Unit(id) if self.unit(id).is_some_and(|u| u.kind == 40 || is_anti_air(u.kind)))
+    }
+
     /// The hostile unit or structure under map pixel `(x, y)` for the player, if any.
     pub fn enemy_at(&self, x: i32, y: i32) -> Option<Target> {
-        let near = self.units.iter().filter(|u| u.hp > 0 && u.player != 0).find(|u| ((u.x - x as f32).powi(2) + (u.y - y as f32).powi(2)).sqrt() < 20.0).map(|u| Target::Unit(u.id));
+        let near = self.units.iter().filter(|u| u.hp > 0 && u.player != 0).find(|u| ((u.x - x as f32).powi(2) + (u.sprite_y() - y as f32).powi(2)).sqrt() < 20.0).map(|u| Target::Unit(u.id));
         near.or_else(|| self.structure_at(x, y).filter(|&k| self.structures[k].owner != Owner::Player).map(Target::Structure))
     }
 
@@ -1245,7 +1363,9 @@ impl World {
                 }
             }
             // a corpse re-stamps its cell with the terrain marker every step (0x46dfeb / 0x46e004)
-            for c in &self.corpses {
+            // DELIBERATE DEVIATION: a dead Advancer's corpse (air grid) does not block. The exe stamps it for 430 steps, but then the
+            // spot above a building an enemy Advancer was capturing stays closed and the player's Advancer cannot start repairing
+            for c in self.corpses.iter().filter(|c| !c.air) {
                 let (x, y) = (c.x.div_euclid(CELL), c.y.div_euclid(CELL));
                 if (0..128).contains(&x) && (0..128).contains(&y) {
                     let grid = if c.air { &mut air } else { &mut ground };
@@ -1441,6 +1561,86 @@ impl World {
         Some(self.add_unit(kind, player, cell.0 * CELL + CELL / 2, cell.1 * CELL + CELL / 2))
     }
 
+    /// Places `kinds` for `side` in blocks of six (three columns of two, filled column by column like a carryall squad,
+    /// so each column is a pair of one kind): the 12 Goldmine Valley units make two 3x2 blocks. Each block goes to the
+    /// nearest spot 6 to 18 cells from the HQ's middle (by its middle), out in the open: every cell free (not blocked, no
+    /// building, no unit, not by a factory exit, not `hidden` under a tree or rock top) and no building or unit on the ring
+    /// of cells around it, and reachable on foot from the HQ, nearest by walking distance; so the blocks stand in the open,
+    /// apart from the base and from each other, not on a plateau behind a cliff. Without an HQ it goes by the side's first building; with no such
+    /// spot the block's units are placed one by one on the nearest free cells of that range.
+    pub fn add_start_units(&mut self, side: usize, kinds: &[i32], hidden: impl Fn((i32, i32)) -> bool) {
+        let mine = |o: Owner| side_of(o) == Some(side);
+        let Some(home) = self.structures.iter().find(|s| s.alive() && mine(s.owner) && s.kind_id == 100)
+            .or_else(|| self.structures.iter().find(|s| s.alive() && mine(s.owner)))
+            .map(|s| s.center_cell()) else { return };
+        let exits: Vec<(i32, i32)> = self.structures.iter().filter(|s| s.alive()).filter_map(|s| {
+            factory_exit(s.kind_id).map(|e| (s.cell.0 + e.primary.0, s.cell.1 + e.primary.1))
+        }).collect();
+        let inside = |w: &World, c: (i32, i32)| c.0 >= 0 && c.1 >= 0 && c.0 < w.cells.0 && c.1 < w.cells.1;
+        let building = |w: &World, c: (i32, i32)| w.structures.iter().any(|s| s.alive() && s.covers(c));
+        let unit = |w: &World, c: (i32, i32)| w.units.iter().any(|u| u.hp > 0 && u.cell() == c);
+        let free = |w: &World, c: (i32, i32)| {
+            inside(w, c) && !w.is_blocked(c.0, c.1) && !building(w, c) && !unit(w, c) && !exits.iter().any(|e| (e.0 - c.0).abs() <= 1 && (e.1 - c.1).abs() <= 2)
+        };
+        let (near, far) = (6, 18);
+        // walking distance from the HQ over unblocked cells without buildings (a breadth-first fill within the search range):
+        // blocks go to the nearest ground on foot, not to a plateau that is close as the crow flies but behind a cliff
+        let mut steps: HashMap<(i32, i32), i32> = HashMap::new();
+        let mut queue: std::collections::VecDeque<(i32, i32)> = (-3..=3).flat_map(|dy| (-3..=3).map(move |dx| (home.0 + dx, home.1 + dy)))
+            .filter(|&c| inside(self, c) && !self.is_blocked(c.0, c.1) && !building(self, c)).collect();
+        for &c in &queue {
+            steps.insert(c, 0);
+        }
+        while let Some(c) = queue.pop_front() {
+            let d = steps[&c];
+            for n in [(c.0 + 1, c.1), (c.0 - 1, c.1), (c.0, c.1 + 1), (c.0, c.1 - 1)] {
+                if (n.0 - home.0).abs() <= far + 6 && (n.1 - home.1).abs() <= far + 6 && inside(self, n) && !self.is_blocked(n.0, n.1) && !building(self, n) && !steps.contains_key(&n) {
+                    steps.insert(n, d + 1);
+                    queue.push_back(n);
+                }
+            }
+        }
+        for chunk in kinds.chunks(6) {
+            let cols = (chunk.len() as i32 + 1) / 2;
+            let block = |x: i32, y: i32| (0..chunk.len() as i32).map(move |i| (x + i / 2, y + i % 2));
+            // twice the offset of the block's middle from the HQ's middle
+            let off = |x: i32, y: i32| (x * 2 + cols - 1 - home.0 * 2, y * 2 + 1 - home.1 * 2);
+            let mut corners: Vec<(i32, i32)> = (-far - cols..=far).flat_map(|dy| (-far - cols..=far).map(move |dx| (home.0 + dx, home.1 + dy))).filter(|&(x, y)| {
+                let (mx, my) = off(x, y);
+                (near..=far).contains(&((mx.abs().max(my.abs()) + 1) / 2))
+            }).collect();
+            // nearest on foot (the block's farthest cell), then as the crow flies
+            corners.sort_by_key(|&(x, y)| {
+                let (mx, my) = off(x, y);
+                (block(x, y).map(|c| steps.get(&c).copied().unwrap_or(i32::MAX)).max().unwrap_or(i32::MAX), mx * mx + my * my, y, x)
+            });
+            let open = |w: &World, x: i32, y: i32| {
+                block(x, y).all(|c| free(w, c) && !hidden(c) && steps.contains_key(&c))
+                    && (y - 1..=y + 2).all(|cy| (x - 1..=x + cols).all(|cx| !building(w, (cx, cy)) && !unit(w, (cx, cy))))
+            };
+            match corners.iter().copied().find(|&(x, y)| open(self, x, y)) {
+                Some((x, y)) => {
+                    for (c, &kind) in block(x, y).zip(chunk) {
+                        self.add_unit(kind, side as i32, c.0 * CELL + CELL / 2, c.1 * CELL + CELL / 2);
+                    }
+                }
+                None => {
+                    let mut cells: Vec<(i32, i32)> = (-far..=far).flat_map(|dy| (-far..=far).map(move |dx| (home.0 + dx, home.1 + dy)))
+                        .filter(|&(x, y)| (near..=far).contains(&(x - home.0).abs().max((y - home.1).abs()))).collect();
+                    cells.sort_by_key(|&(x, y)| ((x - home.0).pow(2) + (y - home.1).pow(2), y, x));
+                    let mut left = chunk.iter();
+                    for c in cells {
+                        if !free(self, c) || !steps.contains_key(&c) {
+                            continue;
+                        }
+                        let Some(&kind) = left.next() else { break };
+                        self.add_unit(kind, side as i32, c.0 * CELL + CELL / 2, c.1 * CELL + CELL / 2);
+                    }
+                }
+            }
+        }
+    }
+
     fn nearest_free(&self, c: (i32, i32)) -> Option<(i32, i32)> {
         self.rings.search(0, 12).iter().map(|&(dx, dy)| (c.0 + dx as i32, c.1 + dy as i32)).find(|&(x, y)| !self.is_blocked(x, y))
     }
@@ -1544,6 +1744,9 @@ impl World {
         self.step_tutorial();
         if self.ai && !frozen {
             self.step_ai(1);
+            if self.spectate {
+                self.step_ai_spectate();
+            }
         }
         self.step_aircraft();
         self.step_actions();
@@ -1635,7 +1838,11 @@ impl World {
             return;
         }
         let (player, cell, active) = (if s.owner == Owner::Player { 0 } else { 1 }, s.cell, s.active.min(s.slots.len()));
-        let gain = steps_at(rate_row(self.tutorial_step, self.wind[player as usize]), (self.tick % 60) as u32);
+        let mut rate = rate_row(self.tutorial_step, self.wind[player as usize]);
+        if self.ai && (player == 1 || self.spectate) {
+            rate = rate * self.difficulty_of(player as usize).handicap().production_pct / 100;
+        }
+        let gain = steps_at(rate, (self.tick % 60) as u32);
         for j in 0..active {
             let slot = &mut self.structures[i].slots[j];
             slot.progress = (slot.progress + gain).min(slot.target);
@@ -1796,12 +2003,13 @@ impl World {
         if kind == 40 && self.units[i].aim.is_some() {
             // the Advancer's gun (top case 0x47a8af, bullet 31, strength 64): the flyer search 0x47aed0 finds ground anti-air
             // units (handle type 5: kinds 1, 2, 3, 42; not the anti-air turret), then 0x47ad30 enemy Advancers. It keeps
-            // searching while the beam hovers over a building, but not while the Advancer is still flying to one (`[chassis+0xe0] == 2`).
+            // searching while it flies to a building and while the beam hovers over it; only a type-2 (straight) order blocks it.
             let (min, max, steps) = {
                 let p = &self.units[i].aim.as_ref().unwrap().params;
                 (p.min_range, p.max_range, p.steps)
             };
-            let approaching = self.units[i].action.is_some() && !self.units[i].path.is_empty();
+            // only a type-2 order blocks the search (`0x46e1cc` -> 5th argument of `0x479c60`); the Advancer's go-to onto a building is type 1
+            let approaching = self.units[i].straight.is_some();
             let t = if approaching { None } else { self.advancer_target(index, player, cell, min, max) };
             let (ux, uy) = self.units[i].px();
             let uy = uy + opensow_formats::aim::top_dy(kind); // aim origin = position + [top+0x60] (0x4797c0)
@@ -2014,30 +2222,20 @@ impl World {
                 continue;
             }
             // Bresenham from the segment start: one pixel along the long axis per move, the short axis when due
-            let mut line = u.line.filter(|l| l.goal == goal).unwrap_or_else(|| {
-                let (dx, dy) = (goal.0 - here.0, goal.1 - here.1);
-                Line { goal, major: dx.abs().max(dy.abs()), minor: dx.abs().min(dy.abs()), err: 0 }
-            });
-            let (dx, dy) = (goal.0 - here.0, goal.1 - here.1);
-            line.err += line.minor;
-            let minor_step = 2 * line.err >= line.major && line.minor > 0;
-            if minor_step {
-                line.err -= line.major;
-            }
+            let mut line = match u.line.take() {
+                Some(l) if l.goal == goal && l.rest.last().is_some_and(|p| (p.0 - here.0).abs().max((p.1 - here.1).abs()) == 1) => l,
+                _ => {
+                    let mut rest = opensow_formats::walk::pixel_line(here.0, here.1, goal.0, goal.1);
+                    rest.remove(0); // the start point: the unit is already there
+                    rest.reverse();
+                    Line { goal, rest }
+                }
+            };
+            let next = line.rest.pop().expect("a line to a goal that is not here has points");
             u.line = Some(line);
-            let (sx, sy) = (dx.signum() as f32, dy.signum() as f32);
             let before = u.cell();
-            if dx.abs() >= dy.abs() {
-                u.x += sx;
-                if minor_step {
-                    u.y += sy;
-                }
-            } else {
-                u.y += sy;
-                if minor_step {
-                    u.x += sx;
-                }
-            }
+            u.x += (next.0 - here.0) as f32;
+            u.y += (next.1 - here.1) as f32;
             if u.cell() != before {
                 self.occupancy_moved(i, before);
             }
@@ -2255,6 +2453,11 @@ impl World {
 
     fn fire(&mut self, weapon: i32, owner: i32, from: (i32, i32), to: (i32, i32)) {
         let Some((bt, strength)) = weapon_shot(weapon) else { return };
+        // the constructor of some types plays a sound at the start point, once per bullet (special tiers 2/3: 8 / 9, `0x412299`,
+        // `0x4121ed`); it runs before the path is built, so a shot too short for a path still sounds
+        if let Some(id) = opensow_formats::effects::constructor_sound(bt) {
+            self.sound(id, from.0, from.1, true);
+        }
         let Some(path) = build_path(bt, from.0, from.1, to.0, to.1, 0) else { return };
         if path.points.is_empty() {
             return;
@@ -2524,6 +2727,19 @@ impl World {
                 s.heal = s.max_hp - 1;
                 s.tally = [0; 3];
                 s.upgrade = 0;
+                // the rebuild (`0x43ab40` -> constructor `0x40d870`) starts every slot from its base kind (`[slot+8]`) with no bought
+                // tech-levels and the building at its default upgrade level 1 (`0x40a3d1`); only a neutral building's level is
+                // copied back (`0x43ad00`: old owner 2), so capturing from either side drops the upgrades
+                if owner != 2 {
+                    s.active = s.active.min(1);
+                }
+                for sl in s.slots.iter_mut() {
+                    sl.kind -= sl.level as i32;
+                    sl.level = 0;
+                    if let Some(t) = slot_target(sl.kind) {
+                        sl.target = t;
+                    }
+                }
                 s.target = None;
                 s.rally = None; // the exe rebuilds the building (`0x43ab40`): the constructor clears the point
                 s.slots.iter_mut().for_each(|sl| sl.progress = 0);
@@ -2612,11 +2828,23 @@ impl World {
                 Owner::Enemy => 1,
                 _ => continue,
             };
-            let gain = income_per_tick(s.active);
-            match s.kind {
-                ObjectKind::GoldMine => self.credits[side] = (self.credits[side] + gain).min(CREDITS_CAP),
-                ObjectKind::ResearchLab => self.research[side] = (self.research[side] + gain).min(RESEARCH_CAP),
-                _ => {}
+            let mut gain = income_per_tick(s.active);
+            let pct = if self.ai && (side == 1 || self.spectate) { self.difficulty_of(side).handicap().income_pct } else { 100 };
+            let which = match s.kind {
+                ObjectKind::GoldMine => 0,
+                ObjectKind::ResearchLab => 1,
+                _ => continue,
+            };
+            if pct != 100 {
+                // the scaled yield pays out whole points; the hundredths carry over to the next second
+                let hundredths = gain as u32 * pct + self.income_rest[side][which];
+                self.income_rest[side][which] = hundredths % 100;
+                gain = (hundredths / 100) as _;
+            }
+            if which == 0 {
+                self.credits[side] = (self.credits[side] + gain).min(CREDITS_CAP);
+            } else {
+                self.research[side] = (self.research[side] + gain).min(RESEARCH_CAP);
             }
         }
         // crossing a turret price (200..1000) or 500 research tells the player (0x42d88c, 0x42d8f5..0x42d98a)
@@ -2705,7 +2933,12 @@ impl World {
         if !self.build_turret(side, tier, cell) {
             return false;
         }
-        self.sound(72, cell.0 * CELL, cell.1 * CELL, false); // `0x4173f9`: sound 0x48 at the cell's top-left pixel
+        // `0x4173f9`: sound 0x48 at the cell's top-left pixel; the player's own placement is a priority sound here, heard anywhere
+        if side == 0 {
+            self.player_sound(72);
+        } else {
+            self.sound(72, cell.0 * CELL, cell.1 * CELL, false);
+        }
         true
     }
 
@@ -2732,6 +2965,24 @@ impl World {
     /// The computer player (`0x42f490`, run for the non-local side every tick outside the tutorial): buys tech-levels,
     /// picks a strategy every 900-1500 ticks, sends idle units after the nearest target of the strategy's class, steers
     /// its Advancers (`0x42fae0`) and builds turrets next to threatened buildings (`0x431120`).
+    /// Which difficulty drives `side` (both sides are the computer in a spectated game).
+    pub fn difficulty_of(&self, side: usize) -> Difficulty {
+        if side == 0 && self.spectate { self.difficulty0 } else { self.difficulty }
+    }
+
+    /// Spectating: the computer runs side 0 as well. The strategy, strike and defence timers are one set shared by the
+    /// code, so side 0 swaps its own set in for the call and back out.
+    fn step_ai_spectate(&mut self) {
+        let swap = |w: &mut World| {
+            let s = (w.ai_strategy, w.ai_timer, w.ai_strike, w.ai_defence);
+            (w.ai_strategy, w.ai_timer, w.ai_strike, w.ai_defence) = w.spectate_ai;
+            w.spectate_ai = s;
+        };
+        swap(self);
+        self.step_ai(0);
+        swap(self);
+    }
+
     fn step_ai(&mut self, side: usize) {
         self.tech_up_all(side);
         let me = if side == 0 { Owner::Player } else { Owner::Enemy };
@@ -2753,16 +3004,19 @@ impl World {
         if enemy_turrets > 4 {
             self.ai_strategy = 2;
         }
+        let think = self.tick % self.difficulty_of(side).handicap().think_every.max(1) as u64 == 0;
         // idle units attack: strategy 1 the HQ, 2 turret > unit > building, 3 unit > turret > building, 4 building > turret > unit
         let enemy_adv = self.units.iter().filter(|u| u.hp > 0 && u.kind == 40 && (u.player != 0) != (side != 0)).map(|u| u.id).last();
         let idle: Vec<usize> = (0..self.units.len()).filter(|&i| {
             let u = &self.units[i];
-            u.hp > 0 && (u.player != 0) == (side != 0) && u.kind != 40 && u.chase.is_none() && u.path.is_empty()
+            think && u.hp > 0 && (u.player != 0) == (side != 0) && u.kind != 40 && u.chase.is_none() && u.path.is_empty()
         }).collect();
         for i in idle {
             let (cell, kind) = (self.units[i].cell(), self.units[i].kind);
             let pick = if is_anti_air(kind) {
-                enemy_adv.map(Target::Unit)
+                // skirmish: an Advancer far away is no goal (it flies about); then the anti-air units go with the others to the
+                // enemy HQ as a body shield (the fallback below)
+                enemy_adv.filter(|&id| !self.skirmish || self.unit(id).is_some_and(|a| { let (ac, d) = (a.cell(), 30); (ac.0 - cell.0).abs().max((ac.1 - cell.1).abs()) <= d })).map(Target::Unit)
             } else {
                 let (u, t, b) = self.nearest_enemy(side, cell);
                 let order = match self.ai_strategy {
@@ -2775,10 +3029,13 @@ impl World {
             };
             self.units[i].chase = pick.or(hq.map(Target::Structure));
         }
-        // Advancers choose a building: score = random(3) + bonuses - distance (0x42fb94..0x42fd9f)
+        // Advancers choose a building: score = random(3) + bonuses - distance (0x42fb94..0x42fd9f); skirmish: `ai_advancers`
+        if self.skirmish {
+            self.ai_advancers(side);
+        }
         let advancers: Vec<usize> = (0..self.units.len()).filter(|&i| {
             let u = &self.units[i];
-            u.hp > 0 && u.kind == 40 && (u.player != 0) == (side != 0) && u.action.is_none()
+            !self.skirmish && think && u.hp > 0 && u.kind == 40 && (u.player != 0) == (side != 0) && u.action.is_none()
         }).collect();
         for i in advancers {
             let (ux, uy) = (self.units[i].x as i32 / CELL, self.units[i].y as i32 / CELL);
@@ -2820,14 +3077,24 @@ impl World {
                 self.order_action(id, k);
             }
         }
-        // air strikes every 600 ticks: bomber, fighter or tripler at random if in stock (0x42f930..0x42fa2a)
+        // air strikes every 600 ticks: bomber, fighter or tripler at random if in stock (0x42f930..0x42fa2a);
+        // skirmish on Hard and Brutal: the stock is spent where it pays (`ai_air`)
+        let proactive = self.skirmish && matches!(self.difficulty_of(side), Difficulty::Hard | Difficulty::Brutal);
         self.ai_strike -= 1;
-        if self.ai_strike <= 0 {
-            self.ai_strike = 600;
+        if proactive {
+            self.ai_air(side);
+        } else if self.ai_strike <= 0 {
+            self.ai_strike = self.difficulty_of(side).handicap().strike_period;
             let force = [AirForce::Bomber, AirForce::Fighter, AirForce::Tripler][self.random(3) as usize];
             if let Some((x, y)) = self.strike_target(side) {
                 self.launch_strike(side, force, x, y);
             }
+        }
+        // skirmish: the player-like planner on its own timer (docs/skirmish.md); campaign: the exe's routine below
+        if self.skirmish {
+            self.ai_airlift(side);
+            self.ai_defend(side);
+            return;
         }
         // `0x42fa30`: the turret routine runs right after the air-strike pick, on the same 600-step timer (twice at most, the
         // second time only while the credits still reach 200)
@@ -2837,6 +3104,210 @@ impl World {
                 self.ai_build_turret(side);
             }
         }
+    }
+
+    /// Skirmish only: the computer's Advancers by `advancer_ai::think` (not the exe's pick): jobs weighed by gain, time and
+    /// anti-air risk, broken off under fire, failures remembered. Looks every 30 ticks (90 on Easy).
+    fn ai_advancers(&mut self, side: usize) {
+        use advancer_ai::{Adv, Job, Order, Rel, Site, Threat};
+        let every = advancer_ai::LOOK * if self.difficulty_of(side) == Difficulty::Easy { 3 } else { 1 };
+        if self.tick % every != 0 {
+            return;
+        }
+        let foe_side = |p: i32| (p != 0) != (side != 0);
+        let sites: Vec<Site> = self.structures.iter().enumerate().filter(|(_, st)| st.alive()).map(|(k, st)| {
+            let rel = match side_of(st.owner) {
+                Some(o) if o == side => Rel::Own,
+                Some(_) => Rel::Foe,
+                None => Rel::Neutral,
+            };
+            let upgrade_left = if rel == Rel::Own { st.slots.get(st.active).map_or(0, |sl| (sl.target as i32 - st.upgrade).max(1)) } else { 0 };
+            Site { index: k, kind_id: st.kind_id, rel, hp: st.hp, max_hp: st.max_hp, upgrade_left, protected: st.protected, action_cell: st.action_cell(), healing: st.heal > 0 }
+        }).collect();
+        let mut threats: Vec<Threat> = self.structures.iter()
+            .filter(|st| st.alive() && st.heal == 0 && st.kind_id == 26 && side_of(st.owner).map_or(false, |o| o != side))
+            .map(|st| Threat { cell: st.cell, range: 9.0, dps: 0.45 }).collect();
+        threats.extend(self.units.iter().filter(|u| u.hp > 0 && foe_side(u.player) && (is_anti_air(u.kind) || u.kind == 40)).map(|u| Threat {
+            cell: u.cell(),
+            range: weapon_range(u.kind).map_or(9.0, |r| r.1 as f32),
+            dps: match u.kind {
+                40 => 0.3,
+                42 => 0.5,
+                _ => 0.3,
+            },
+        }));
+        let advs: Vec<Adv> = self.units.iter().filter(|u| u.hp > 0 && u.kind == 40 && !foe_side(u.player)).map(|u| {
+            let working = u.action.is_some_and(|(_, k)| self.structures.get(k).is_some_and(|st| st.action_cell() == u.cell()));
+            // its job's building is in the destruction animation (the capture follows): wait for it
+            let holding = self.adv_mind[side].tasks.iter().any(|t| t.unit == u.id && t.job == Job::Destroy
+                && self.structures.get(t.target).is_some_and(|st| !st.alive() && st.dying.is_some()) && u.cell() == self.structures[t.target].action_cell());
+            Adv { id: u.id, cell: u.cell(), hp: u.hp, max_hp: u.max_hp, working, idle: u.action.is_none() && u.path.is_empty(), holding }
+        }).collect();
+        let mut mind = std::mem::take(&mut self.adv_mind[side]);
+        mind.tiered = true;
+        mind.bold = match self.difficulty_of(side) { Difficulty::Hard => 1, Difficulty::Brutal => 2, _ => 0 };
+        let orders = advancer_ai::think(&mut mind, &advs, &sites, &threats, self.rates[side], self.tick);
+        self.adv_mind[side] = mind;
+        for (id, order) in orders {
+            match order {
+                Order::Go { target, job } => {
+                    let action = match job {
+                        Job::Destroy => Action::Destroy,
+                        Job::Repair => Action::Repair,
+                        Job::Upgrade => Action::Upgrade,
+                    };
+                    self.order_job(id, target, action);
+                }
+                Order::Retreat(cell) => {
+                    if let Some(u) = self.units.iter_mut().find(|u| u.id == id) {
+                        u.action = None;
+                    }
+                    self.order_move(id, cell, None);
+                }
+            }
+        }
+    }
+
+    /// Skirmish only: the computer calls in carryalls (`airlift_ai::decide`; the exe's AI never does). One look per second.
+    /// It does not know the squad; the landed units get their goals in the unload (`airlift_ai::assign`).
+    fn ai_airlift(&mut self, side: usize) {
+        if self.tick % 60 != 0 {
+            return;
+        }
+        // a carryall shot down before it unloaded leaves its drop open again
+        let flying: Vec<u32> = self.aircraft.iter().filter(|a| a.hp > 0).map(|a| a.id).collect();
+        self.airlifts.retain(|a| flying.contains(&a.2));
+        let snap = self.airlift_snapshot(side);
+        if snap.last_launch.is_some_and(|t| self.tick < t + snap.tuning.cooldown) {
+            return;
+        }
+        if snap.stock == 0 {
+            return;
+        }
+        let free = |c: (i32, i32)| !self.is_blocked(c.0, c.1) && !self.units.iter().any(|u| u.hp > 0 && u.kind != 40 && u.cell() == c) && !self.structures.iter().any(|st| st.alive() && st.covers(c));
+        let Some(drop) = airlift_ai::decide(&snap, free) else { return };
+        let (x, y) = (drop.cell.0 * CELL + CELL / 2, drop.cell.1 * CELL + CELL / 2);
+        if self.launch_strike(side, AirForce::Carryall, x, y) {
+            let id = self.aircraft.last().map_or(0, |a| a.id);
+            self.airlifts.push((side, drop.cell, id));
+            self.last_airlift[side] = Some(self.tick);
+        }
+    }
+
+    /// What the carryall planner sees for `side` (no squad: it does not know what comes).
+    fn airlift_snapshot(&self, side: usize) -> airlift_ai::Snapshot {
+        use airlift_ai::{Flak, Site, Snapshot, Trooper};
+        let g = HEADER_ORDER.iter().position(|&h| h == AirForce::Carryall).unwrap();
+        let foe_side = |p: i32| (p != 0) != (side != 0);
+        let sites: Vec<Site> = self.structures.iter().enumerate().filter(|(_, st)| st.alive()).map(|(k, st)| {
+            let size = opensow_formats::buildings::footprint(st.kind_id).map_or((1, 1), |(w, h, _)| (w, h));
+            Site { index: k, kind_id: st.kind_id, cell: st.cell, size, own: side_of(st.owner) == Some(side), neutral: side_of(st.owner).is_none(), protected: st.protected }
+        }).collect();
+        let troops: Vec<Trooper> = self.units.iter().filter(|u| u.hp > 0 && u.kind != 40 && u.kind != 46).map(|u| Trooper { id: u.id, cell: u.cell(), kind: u.kind, own: !foe_side(u.player) }).collect();
+        let mut flak: Vec<Flak> = self.structures.iter()
+            .filter(|st| st.alive() && st.heal == 0 && st.kind_id == 26 && side_of(st.owner).map_or(false, |o| o != side))
+            .map(|st| Flak { cell: st.cell, range: 9.0, dps: 0.45 }).collect();
+        flak.extend(self.units.iter().filter(|u| u.hp > 0 && foe_side(u.player) && airlift_ai::is_anti_air(u.kind))
+            .map(|u| Flak { cell: u.cell(), range: weapon_range(u.kind).map_or(9.0, |r| r.1 as f32), dps: 0.3 }));
+        let enemy_advancer = self.units.iter().find(|u| u.hp > 0 && u.kind == 40 && foe_side(u.player)).map(|u| {
+            let on = u.action.map(|(_, k)| k).filter(|&k| self.structures.get(k).is_some_and(|st| side_of(st.owner) == Some(side)));
+            (u.id, u.cell(), on)
+        });
+        Snapshot { map: self.cells, sites, troops, flak, enemy_advancer, stock: self.air_stock[side][g], tick: self.tick, last_launch: self.last_airlift[side], inbound: self.airlifts.iter().filter(|a| a.0 == side).map(|a| a.1).collect(),
+            tuning: match self.difficulty_of(side) {
+                Difficulty::Easy => airlift_ai::Tuning::EASY,
+                Difficulty::Normal => airlift_ai::Tuning::NORMAL,
+                Difficulty::Hard => airlift_ai::Tuning::HARD,
+                Difficulty::Brutal => airlift_ai::Tuning::BRUTAL,
+            },
+            opponent_hq: self.structures.iter().find(|st| st.alive() && st.kind_id == 100 && side_of(st.owner).is_some_and(|o| o != side)).map(|st| {
+                let (w, h) = opensow_formats::buildings::footprint(100).map_or((4, 4), |(w, h, _)| (w, h));
+                (st.cell.0 as f32 + w as f32 / 2.0, st.cell.1 as f32 + h as f32 / 2.0)
+            }),
+        }
+    }
+
+    /// Like `order_action`, with the action given instead of read off the pointer (the computer does not use the human's
+    /// repair toggle).
+    fn order_job(&mut self, id: u32, target: usize, action: Action) {
+        let Some(u) = self.unit(id) else { return };
+        if u.kind != 40 || !self.action_valid(u, action, target) {
+            return;
+        }
+        let cell = self.structures[target].action_cell();
+        let c = centre(cell);
+        self.order_move(id, cell, Some((c.0 as i32, c.1 as i32)));
+        if let Some(u) = self.units.iter_mut().find(|u| u.id == id) {
+            u.action = Some((action, target));
+        }
+    }
+
+    /// Skirmish only: the computer's turrets by `defence::decide` (not the exe's routine). Looks every second while an
+    /// own building is under pressure, every four seconds otherwise (half as often on Easy); at most one gun per look.
+    fn ai_defend(&mut self, side: usize) {
+        use defence::{Foe, Gun, Plan, Site, Snapshot};
+        self.ai_defence -= 1;
+        if self.ai_defence > 0 {
+            return;
+        }
+        let mine = |o: Owner| side_of(o) == Some(side);
+        let foe_side = |p: i32| (p != 0) != (side != 0);
+        let own: Vec<usize> = (0..self.structures.len()).filter(|&k| {
+            let st = &self.structures[k];
+            st.alive() && mine(st.owner) && !matches!(st.kind, ObjectKind::Turret(_))
+        }).collect();
+        let index = |k: usize| own.iter().position(|&o| o == k);
+        let sites: Vec<Site> = own.iter().map(|&k| {
+            let st = &self.structures[k];
+            let c = st.center_cell();
+            let advancer = self.units.iter().any(|u| {
+                u.hp > 0 && u.kind == 40 && foe_side(u.player)
+                    && (u.action.map_or(false, |(_, t)| t == k) || { let uc = u.cell(); (uc.0 - c.0).abs().max((uc.1 - c.1).abs()) <= 6 })
+            });
+            Site { kind_id: st.kind_id, cell: st.cell, advancer }
+        }).collect();
+        let guns: Vec<Gun> = self.structures.iter().enumerate().filter(|(_, t)| t.alive() && mine(t.owner) && (25..=29).contains(&t.kind_id))
+            .map(|(k, t)| Gun { tier: (t.kind_id - 24) as u32, cell: t.cell, attacked: self.units.iter().any(|u| u.hp > 0 && u.kind == 40 && foe_side(u.player) && u.action.is_some_and(|(_, a)| a == k)) }).collect();
+        let foes: Vec<Foe> = self.units.iter().filter(|u| u.hp > 0 && u.kind != 40 && foe_side(u.player)).map(|u| {
+            let weight = if (41..=45).contains(&u.kind) { 2.5 } else if is_anti_air(u.kind) { 0.3 } else { 1.0 };
+            let target = match u.chase.or(u.target) {
+                Some(Target::Structure(k)) => index(k),
+                _ => None,
+            };
+            Foe { cell: u.cell(), weight, target }
+        }).collect();
+        let theirs = |st: &Structure| st.alive() && side_of(st.owner).map_or(false, |o| o != side);
+        let enemy_base = self.structures.iter().find(|st| theirs(st) && st.kind_id == 100).or_else(|| self.structures.iter().find(|st| theirs(st)))
+            .map(|st| st.center_cell());
+        let mut keep_clear = Vec::new();
+        for &k in &own {
+            let st = &self.structures[k];
+            if let Some(e) = factory_exit(st.kind_id) {
+                let at = |d: (i32, i32)| (st.cell.0 + d.0, st.cell.1 + d.1);
+                let (p, a) = (at(e.primary), at(e.alternative));
+                keep_clear.extend([p, (p.0, p.1 + 1), (p.0, p.1 + 2), a, (a.0, a.1 - 1), (a.0, a.1 - 2)]);
+            }
+            keep_clear.extend(st.rally);
+        }
+        let mut snap = Snapshot { sites, guns, foes, enemy_base, credits: self.credits[side], flags: self.turret_flags[side], keep_clear };
+        let urgent = defence::needs(&snap).iter().any(|n| n.urgent(&snap));
+        let me = if side == 0 { Owner::Player } else { Owner::Enemy };
+        // as many guns as the attack needs and the credits allow (at most four per look), each seen by the next decision
+        for _ in 0..4 {
+            let plan = defence::decide(&snap, |tier, cell| {
+                let free = |x: i32, y: i32| !self.is_blocked(x, y) && !self.is_no_build(x, y) && !self.units.iter().any(|u| u.hp > 0 && u.cell() == (x, y)) && !self.structures.iter().any(|s| s.alive() && s.covers((x, y)));
+                let own_near = |x: i32, y: i32| self.structures.iter().any(|s| s.alive() && s.owner == me && s.covers((x, y)));
+                can_place(24 + tier as i32, cell, free, own_near)
+            });
+            let Plan::Build { tier, cell } = plan else { break };
+            if !self.build_turret(side, tier, cell) {
+                break;
+            }
+            snap.guns.push(Gun { tier, cell, attacked: false });
+            snap.credits = self.credits[side];
+        }
+        let slow = if self.difficulty_of(side) == Difficulty::Easy { 2 } else { 1 };
+        self.ai_defence = if urgent { 60 } else { 240 } * slow;
     }
 
     /// The computer's turret routine (`0x431120`): the decision is `formats::turretai::plan` (exe-verified, docs/ai.md item 7);
@@ -2874,6 +3345,64 @@ impl World {
         self.rng = state;
         if let Some(p) = placed {
             self.build_turret(side, p.tier, p.cell);
+        }
+    }
+
+    /// Skirmish, Hard and Brutal: every second the air stock is looked at (`air_ai::decide`); a launch at least every 3 s
+    /// (Brutal) or 6 s (Hard).
+    fn ai_air(&mut self, side: usize) {
+        use air_ai::{Flak, Force, Obj};
+        let gap = if self.difficulty_of(side) == Difficulty::Brutal { 180 } else { 360 };
+        if self.tick % 60 != 0 || self.tick < self.last_air[side] + gap {
+            return;
+        }
+        let mut stock = [0u32; 3];
+        for (n, f) in [AirForce::Bomber, AirForce::Fighter, AirForce::Tripler].into_iter().enumerate() {
+            stock[n] = HEADER_ORDER.iter().position(|&h| h == f).map_or(0, |g| self.air_stock[side][g]) as u32;
+        }
+        if stock == [0; 3] {
+            return;
+        }
+        let foe = |p: i32| (p != 0) != (side != 0);
+        let mut foes: Vec<Obj> = self.units.iter().filter(|u| u.hp > 0 && foe(u.player) && u.kind != 40).map(|u| Obj {
+            cell: u.cell(),
+            w: if (41..=45).contains(&u.kind) { 2.5 } else { 1.0 },
+            aa: is_anti_air(u.kind),
+        }).collect();
+        let mut own: Vec<(i32, i32)> = self.units.iter().filter(|u| u.hp > 0 && !foe(u.player) && u.kind != 40).map(|u| u.cell()).collect();
+        let mut flak: Vec<Flak> = self.units.iter().filter(|u| u.hp > 0 && foe(u.player) && is_anti_air(u.kind))
+            .map(|u| Flak { cell: u.cell(), range: weapon_range(u.kind).map_or(9.0, |r| r.1 as f32) }).collect();
+        for st in self.structures.iter().filter(|st| st.alive()) {
+            match side_of(st.owner) {
+                Some(o) if o != side => {
+                    if st.kind_id == 100 {
+                        continue; // satellite-protected
+                    }
+                    let aa = st.kind_id == 26;
+                    let w = match st.kind_id {
+                        26 => 4.0,
+                        103 | 108 | 105 => 4.0,
+                        25 | 27..=29 | 102 | 106 => 3.0,
+                        _ => 2.0,
+                    };
+                    foes.push(Obj { cell: st.center_cell(), w, aa });
+                    if aa && st.heal == 0 {
+                        flak.push(Flak { cell: st.center_cell(), range: 9.0 });
+                    }
+                }
+                Some(_) => own.push(st.center_cell()),
+                None => {}
+            }
+        }
+        if let Some((force, cell)) = air_ai::decide(stock, &foes, &own, &flak) {
+            let f = match force {
+                Force::Bomber => AirForce::Bomber,
+                Force::Fighter => AirForce::Fighter,
+                Force::Tripler => AirForce::Tripler,
+            };
+            if self.launch_strike(side, f, cell.0 * CELL + CELL / 2, cell.1 * CELL + CELL / 2) {
+                self.last_air[side] = self.tick;
+            }
         }
     }
 
@@ -2969,7 +3498,10 @@ impl World {
             slots.sort_by_key(|a| a.side); // per-side slot arrays, scanned side by side
             anti_air_target(&slots, pos.0, pos.1, current, min, max, if player == 0 { 0 } else { 1 })
         } else {
-            current.filter(|id| self.aircraft.iter().any(|a| a.id == *id))
+            // DELIBERATE DEVIATION: the exe keeps the aircraft between polls without a range check, so a turret finished its volley at
+            // a bomber that had already flown out of range ("shooting at a ghost"); here the kept target is dropped once out of range
+            let hi = max as f64 * opensow_formats::aircraft::AIR_RANGE_STEP as f64;
+            current.filter(|id| self.aircraft.iter().any(|a| a.id == *id && (((pos.0 - a.aim_dx - a.x) as f64).powi(2) + ((pos.1 - a.y) as f64).powi(2)).sqrt() < hi))
         };
         match found {
             Some(id) => self.air_targets.insert(shooter, id),
@@ -2991,11 +3523,51 @@ impl World {
         }
     }
 
+    /// Queue one of the local player's own action sounds (heard anywhere, `player_sounds`).
+    fn player_sound(&mut self, id: u8) {
+        if self.player_sounds.len() < 64 {
+            self.player_sounds.push(id);
+        }
+    }
+
     /// A message for `side`; only the local player (side 0) hears it (`0x402ec0` runs on the audio object of that player).
     fn say(&mut self, side: usize, id: u8) {
         if side == 0 {
             self.log.push((self.tick, id));
         }
+    }
+
+    /// A chat line of the local player; it slides in and expires like a message (480 ticks, `play::message_pose`).
+    pub fn say_chat(&mut self, text: &str) {
+        let now = self.tick;
+        self.chat.retain(|&(t, _)| now.saturating_sub(t) < 2000);
+        self.chat.push((now, text.to_string()));
+    }
+
+    /// A cheat typed into the chat line (`0x426c90`, `formats::cheats`) takes effect for the local player (side 0). Returns
+    /// whether it changed the world; `DrawFps` is a screen setting the caller handles.
+    pub fn apply_cheat(&mut self, cheat: Cheat) -> bool {
+        match cheat {
+            Cheat::Money => self.credits[0] += cheats::MONEY,
+            Cheat::Research => self.research[0] += cheats::RESEARCH,
+            Cheat::OneMinute => match self.timer {
+                // `inc [0x5baac4]` unless the end flag `[0x5baa99]` is set
+                Some((min, sec, mode)) if !self.timer_expired => self.timer = Some((min + 1, sec, mode)),
+                _ => return false,
+            },
+            Cheat::DrawFps => return false,
+            force => {
+                // `0x453e80`: the force joins the stock and its "ready" message plays (position -1, -1); the exe also asks for
+                // sound 49, which the install lacks
+                let code = force.air_code().expect("the other cheats are handled above");
+                let Some(g) = AirForce::from_code(code).and_then(|f| HEADER_ORDER.iter().position(|&h| h == f)) else { return false };
+                self.air_stock[0][g] += 1;
+                if let Some(id) = msg::force_ready(code) {
+                    self.say(0, id);
+                }
+            }
+        }
+        true
     }
 
     /// `say` for an event with a map position (pixels), which the Space key jumps to (docs/hotkeys.md).
@@ -3030,7 +3602,8 @@ impl World {
         self.aircraft.push(a);
         if side == 0 {
             // the launch for the local player pings `airforce-dest` at the target (0x417221, 0x417636: the marker animation + effect 68)
-            self.sound(68, x, y, false);
+            // (the exe plays it at the target, so a strike far off screen was silent; here it is a priority sound)
+            self.player_sound(68);
             // ... and shows the `cross_as` marker (`0x4171d5`: 21 frames, 3 ticks each) at the clicked point, unsnapped
             if let Some(sp) = opensow_formats::effects::SPAWNS.iter().find(|s| s.site == 0x4171d5) {
                 self.effects.push(Effect { x, y, spec: sp.spec, age: 0 });
@@ -3089,10 +3662,26 @@ impl World {
                     } else {
                         squad(n).unwrap_or_default()
                     };
+                    let mut landed = Vec::new();
                     for (dx, dy, kind) in members {
                         let (x, y) = (cell_x + dx, cell_y + dy);
                         if !self.is_blocked(x, y) && !self.units.iter().any(|u| u.hp > 0 && u.cell() == (x, y)) {
-                            self.add_unit(kind, side.min(1) as i32, x * CELL + CELL / 2, y * CELL + CELL / 2);
+                            landed.push(self.add_unit(kind, side.min(1) as i32, x * CELL + CELL / 2, y * CELL + CELL / 2));
+                        }
+                    }
+                    // skirmish: the computer sees what its carryall brought only now and sends each unit by its type
+                    let side_ix = side.min(1) as usize;
+                    if let Some(n) = self.airlifts.iter().position(|&(sd, c, _)| sd == side_ix && (c.0 - cell_x).abs() <= 1 && (c.1 - cell_y).abs() <= 1) {
+                        self.airlifts.remove(n);
+                        let snap = self.airlift_snapshot(side_ix);
+                        let troops: Vec<airlift_ai::Trooper> = snap.troops.iter().filter(|t| landed.contains(&t.id)).copied().collect();
+                        for (id, chase) in airlift_ai::assign(&snap, &troops, (cell_x, cell_y)) {
+                            if let Some(u) = self.units.iter_mut().find(|u| u.id == id) {
+                                u.chase = Some(match chase {
+                                    airlift_ai::Chase::Unit(t) => Target::Unit(t),
+                                    airlift_ai::Chase::Structure(k) => Target::Structure(k),
+                                });
+                            }
                         }
                     }
                 }
@@ -3363,9 +3952,11 @@ impl World {
                 }
             }
             Action::Repair => {
+                // beams still in flight when the building reaches full hit points land on a full building: one message only
+                let was_full = s.hp >= s.max_hp;
                 s.hp = (s.hp + hp_per_event(b.rate)).min(s.max_hp);
                 s.tally[b.side] = (s.tally[b.side] - hp_per_event(b.rate)).max(0);
-                repaired = s.hp >= s.max_hp;
+                repaired = !was_full && s.hp >= s.max_hp;
                 // a blue spark per fragment (`0x410063`)
                 for &(fx, fy, _) in &b.frags {
                     self.effects.push(Effect { x: x + fx, y: y + fy, spec: AnimSpec { array: BODKY_B, from: 6, to: 9, period: 4, repeat: 1, mode: 6 }, age: 0 });
@@ -3504,8 +4095,8 @@ impl World {
                 let state = factories.first().map(|s| maxed(s, 0) as i32 + maxed(s, 1) as i32);
                 if research {
                     match state {
-                        Some(0) => self.hint = Some(Hint { text: 281, half: 0x94, text_dx: 0x89 }),
-                        Some(1) => self.hint = Some(Hint { text: 281, half: 0xbc, text_dx: 0xb1 }),
+                        Some(0) => self.hint = Some(Hint { text: 280, half: 0x94, text_dx: 0x89 }),
+                        Some(1) => self.hint = Some(Hint { text: 280, half: 0xbc, text_dx: 0xb1 }),
                         _ => {}
                     }
                 }
@@ -3515,14 +4106,14 @@ impl World {
                 }
                 if state == Some(2) && fighters >= 8 && self.hint_phase != 2 {
                     self.hint_phase = 1;
-                    self.hint = Some(Hint { text: 282, half: 0xc1, text_dx: 0xb6 });
+                    self.hint = Some(Hint { text: 281, half: 0xc1, text_dx: 0xb6 });
                 }
             }
             Some(6) => {
                 // nothing maxed yet in any medium factory (and at least one exists)
                 let count: Option<i32> = (!factories.is_empty()).then(|| factories.iter().map(|s| maxed(s, 0) as i32 + maxed(s, 1) as i32).sum());
                 if research && count == Some(0) {
-                    self.hint = Some(Hint { text: 281, half: 0x94, text_dx: 0x89 });
+                    self.hint = Some(Hint { text: 280, half: 0x94, text_dx: 0x89 });
                 }
             }
             _ => {}
@@ -3808,16 +4399,16 @@ mod tests {
         assert_eq!(w.hint, None, "needs 500 research points");
         w.research[0] = 500;
         w.update_hint();
-        assert_eq!(w.hint, Some(Hint { text: 281, half: 0x94, text_dx: 0x89 }));
+        assert_eq!(w.hint, Some(Hint { text: 280, half: 0x94, text_dx: 0x89 }));
         w.structures[0].slots[0].level = 2;
         w.update_hint();
-        assert_eq!(w.hint, Some(Hint { text: 281, half: 0xbc, text_dx: 0xb1 }), "one slot at its limit: wider box");
+        assert_eq!(w.hint, Some(Hint { text: 280, half: 0xbc, text_dx: 0xb1 }), "one slot at its limit: wider box");
         w.structures[0].slots[1].level = 2;
         w.update_hint();
         assert_eq!(w.hint, None, "both at the limit, no fighters yet");
         w.air_stock[0][4] = 8;
         w.update_hint();
-        assert_eq!(w.hint, Some(Hint { text: 282, half: 0xc1, text_dx: 0xb6 }));
+        assert_eq!(w.hint, Some(Hint { text: 281, half: 0xc1, text_dx: 0xb6 }));
         assert_eq!(w.hint_phase, 1);
         w.air_stock[0][4] = 7; // a fighter was used
         w.update_hint();
@@ -3826,7 +4417,7 @@ mod tests {
         let mut w = mk(6);
         w.research[0] = 600;
         w.update_hint();
-        assert_eq!(w.hint, Some(Hint { text: 281, half: 0x94, text_dx: 0x89 }));
+        assert_eq!(w.hint, Some(Hint { text: 280, half: 0x94, text_dx: 0x89 }));
         w.structures[0].slots[1].level = 2;
         w.update_hint();
         assert_eq!(w.hint, None);
@@ -4177,6 +4768,18 @@ mod tests {
         }
         assert!(w.corpses.is_empty(), "the slot is freed after the timer runs out");
         assert_eq!(w.occupancy().unwrap().ground.cells[(5 * 128 + 4) as usize], 0);
+    }
+
+    #[test]
+    fn a_dead_advancers_corpse_does_not_block_the_air_cell() {
+        let mut w = open_world(14, 9);
+        let id = w.add_unit(40, 1, 5 * CELL + 16, 4 * CELL + 16);
+        w.units.iter_mut().find(|u| u.id == id).unwrap().hp = 0;
+        w.add_unit(7, 0, 12 * CELL, 8 * CELL);
+        w.step();
+        assert_eq!(w.corpses.len(), 1);
+        let (x, y) = (w.corpses[0].x.div_euclid(CELL), w.corpses[0].y.div_euclid(CELL));
+        assert_eq!(w.occupancy().unwrap().air.cells[(x * 128 + y) as usize], 0, "the spot stays free for the next Advancer");
     }
 
     #[test]
@@ -4598,6 +5201,31 @@ mod tests {
         }
     }
 
+    /// Special tiers 2 and 3 have no muzzle sound; their bullets (types 28 / 29) sound in the constructor instead (effects 8 / 9,
+    /// `effects::constructor_sound`), once per bullet at its start point. Tier 1 keeps its muzzle sound 7 and nothing else.
+    #[test]
+    fn special_tiers_two_and_three_sound_from_the_bullet_constructor() {
+        for (kind, want, not) in [(14, 8u8, 9u8), (15, 9, 8), (13, 7, 8)] {
+            let mut w = open_world(30, 30);
+            w.add_unit(kind, 0, 5 * CELL + 16, 10 * CELL + 16);
+            w.add_unit(7, 1, 9 * CELL + 16, 10 * CELL + 16);
+            let (mut heard, mut wrong, mut bullets) = (0, 0, 0);
+            for _ in 0..400 {
+                let before = w.bullets.len();
+                w.step();
+                bullets += w.bullets.len().saturating_sub(before);
+                heard += w.sounds.iter().filter(|s| s.0 == want).count();
+                wrong += w.sounds.iter().filter(|s| s.0 == not || (kind == 13 && s.0 == 9)).count();
+                w.sounds.clear();
+            }
+            assert!(heard > 0, "kind {kind} should play effect {want}");
+            assert_eq!(wrong, 0, "kind {kind} plays only its own sound");
+            if kind != 13 {
+                assert!(heard >= bullets.min(1), "kind {kind}: {heard} sounds for {bullets} new bullets");
+            }
+        }
+    }
+
     /// An attack order beats the regular target priority (`0x47b140`): a unit in range of both an enemy unit and the building it
     /// was ordered to attack shoots the building.
     #[test]
@@ -4655,6 +5283,36 @@ mod tests {
             }
             assert!(w.structures[0].hp < 400 || w.structures[0].owner == Owner::Player, "{owner:?} building untouched");
         }
+    }
+
+    #[test]
+    fn an_advancer_flying_to_a_building_still_shoots_an_enemy_advancer() {
+        let mut w = open_world(30, 30);
+        let me = w.add_unit(40, 0, 2 * CELL + 16, 2 * CELL + 16);
+        let foe = w.add_unit(40, 1, 6 * CELL + 16, 2 * CELL + 16);
+        w.add_structure(Structure { object: 0, kind: ObjectKind::LightFactory, owner: Owner::Enemy, cell: (25, 25), hp: 400, max_hp: 400, aim: None, weapon: 0, target: None, slots: Vec::new(), active: 0, kind_id: 101, tally: [0; 3], heal: 0, upgrade: 0, protected: false, attacked: false, sat_cd: 0, advancer: None, rally: None, dying: None });
+        w.units.iter_mut().find(|u| u.id == me).unwrap().selected = true;
+        assert!(w.order_action(me, 0));
+        let hp = w.unit(foe).unwrap().hp;
+        for _ in 0..400 {
+            w.step();
+        }
+        assert!(w.unit(foe).map_or(true, |u| u.hp < hp), "the flying Advancer must fire at the enemy Advancer in range");
+    }
+
+    #[test]
+    fn an_advancer_may_be_ordered_against_flyers_and_anti_air_only() {
+        let mut w = open_world(30, 30);
+        let me = w.add_unit(40, 0, 2 * CELL + 16, 2 * CELL + 16);
+        let foe_adv = w.add_unit(40, 1, 12 * CELL + 16, 2 * CELL + 16);
+        let foe_aa = w.add_unit(1, 1, 12 * CELL + 16, 8 * CELL + 16);
+        let foe_gnd = w.add_unit(7, 1, 12 * CELL + 16, 14 * CELL + 16);
+        assert!(w.advancer_can_attack(Target::Unit(foe_adv)));
+        assert!(w.advancer_can_attack(Target::Unit(foe_aa)));
+        assert!(!w.advancer_can_attack(Target::Unit(foe_gnd)));
+        w.units.iter_mut().find(|u| u.id == me).unwrap().selected = true;
+        w.order_attack_selected(Target::Unit(foe_adv));
+        assert!(w.unit(me).unwrap().chase.is_some());
     }
 
     #[test]
@@ -4834,6 +5492,36 @@ mod tests {
         assert!(w.sounds.iter().any(|s| s.0 == 25));
     }
 
+    /// A change of hands drops the upgrades: one active slot and the bought tech-levels.
+    #[test]
+    fn a_captured_building_loses_its_upgrades() {
+        let mut w = open_world(20, 20);
+        let mut b = factory(Owner::Enemy, 0, 101);
+        b.cell = (8, 8);
+        b.tally = [500, 0, 0];
+        b.active = 2;
+        b.slots[0].kind = 8;
+        b.slots[0].level = 1;
+        w.add_structure(b);
+        w.structures[0].hp = 0;
+        w.structure_destroyed(0);
+        settle(&mut w);
+        let s = &w.structures[0];
+        assert_eq!(s.owner, Owner::Player);
+        assert_eq!((s.active, s.slots[0].level, s.slots[0].kind), (1, 0, 7));
+        // a neutral building keeps its level (the exe copies it back only for old owner 2), but loses bought tech-levels too
+        let mut w = open_world(20, 20);
+        let mut b = factory(Owner::Neutral, 0, 101);
+        b.cell = (8, 8);
+        b.tally = [500, 0, 0];
+        b.active = 2;
+        w.add_structure(b);
+        w.structures[0].hp = 0;
+        w.structure_destroyed(0);
+        settle(&mut w);
+        assert_eq!((w.structures[0].owner, w.structures[0].active), (Owner::Player, 2));
+    }
+
     #[test]
     fn a_captured_building_and_a_destroyed_turret_both_burst_and_the_burst_spares_the_rebuild() {
         let mut w = open_world(20, 20);
@@ -4935,6 +5623,220 @@ mod tests {
 
     fn turrets(w: &World) -> Vec<(i32, (i32, i32))> {
         w.structures.iter().filter(|s| matches!(s.kind, ObjectKind::Turret(_))).map(|s| (s.kind_id, s.cell)).collect()
+    }
+
+    #[test]
+    fn in_a_skirmish_one_attacker_gets_one_gun_and_a_wave_several() {
+        let built = |n: usize| {
+            let mut w = turret_world(n, 5000, [true; 5]);
+            w.skirmish = true;
+            for _ in 0..20 {
+                w.ai_defence = 0;
+                w.ai_defend(1);
+            }
+            turrets(&w)
+        };
+        let one = built(1);
+        assert_eq!(one.len(), 1, "{one:?}");
+        let wave = built(6);
+        assert!(wave.len() >= 3 && wave.len() <= 5, "{wave:?}");
+        // the attackers stand south of the factory (rows 12, factory rows 8..10): the direct guns face them
+        assert!(wave.iter().filter(|t| t.0 != 29).all(|t| t.1 .1 >= 10), "{wave:?}");
+    }
+
+    /// Skirmish world: the computer's HQ (with its Advancer) in the west, a neutral gold mine guarded by the player's anti-air
+    /// turret and an open neutral windtrap.
+    fn advancer_world() -> (World, usize, usize) {
+        let mut w = open_world(48, 24);
+        w.structures.clear();
+        let mut hq = factory(Owner::Enemy, 13536, 100);
+        hq.kind = ObjectKind::Headquarters;
+        hq.cell = (2, 10);
+        hq.protected = true;
+        w.add_structure(hq);
+        let mut mine = factory(Owner::Neutral, 6768, 105);
+        mine.kind = ObjectKind::GoldMine;
+        mine.cell = (22, 4);
+        mine.slots.clear();
+        let mine_k = w.structures.len();
+        w.add_structure(mine);
+        // two of them: too much fire to take one out
+        for cell in [(24, 8), (20, 8)] {
+            let mut aa = factory(Owner::Player, 1250, 26);
+            aa.kind = ObjectKind::Turret(2);
+            aa.cell = cell;
+            aa.weapon = 110;
+            aa.aim = TopAim::new(110, 0);
+            aa.max_hp = 1250;
+            aa.slots.clear();
+            w.add_structure(aa);
+        }
+        let mut wind = factory(Owner::Neutral, 6768, 107);
+        wind.kind = ObjectKind::Wind;
+        wind.cell = (16, 18);
+        wind.slots.clear();
+        let wind_k = w.structures.len();
+        w.add_structure(wind);
+        w.ai = true;
+        w.skirmish = true;
+        (w, mine_k, wind_k)
+    }
+
+    #[test]
+    fn the_skirmish_advancer_takes_the_open_building_first_then_pushes_the_guarded_one() {
+        let (mut w, mine, wind) = advancer_world();
+        // the exe's pick would go for the gold mine first (worth more, a foreign A.A. turret next to it even scores a bonus)
+        let mut first: std::collections::BTreeMap<usize, u64> = Default::default();
+        let (mut captured, mut fallen) = (None, None);
+        for _ in 0..12000 {
+            w.step();
+            for u in w.units.iter().filter(|u| u.kind == 40 && u.player == 1 && u.hp > 0) {
+                if let Some((_, k)) = u.action {
+                    first.entry(k).or_insert(w.tick);
+                }
+            }
+            if fallen.is_none() && w.structures[wind].hp <= 0 {
+                fallen = Some(w.tick);
+            }
+            if captured.is_none() && w.structures[wind].owner == Owner::Enemy {
+                captured = Some(w.tick);
+            }
+        }
+        assert!(captured.is_some(), "the windtrap was captured");
+        let fallen = fallen.unwrap();
+        for k in [mine, 2, 3] {
+            assert!(first.get(&k).map_or(true, |&t| t >= fallen), "nothing guarded before the open windtrap fell: {first:?}, fell at {fallen}");
+        }
+        assert!([mine, 2, 3].iter().any(|k| first.contains_key(k)), "then it does not sit at home: {first:?}");
+    }
+
+    #[test]
+    fn a_skirmish_advancer_shot_down_does_not_return_to_the_same_target() {
+        let (mut w, mine, _) = advancer_world();
+        // pretend the mine looked safe: the planner sends the Advancer there, then it dies on the way
+        w.adv_mind[1].tasks.push(advancer_ai::Task { unit: 999, target: mine, job: advancer_ai::Job::Destroy, start_hp: 800, best: f32::MAX, best_tick: 0, score: 1.0, forced: false });
+        for _ in 0..31 {
+            w.step();
+        }
+        assert!(w.adv_mind[1].denied.iter().any(|d| d.target == mine), "{:?}", w.adv_mind[1]);
+        for _ in 0..600 {
+            w.step();
+            assert!(w.units.iter().all(|u| !(u.kind == 40 && u.player == 1 && u.action.is_some_and(|(_, k)| k == mine))));
+        }
+    }
+
+    #[test]
+    fn the_skirmish_computer_airlifts_a_squad_to_a_building_under_attack() {
+        let mut w = open_world(48, 24);
+        w.structures.clear();
+        let mut hq = factory(Owner::Enemy, 13536, 100);
+        hq.kind = ObjectKind::Headquarters;
+        hq.cell = (2, 10);
+        hq.protected = true;
+        hq.slots.clear();
+        w.add_structure(hq);
+        let mut mine = factory(Owner::Enemy, 13536, 105);
+        mine.kind = ObjectKind::GoldMine;
+        mine.cell = (20, 10);
+        mine.slots.clear();
+        w.add_structure(mine);
+        let attackers: Vec<u32> = (0..3).map(|i| w.add_unit(7, 0, 15 * CELL + 16, (10 + i) * CELL + 16)).collect();
+        let g = HEADER_ORDER.iter().position(|&h| h == AirForce::Carryall).unwrap();
+        w.air_stock[1][g] = 2;
+        w.carry_counter = 9; // the next squad is 0: four kind 7 and four kind 10 (the computer does not know that)
+        w.ai = true;
+        w.skirmish = true;
+        let before = w.units.len();
+        let mut chasing = 0;
+        for _ in 0..1500 {
+            w.step();
+            chasing = chasing.max(w.units.iter().filter(|u| u.player == 1 && u.kind != 40 && u.hp > 0 && matches!(u.chase, Some(Target::Unit(id)) if attackers.contains(&id))).count());
+            if chasing > 0 {
+                break;
+            }
+        }
+        assert!(w.air_stock[1][g] < 2, "carryalls flown (a second one may follow to a spot beside the first)");
+        assert!(w.units.len() > before, "the squad landed");
+        assert!(chasing >= 4, "the squad goes for the attackers: {chasing}");
+        let dropped: Vec<(i32, i32)> = w.units.iter().filter(|u| u.player == 1 && u.kind != 40).map(|u| u.cell()).collect();
+        assert!(dropped.iter().all(|c| c.0 >= 13 && c.0 <= 23), "landed between the attackers and the mine: {dropped:?}");
+    }
+
+    #[test]
+    fn start_units_stand_around_each_hq_on_free_cells() {
+        let mut w = open_world(40, 40);
+        w.structures.clear();
+        for (owner, cell) in [(Owner::Player, (6, 6)), (Owner::Enemy, (30, 30))] {
+            let mut hq = factory(owner, 13536, 100);
+            hq.kind = ObjectKind::Headquarters;
+            hq.cell = cell;
+            hq.slots.clear();
+            w.add_structure(hq);
+        }
+        let kinds = crate::skirmish::start_units("01-goldmine valley");
+        for side in 0..2 {
+            w.add_start_units(side, kinds, |c| c.1 == 20); // a row of trees
+        }
+        for (p, home) in [(0, (8, 8)), (1, (32, 32))] {
+            let mine: Vec<&Unit> = w.units.iter().filter(|u| u.player == p).collect();
+            let mut got: Vec<i32> = mine.iter().map(|u| u.kind).collect();
+            got.sort();
+            let mut want = kinds.to_vec();
+            want.sort();
+            assert_eq!(got, want, "player {p}: the same twelve");
+            for u in &mine {
+                let c = u.cell();
+                assert!((c.0 - home.0).abs().max((c.1 - home.1).abs()) <= 16, "around the HQ: {c:?}");
+                assert!(!w.structures.iter().any(|s| s.covers(c)), "not inside a building: {c:?}");
+            }
+        }
+        let cells: std::collections::HashSet<(i32, i32)> = w.units.iter().map(|u| u.cell()).collect();
+        assert_eq!(cells.len(), w.units.len(), "one unit per cell");
+        assert!(cells.iter().all(|c| c.1 != 20), "none under the trees");
+        // two 3x2 blocks of six, each column one pair of one kind, apart from each other and 6+ cells from the HQ's middle
+        for (p, home) in [(0, (8, 8)), (1, (32, 32))] {
+            let mine: Vec<&Unit> = w.units.iter().filter(|u| u.player == p).collect();
+            for (b, block) in mine.chunks(6).enumerate() {
+                let (x0, y0) = block.iter().map(|u| u.cell()).min().unwrap();
+                for (i, u) in block.iter().enumerate() {
+                    assert_eq!(u.cell(), (x0 + i as i32 / 2, y0 + i as i32 % 2), "player {p} block {b} unit {i}");
+                    assert_eq!(u.kind, kinds[6 * b + i]);
+                }
+                for c in 0..3 {
+                    assert_eq!(block[2 * c].kind, block[2 * c + 1].kind, "column {c} is a pair");
+                }
+                let (mx2, my2) = (x0 * 2 + 2 - home.0 * 2, y0 * 2 + 1 - home.1 * 2);
+                assert!((mx2.abs().max(my2.abs()) + 1) / 2 >= 6, "player {p} block {b} at {:?} is not by the HQ", (x0, y0));
+            }
+            let (a, b) = (mine[0].cell(), mine[6].cell());
+            assert!((a.0 - b.0).abs() >= 4 || (a.1 - b.1).abs() >= 3, "the blocks stand apart: {a:?} {b:?}");
+        }
+    }
+
+    #[test]
+    fn the_campaign_computer_never_calls_a_carryall() {
+        let mut w = turret_world(4, 0, [false; 5]);
+        let g = HEADER_ORDER.iter().position(|&h| h == AirForce::Carryall).unwrap();
+        w.air_stock[1][g] = 3;
+        w.ai = true;
+        for _ in 0..1200 {
+            w.step();
+        }
+        assert_eq!(w.air_stock[1][g], 3);
+    }
+
+    #[test]
+    fn the_skirmish_planner_waits_between_looks() {
+        let mut w = turret_world(1, 5000, [true; 5]);
+        w.skirmish = true;
+        w.ai_defend(1);
+        assert_eq!(turrets(&w).len(), 1);
+        assert_eq!(w.ai_defence, 60, "under pressure: again in a second");
+        let mut w = turret_world(0, 2000, [true; 5]);
+        w.skirmish = true;
+        w.ai_defend(1);
+        assert!(turrets(&w).is_empty(), "a calm opening buys nothing (piled-up money, 3000+, would fortify)");
+        assert_eq!(w.ai_defence, 240);
     }
 
     #[test]
@@ -5175,6 +6077,44 @@ mod tests {
     }
 
     #[test]
+    fn the_anti_air_turret_stops_shooting_when_the_bomber_flies_out_of_range() {
+        let mut w = open_world(60, 20);
+        let mut t = factory(Owner::Player, 1, 0);
+        t.kind = ObjectKind::Turret(2);
+        t.kind_id = 26;
+        t.cell = (5, 10);
+        t.weapon = 110;
+        t.aim = TopAim::new(110, 0);
+        t.max_hp = 1000;
+        t.hp = 1000;
+        w.structures.clear();
+        w.add_structure(t);
+        w.add_unit(7, 1, 55 * CELL, 18 * CELL); // keeps the mission from ending
+        w.air_stock[1][0] = 1;
+        assert!(w.launch_strike(1, AirForce::Bomber, 50 * CELL, 10 * CELL));
+        let max = w.structures[0].aim.as_ref().unwrap().params.max_range as i32 * 50;
+        w.aircraft[0].x = 5 * CELL - 300;
+        w.aircraft[0].hp = 1_000_000;
+        let (mut shots_out_of_range, mut shots) = (0, 0);
+        let mut seen = 0;
+        for _ in 0..1500 {
+            w.step();
+            let Some(a) = w.aircraft.first() else { break };
+            let d = (a.x - (5 * CELL + 16)).abs();
+            let n = w.bullets.iter().filter(|b| b.bullet_type == 1).count();
+            if n > seen {
+                shots += 1;
+                if d > max {
+                    shots_out_of_range += 1;
+                }
+            }
+            seen = n;
+        }
+        assert!(shots > 0, "the turret shot at the bomber at all");
+        assert_eq!(shots_out_of_range, 0, "no new missile once the bomber is well past the range (max {max})");
+    }
+
+    #[test]
     fn a_shot_at_an_advancer_meets_its_hovering_sprite() {
         let mut w = open_world(20, 20);
         let id = w.add_unit(40, 1, 8 * CELL + 16, 8 * CELL + 16);
@@ -5404,6 +6344,73 @@ mod tests {
         assert_eq!(w.structures[0].owner, Owner::Enemy);
     }
 
+    /// Skirmish difficulty (docs/skirmish.md): only the computer's side is scaled, Normal is the exe's behaviour, hundredths carry over.
+    #[test]
+    fn difficulty_scales_the_computers_income_only_and_levels_are_ordered() {
+        for (d, expect) in [(Difficulty::Easy, 7), (Difficulty::Normal, 12), (Difficulty::Hard, 18), (Difficulty::Brutal, 30)] {
+            let mut w = open_world(16, 12);
+            w.difficulty = d;
+            for owner in [Owner::Player, Owner::Enemy] {
+                let mut mine = factory(owner, 13536, 105);
+                mine.kind = ObjectKind::GoldMine;
+                mine.cell = (2 + 5 * (owner == Owner::Enemy) as i32, 2);
+                mine.active = 2; // 3 credits per second
+                w.add_structure(mine);
+            }
+            w.add_unit(7, 0, 8 * CELL, 8 * CELL);
+            w.add_unit(7, 1, 15 * CELL, 11 * CELL);
+            w.ai = true;
+            w.cheats.freeze_enemy = true; // the computer does not spend what it earns
+            for _ in 0..4 * 60 + 5 {
+                w.step();
+            }
+            assert_eq!(w.credits[0], 12, "{d:?}: the human's mine is never scaled (3 x 4 s)");
+            // 3 credits x pct per second for four payouts; the hundredths are kept, not lost
+            assert_eq!(w.credits[1], expect, "{d:?}");
+        }
+        assert_eq!(Difficulty::Brutal.next(), Difficulty::Easy);
+        assert_eq!(Difficulty::Normal.handicap(), Handicap { income_pct: 100, production_pct: 100, think_every: 1, strike_period: 600 });
+        assert!(Difficulty::ALL.windows(2).all(|p| p[0].handicap().income_pct < p[1].handicap().income_pct && p[0].handicap().production_pct < p[1].handicap().production_pct));
+    }
+
+    /// `--spectate`: the computer plays side 0 too, with its own difficulty and its own timers.
+    #[test]
+    fn a_spectated_game_runs_the_computer_for_both_sides_with_separate_timers() {
+        let mut w = open_world(30, 30);
+        w.ai = true;
+        w.difficulty = Difficulty::Hard;
+        w.difficulty0 = Difficulty::Easy;
+        assert_eq!((w.difficulty_of(0), w.difficulty_of(1)), (Difficulty::Hard, Difficulty::Hard), "no spectate: side 0 is the human");
+        w.spectate = true;
+        assert_eq!((w.difficulty_of(0), w.difficulty_of(1)), (Difficulty::Easy, Difficulty::Hard));
+        let id = w.add_unit(7, 0, 4 * CELL, 4 * CELL);
+        w.add_unit(6, 1, 25 * CELL, 25 * CELL);
+        w.ai_timer = 1000;
+        w.spectate_ai = (3, 1000, 600, 0);
+        w.tick = 120; // Easy thinks every 120 ticks
+        w.step_ai_spectate();
+        assert!(w.unit(id).is_some_and(|u| u.chase.is_some()), "blue's idle unit gets orders");
+        assert_eq!(w.ai_timer, 1000, "green's timer is untouched by blue's run");
+    }
+
+    #[test]
+    fn an_easy_computer_re_orders_idle_units_only_every_two_seconds() {
+        let count = |d: Difficulty| {
+            let mut w = open_world(30, 30);
+            w.difficulty = d;
+            w.add_unit(6, 0, 4 * CELL, 4 * CELL);
+            let id = w.add_unit(7, 1, 25 * CELL, 25 * CELL);
+            w.ai = true;
+            w.ai_strategy = 3;
+            w.ai_timer = 1000;
+            w.tick = 1;
+            w.step_ai(1);
+            w.unit(id).is_some_and(|u| u.chase.is_some())
+        };
+        assert!(count(Difficulty::Normal), "the exe orders an idle unit at once");
+        assert!(!count(Difficulty::Easy), "an easy computer waits for its next think tick");
+    }
+
     #[test]
     fn mines_and_labs_earn_every_second_and_tech_levels_cost_research() {
         let mut w = open_world(16, 12);
@@ -5464,7 +6471,7 @@ mod tests {
         }
         assert_eq!(w.air_stock[0][0], 1, "one bomber after 44 s");
         assert!(w.launch_strike(0, AirForce::Bomber, 20 * CELL + 16, 5 * CELL + 16));
-        assert!(w.sounds.iter().any(|s| s.0 == 68), "the local launch pings airforce-dest");
+        assert!(w.player_sounds.contains(&68), "the local launch pings airforce-dest, as a priority sound");
         assert!(w.effects.iter().any(|e| e.spec.array == 0x5e5fb0), "and shows the cross_as marker at the target");
         assert_eq!(w.air_stock[0][0], 0);
         for _ in 0..1500 {
@@ -5665,5 +6672,45 @@ mod tests {
         let fresh: Vec<_> = w.effects.iter().skip(before).collect();
         assert!(fresh.iter().all(|e| e.spec == UNIT_CLOUD));
         assert!(fresh.iter().any(|e| (e.x - 16).rem_euclid(CELL) != 0 || (e.y - 16).rem_euclid(CELL) != 0), "off the cell grid");
+    }
+    /// The unit's line is the exe's pixel line (`0x46ee80`) kept as a list of points; the incremental Bresenham the sim used before
+    /// (error term `err += minor`, minor step when `2*err >= major`) walks exactly the same pixels.
+    #[test]
+    fn the_stored_pixel_line_is_the_incremental_bresenham() {
+        let mut seed = 12345u32;
+        let mut rnd = |m: i32| {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            ((seed >> 8) % m as u32) as i32
+        };
+        for _ in 0..2000 {
+            let (x0, y0, x1, y1) = (rnd(300), rnd(300), rnd(300), rnd(300));
+            let pts = opensow_formats::walk::pixel_line(x0, y0, x1, y1);
+            let (dx0, dy0) = (x1 - x0, y1 - y0);
+            let (major, minor) = (dx0.abs().max(dy0.abs()), dx0.abs().min(dy0.abs()));
+            let (mut x, mut y, mut err) = (x0, y0, 0);
+            let mut walked = vec![(x, y)];
+            while (x, y) != (x1, y1) {
+                let (dx, dy) = (x1 - x, y1 - y);
+                err += minor;
+                let minor_step = 2 * err >= major && minor > 0;
+                if minor_step {
+                    err -= major;
+                }
+                let (sx, sy) = (dx.signum(), dy.signum());
+                if dx.abs() >= dy.abs() {
+                    x += sx;
+                    if minor_step {
+                        y += sy;
+                    }
+                } else {
+                    y += sy;
+                    if minor_step {
+                        x += sx;
+                    }
+                }
+                walked.push((x, y));
+            }
+            assert_eq!(walked, pts, "({x0},{y0}) -> ({x1},{y1})");
+        }
     }
 }

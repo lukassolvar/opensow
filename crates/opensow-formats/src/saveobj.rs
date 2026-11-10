@@ -434,6 +434,11 @@ impl Object {
         self.children.iter().find(|c| c.0 == offset).map(|c| &c.1)
     }
 
+    /// The child record embedded at `offset`, mutable.
+    pub fn child_mut(&mut self, offset: u32) -> Option<&mut Object> {
+        self.children.iter_mut().find(|c| c.0 == offset).map(|c| &mut c.1)
+    }
+
     /// Reads one record of `class` (header included).
     pub fn parse(r: &mut Reader, class: Class) -> Result<Object> {
         let head = (r.u16("version")?, r.u16("magic")?);

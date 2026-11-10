@@ -22,7 +22,7 @@ The per-frame key handler of the running game is `0x415ba0` (continued up to `0x
 | Space (0x39), numpad 0 (0x52) | `+0x9d`, `+0xb6` | `0x416177` | if a message line is shown (`0x4037b0`: `[list+0x14] > 0`; a line lives 480 ticks), the view jumps (`0x4588c0`) to the **position of the last message event** (`[0x6bf6b0 + player*0x20 + 4/8]`, written by `0x402ec0(id, x, y, player)` unless x / y are -1, so it survives later position-less events) | done (`World::say_at`, `event_position`, `Play::look_at_event`) |
 | X (0x2d) | `+0x91` | `0x4167e1` -> `0x418dc0` | scatter: the selected units are spread round the centre of their box (UnitScatter command `0x418ea5`) | **not ported** |
 | R (0x13) | `+0x77` | `0x416769` | rally mode of the selected own factory, else Advancer repair mode | done (docs/rally.md) |
-| Enter (0x1c) | `+0x80` | `0x41612d` | network: opens the chat line (`[0x5baa9a]`) | not ported |
+| Enter (0x1c) | `+0x80` | `0x41612d` | opens the chat line (`[0x5baa9a]`), in single player too; typed text and cheat phrases: docs/chat.md | done (`Play::chat_*`) |
 | F1 (0x3b) | `+0x9f` | `0x415bda` | sound 0x20, toggles the FPS counter `[0x5baa9b]` | not ported |
 | F2 (0x3c) | `+0xa0` | `0x415c05` | abandon the mission to the campaign map (not in a network game) | done |
 | F3 / F4 (0x3d / 0x3e) | `+0xa1/0xa2` | `0x415c49`, `0x415cb1` | game speed `[0x49ceec]` (starts at 1.0, kept from mission to mission) -0.5 / +0.5, clamped to 0.5..3.0 (the code clamps below 0.51 / above 2.99), then message 0x1a / 0x19 (the "speed %.1f" line, string 144); not in a network game. It scales the frame time in `0x42e890` | done (`Game::game_speed`; the on-screen "speed" line is not drawn) |

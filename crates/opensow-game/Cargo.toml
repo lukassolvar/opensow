@@ -12,6 +12,8 @@ opensow-viewer = { path = "../opensow-viewer" }
 jpeg-decoder = "0.3"
 png = "0.17"
 softbuffer = "0.4"
+wgpu = "30"
+pollster = "1"
 winit = "0.30"
 rodio = { version = "0.23", default-features = false, features = ["playback"] }
 ab_glyph = "0.2.32"

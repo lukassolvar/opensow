@@ -72,3 +72,5 @@ The viewer shows the stock in the window title. The air pills' hover glow is `ik
 
 ## Header words (status)
 Words 2-3 are the start **credits** of player and enemy, words 37-38 the start research points, the other words the exe reads are listed in docs/ai.md (all others are ignored). Air-base slots (kinds 30-34, target 4000) add one force to the stock when full; the strike click calls `0x467ee0` and `0x455520` removes it from the stock; the AI launches a bomber, fighter or tripler every 600 ticks if it has one.
+
+**Deliberate deviation (anti-air kept target):** between the top's 30-tick polls the exe keeps the last aircraft without a range check, so a turret finished its volley at a bomber that had already left the range. `World::anti_air_aircraft` now drops a kept aircraft that is `>= max * 50` px away. Test `the_anti_air_turret_stops_shooting_when_the_bomber_flies_out_of_range`.

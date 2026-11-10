@@ -1,14 +1,19 @@
 //! `opensow-game`: a playable prototype with the original menus and a skirmish on the campaign levels.
 //!
 //! ```text
-//! opensow-game [--no-intro] [--mute] [--lang SK|CZ|PL|HU|RU|CHINNESSE]   start the game window (shows the boot pictures and plays the intro movie first; any key or click skips it)
+//! opensow-game [--no-intro] [--mute] [--windowed] [--lang SK|CZ|CS|CT]   start the game fullscreen (F11 toggles, `--windowed` opens a window; shows the boot pictures and plays the intro movie first; any key or click skips it)
+//!   `--no-enhance` (or OPENSOW_ENHANCE=0) turns off the run-time texture enhancement of the zoomed-in world (docs/enhance.md); `--no-fx` (OPENSOW_FX=0) the soft/contact shadows and explosion glow (docs/fx.md); `--no-sound-enhance` (OPENSOW_SOUND_ENHANCE=0) plays the sounds exactly as before: no sinc resampling, fades or limiter (docs/audio.md)
 //! opensow-game --screenshot out.png [--size WxH] [--screen main|levels|options|pause|message|results]
 //!              [--mute] [--boot-page N] [--intro-frame N [--movie mI|mO|M01..M22]] [--hover N] [--play M01 [--ticks N] [--select-all] [--select-building CX,CY] [--move CX,CY] [--zoom Z] [--center CX,CY] [--range] [--fx CX,CY,KIND,AGE]... [--no-mask]]
 //! ```
 
 mod assets;
 mod devtools;
+mod edition;
 mod gdi;
+mod gpu;
+mod hifi;
+mod replay;
 mod hud;
 mod infobox;
 mod boot;
@@ -21,6 +26,10 @@ mod multiplayer;
 mod music;
 mod play;
 mod saveui;
+mod skirmish;
+mod skirmish_ui;
+mod tr;
+mod stars;
 mod sfx;
 mod results;
 mod sim;
@@ -39,7 +48,7 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{CustomCursor, Cursor, Window, WindowId};
+use winit::window::{CustomCursor, Cursor, Fullscreen, Window, WindowId};
 
 /// What happens when the movie on screen ends or is skipped.
 #[derive(Debug, Clone, PartialEq)]
@@ -103,6 +112,12 @@ struct Game {
     saveui: Option<saveui::SaveUi>,
     /// The multiplayer screens (docs/multiplayer-menus.md).
     net_menu: Option<multiplayer::NetMenu>,
+    /// The skirmish setup screen (`skirmish_ui.rs`).
+    skirmish_menu: Option<skirmish_ui::SkirmishMenu>,
+    /// The running skirmish's choices (map, setup, the human's side), for RESTART (docs/skirmish.md).
+    skirmish: Option<SkirmishRun>,
+    /// The stars earned in skirmishes (`stars.rs`).
+    stars: stars::Stars,
     /// The Esc menu while the pause screen is up (created when it opens, dropped when it closes).
     ingame: Option<ingame::InGameMenu>,
     /// The banner and statistics screens after a mission while they are up (states 9 / 0xa and 0x16 of the exe, docs/results.md).
@@ -119,12 +134,54 @@ struct Game {
     dev: devtools::DevTools,
 }
 
+/// The running skirmish's choices, for RESTART and for the star.
+#[derive(Clone)]
+struct SkirmishRun {
+    map: String,
+    setup: multiplayer::Setup,
+    human: usize,
+    difficulty: sim::Difficulty,
+    /// Dev tool (`--spectate`): the computer plays blue too, at this difficulty (docs/skirmish.md).
+    spectate: Option<sim::Difficulty>,
+    /// The lobby still had the map's own credits, research, air forces and turrets: a win earns a star.
+    default_setup: bool,
+}
+
 impl Game {
     fn new(assets: Assets) -> Game {
         let levels = opensow_viewer::scene::Scene::list(&assets.game);
-        let mut g = Game { assets, numpad: false, digit: None, game_speed: 1.0, settings: Settings::default(), levels, screen: Some(Screen::Main), back: Vec::new(), play: None, carry_counter: 0, hover: None, pressed: None, shift: false, quick_save: false, scale: 1.0, cursor: (0, 0), quit: false, intro: None, boot: None, then: Then::Menu, language: 0, movies: false, mute: false, lands: None, options_menu: None, saveui: None, net_menu: None, ingame: None, results: None, options: options::GameOptions::load(), progress: opensow_formats::config::PassedLevels::initial(), campaign: false, music: music::Music::new(), sfx: sfx::Sfx::new(), dev: devtools::DevTools::default() };
+        let mut g = Game { assets, numpad: false, digit: None, game_speed: 1.0, settings: Settings::default(), levels, screen: Some(Screen::Main), back: Vec::new(), play: None, carry_counter: 0, hover: None, pressed: None, shift: false, quick_save: false, scale: 1.0, cursor: (0, 0), quit: false, intro: None, boot: None, then: Then::Menu, language: 0, movies: false, mute: false, lands: None, options_menu: None, saveui: None, net_menu: None, skirmish_menu: None, skirmish: None, stars: stars::Stars::load(), ingame: None, results: None, options: options::GameOptions::load(), progress: opensow_formats::config::PassedLevels::initial(), campaign: false, music: music::Music::new(), sfx: sfx::Sfx::new(), dev: devtools::DevTools::default() };
         g.apply_audio();
+        g.progress = g.load_progress();
         g
+    }
+
+    /// The saved progress of the selected campaign, or its start (tests never read the disk).
+    fn load_progress(&self) -> opensow_formats::config::PassedLevels {
+        use opensow_formats::{config::PassedLevels, Edition};
+        let saved = if cfg!(test) { None } else { saveui::Store::locate(&self.assets.game).load_progress() };
+        saved.unwrap_or_else(|| if self.assets.game.edition == Edition::Warmonger { PassedLevels::initial_warmonger() } else { PassedLevels::initial() })
+    }
+
+    /// Switch the campaign (docs/warmonger.md): mission data, skirmish maps, progress and saves follow the edition.
+    fn set_edition(&mut self, e: opensow_formats::Edition) {
+        if self.assets.game.edition == e || (e == opensow_formats::Edition::Warmonger && self.assets.game.warmonger.is_none()) {
+            return;
+        }
+        self.save_progress();
+        self.assets.game.edition = e;
+        self.levels = opensow_viewer::scene::Scene::list(&self.assets.game);
+        self.progress = self.load_progress();
+        edition::remember(e);
+    }
+
+    /// Writes the campaign progress to `player.cfg` (the exe does it after every change); tests never touch the disk.
+    fn save_progress(&self) {
+        if !cfg!(test) {
+            if let Err(e) = saveui::Store::locate(&self.assets.game).save_progress(&self.progress) {
+                eprintln!("progress not saved: {e}");
+            }
+        }
     }
 
     fn buttons(&mut self, w: usize, h: usize) -> Vec<menu::Button> {
@@ -194,6 +251,7 @@ impl Game {
     }
 
     fn start(&mut self, level: &str) {
+        self.skirmish = None;
         match Play::new(&mut self.assets, level, &self.settings, self.carry_counter) {
             Ok(p) => {
                 self.play_music(&format!("Level{:02}", 1 + music::pick(4)));
@@ -220,6 +278,7 @@ impl Game {
             Action::Options => self.open_options(),
             Action::LoadGame => self.open_saveui(saveui::Mode::Load),
             Action::Multiplayer => self.open_multiplayer(),
+            Action::Skirmish => self.open_skirmish(),
             Action::Prototype => self.push(Screen::Options),
             Action::Exit => self.quit = true,
             Action::Level(l) => {
@@ -254,12 +313,18 @@ impl Game {
             }
             Action::Restart => {
                 self.ingame = None;
-                if let Some(l) = self.play.as_ref().map(|p| p.level.clone()) {
+                if let Some(run) = self.skirmish.clone() {
+                    let script = skirmish::load_map(&self.assets.game, &run.map);
+                    if let Some(script) = script {
+                        self.start_skirmish(run, script);
+                    }
+                } else if let Some(l) = self.play.as_ref().map(|p| p.level.clone()) {
                     self.start(&l);
                 }
             }
             Action::ToMain => {
                 self.ingame = None;
+                self.skirmish = None;
                 self.play = None;
                 self.campaign = false;
                 self.play_music("Menu");
@@ -281,9 +346,10 @@ impl Game {
     /// The campaign progress the map shows: with the dev tools' UNLOCK ALL every locked land is open.
     fn effective_progress(&self) -> opensow_formats::config::PassedLevels {
         let mut p = self.progress.clone();
+        let wm = self.assets.game.edition == opensow_formats::Edition::Warmonger;
         if self.dev.unlock_all {
             for l in 1..p.states.len() {
-                if p.states[l] == 0 {
+                if p.states[l] == 0 && (!wm || opensow_formats::warmonger::case_of(l).is_some()) {
                     p.states[l] = 2;
                 }
             }
@@ -292,8 +358,14 @@ impl Game {
     }
 
     /// Mission running with nothing on top of it (the dev tools may place units).
+    /// The frame can be recorded for the GPU (`opensow_viewer::record`): everything but a frame a save thumbnail is taken from.
+    fn gpu_drawable(&self) -> bool {
+        // the save thumbnails are taken from the drawn picture: those frames stay on the CPU
+        !self.quick_save && !self.saveui.as_ref().is_some_and(|m| m.needs_capture())
+    }
+
     fn in_mission(&self) -> bool {
-        self.play.is_some() && self.screen.is_none() && self.intro.is_none() && self.lands.is_none() && self.options_menu.is_none() && self.saveui.is_none() && self.net_menu.is_none() && self.results.is_none()
+        self.play.is_some() && self.screen.is_none() && self.intro.is_none() && self.lands.is_none() && self.options_menu.is_none() && self.saveui.is_none() && self.net_menu.is_none() && self.skirmish_menu.is_none() && self.results.is_none()
     }
 
     /// Dev tools: a pressed tool button took effect.
@@ -342,6 +414,12 @@ impl Game {
                 self.lands = None;
                 self.screen = Some(Screen::Main);
                 self.play_music("Menu");
+            }
+            lands::Event::Edition(e) => {
+                self.set_edition(e);
+                // the same map for the other campaign: no animation, the music keeps playing
+                let progress = self.effective_progress();
+                self.lands = Some(lands::Lands::new(&mut self.assets, progress, false, self.mute));
             }
             lands::Event::Accept(land) => {
                 self.lands = None;
@@ -393,6 +471,80 @@ impl Game {
     fn open_multiplayer(&mut self) {
         self.net_menu = Some(multiplayer::NetMenu::new(&mut self.assets));
         self.screen = None;
+    }
+
+    /// Main menu SKIRMISH: the multiplayer lobby against the computer (docs/skirmish.md).
+    fn open_skirmish(&mut self) {
+        self.skirmish_menu = Some(skirmish_ui::SkirmishMenu::new(&mut self.assets, &self.stars));
+        self.screen = None;
+    }
+
+    /// `--skirmish`: picks the map by (a prefix of) its name in the skirmish lobby and starts it.
+    fn headless_skirmish(&mut self, map: &str, human: usize, credits: Option<(i32, i32)>, research: Option<(i32, i32)>, difficulty: sim::Difficulty, spectate: Option<sim::Difficulty>) {
+        let mut menu = skirmish_ui::SkirmishMenu::new(&mut self.assets, &self.stars);
+        let wanted = map.to_lowercase();
+        let Some(i) = menu.maps.iter().position(|m| m.to_lowercase().starts_with(&wanted)) else {
+            eprintln!("no skirmish map {map}; available: {:?}", menu.maps);
+            return;
+        };
+        menu.select_map(i);
+        if let Some((a, b)) = credits {
+            menu.setup.sides[0].credits = a;
+            menu.setup.sides[1].credits = b;
+        }
+        if let Some((a, b)) = research {
+            menu.setup.sides[0].research = a;
+            menu.setup.sides[1].research = b;
+        }
+        if let Some(script) = menu.map_level() {
+            let run = SkirmishRun { map: menu.maps[i].clone(), setup: menu.setup.clone(), human, difficulty, spectate, default_setup: menu.is_default() };
+            self.start_skirmish(run, script);
+        }
+    }
+
+    /// Starts a skirmish: the map's script with the lobby's choices written in and the sides arranged so the human is player 0.
+    fn start_skirmish(&mut self, run: SkirmishRun, script: opensow_formats::level::Level) {
+        let (map, level) = (run.map.clone(), skirmish::prepare(&script, &run.setup, run.human));
+        match Play::new_skirmish(&mut self.assets, &map, level, &self.settings, run.difficulty) {
+            Ok(mut p) => {
+                if let Some(d) = run.spectate {
+                    p.world.spectate = true;
+                    p.world.difficulty0 = d;
+                }
+                self.play_music(&format!("Level{:02}", 1 + music::pick(4)));
+                self.play = Some(Box::new(p));
+                self.screen = None;
+                self.back.clear();
+                self.campaign = false;
+                self.skirmish = Some(run);
+            }
+            Err(e) => {
+                eprintln!("cannot start skirmish {map}: {e}");
+                self.screen = Some(Screen::Message(format!("Cannot start the skirmish on {map}:\n{e}")));
+            }
+        }
+    }
+
+    fn skirmish_event(&mut self, e: skirmish_ui::Event) {
+        let ids: Vec<u8> = self.skirmish_menu.as_mut().map(|m| std::mem::take(&mut m.sounds)).unwrap_or_default();
+        for id in ids {
+            self.play_sfx(id);
+        }
+        match e {
+            skirmish_ui::Event::None => {}
+            skirmish_ui::Event::Leave => {
+                self.skirmish_menu = None;
+                self.screen = Some(Screen::Main);
+            }
+            skirmish_ui::Event::Start => {
+                let Some(m) = self.skirmish_menu.take() else { return };
+                let map = m.maps.get(m.map).cloned().unwrap_or_default();
+                match m.map_level() {
+                    Some(script) => self.start_skirmish(SkirmishRun { map, setup: m.setup.clone(), human: m.local, difficulty: m.difficulty, spectate: None, default_setup: m.is_default() }, script),
+                    None => self.screen = Some(Screen::Message(format!("Cannot read the map {map}."))),
+                }
+            }
+        }
     }
 
     fn net_event(&mut self, e: multiplayer::Event) {
@@ -452,8 +604,8 @@ impl Game {
     /// Shift + F5 in a mission (`0x416850` -> `0x41a850(0)` -> `0x425d00`): load slot 0; nothing happens when it cannot be read.
     fn quick_load(&mut self) {
         let store = saveui::Store::locate(&self.assets.game);
-        if let Some((level, snapshot)) = store.level_of(0) {
-            self.saveui_event(saveui::Event::Load(level, snapshot));
+        if let Some((level, edition, snapshot)) = store.level_of(0) {
+            self.saveui_event(saveui::Event::Load(level, edition, snapshot));
         }
     }
 
@@ -488,11 +640,18 @@ impl Game {
                 leave(self);
                 self.push(Screen::Message(format!("Cannot save the game.\n{msg}")));
             }
-            saveui::Event::Load(level, snapshot) => {
+            saveui::Event::Load(level, edition, snapshot) => {
                 self.saveui = None;
                 self.ingame = None;
                 self.back.clear();
                 self.campaign = false;
+                // a slot knows its campaign (docs/warmonger.md): its missions are only there while that edition is selected
+                self.set_edition(edition);
+                if self.assets.game.edition != edition {
+                    self.act(Action::ToMain);
+                    self.push(Screen::Message("This savegame belongs to Warmonger,\nwhich was not found.".into()));
+                    return;
+                }
                 self.start(&level);
                 if !snapshot.is_empty() {
                     if let Some(p) = self.play.as_mut() {
@@ -527,6 +686,21 @@ impl Game {
         self.settings.cloud_detail = o.cfg.detail;
     }
 
+    /// Above zoom 1 the world is drawn from 2x enhanced copies of the original art (viewer `upscale`, docs/enhance.md): the Options
+    /// switch on page 2, unless `--no-enhance` / `OPENSOW_ENHANCE=0` forces it off for this run.
+    fn apply_enhance(&self) {
+        let forced_off = std::env::args().any(|a| a == "--no-enhance") || std::env::var("OPENSOW_ENHANCE").is_ok_and(|v| v == "0");
+        opensow_viewer::upscale::set_enabled(self.options.extra.enhance && !forced_off);
+        // the sound enhancement (`hifi`, docs/audio.md): the Options switch on page 2, unless `--no-sound-enhance` /
+        // `OPENSOW_SOUND_ENHANCE=0` forces it off for this run
+        let sound_off = std::env::args().any(|a| a == "--no-sound-enhance") || std::env::var("OPENSOW_SOUND_ENHANCE").is_ok_and(|v| v == "0");
+        hifi::set_enabled(self.options.extra.sound && !sound_off);
+        // the lighting effects (docs/fx.md): `--no-fx` / `OPENSOW_FX=0` force all three off
+        let fx_off = std::env::args().any(|a| a == "--no-fx") || std::env::var("OPENSOW_FX").is_ok_and(|v| v == "0");
+        let e = &self.options.extra;
+        opensow_viewer::fx::set(e.soft_shadows && !fx_off, e.contact_shadows && !fx_off, e.glow && !fx_off, e.turret_shadows && !fx_off);
+    }
+
     fn options_event(&mut self, e: options::Event) {
         let done = matches!(e, options::Event::Done(_));
         match e {
@@ -539,6 +713,7 @@ impl Game {
                 self.options_menu = None;
                 self.screen = self.back.pop();
                 self.apply_audio();
+                self.apply_enhance();
             }
         }
     }
@@ -599,6 +774,10 @@ impl Game {
             m.draw(buf, w, h);
             return;
         }
+        if let Some(m) = self.skirmish_menu.as_mut() {
+            m.draw(buf, w, h);
+            return;
+        }
         if let Some(r) = self.results.as_ref().filter(|r| r.in_statistics()) {
             r.draw_statistics(buf, w, h);
             return;
@@ -633,10 +812,11 @@ impl Game {
     /// Per-frame update; opens the outcome message when the mission ends.
     /// In a running mission (no menu on top) the game draws its own pointer sprite instead of the system one.
     fn custom_pointer(&self) -> bool {
-        self.screen.is_none() && self.intro.is_none() && self.lands.is_none() && self.options_menu.is_none() && self.saveui.is_none() && self.net_menu.is_none() && self.play.as_ref().is_some_and(|p| p.edge_scroll)
+        self.screen.is_none() && self.intro.is_none() && self.lands.is_none() && self.options_menu.is_none() && self.saveui.is_none() && self.net_menu.is_none() && self.skirmish_menu.is_none() && self.play.as_ref().is_some_and(|p| p.edge_scroll)
     }
 
     fn update(&mut self, dt: f32, w: usize, h: usize) {
+        self.music.tick();
         if let Some(b) = self.boot.as_mut() {
             if b.update(dt as f64) {
                 self.end_boot();
@@ -668,6 +848,10 @@ impl Game {
             m.update((dt * 60.0).round() as u32);
             return;
         }
+        if let Some(m) = self.skirmish_menu.as_mut() {
+            m.update((dt * 60.0).round() as u32);
+            return;
+        }
         if self.options_menu.is_some() || self.net_menu.is_some() {
             return;
         }
@@ -679,6 +863,8 @@ impl Game {
                 self.carry_counter = p.world.carry_counter;
                 // HUD sounds raised while updating: icon hover (50), info box open / close (51 / 52)
                 p.ui_sounds.extend(p.infobox.sounds.drain(..));
+                // the player's own actions raised by the world (air strike launch, turret placed): priority, heard anywhere
+                p.ui_sounds.extend(p.world.player_sounds.drain(..));
                 let hud_sounds: Vec<u8> = std::mem::take(&mut p.ui_sounds);
                 for id in hud_sounds {
                     self.play_sfx(id);
@@ -713,9 +899,22 @@ impl Game {
                     self.act(Action::ToMain);
                     return;
                 }
+                if let (Some(o), true) = (outcome, self.skirmish.as_ref().is_some_and(|r| r.spectate.is_some())) {
+                    // spectating: no banner, statistics or stars; say who won (blue is player 0, the Defeat of the HQ rules)
+                    let who = if o == sim::Outcome::Victory { "Blue" } else { "Green" };
+                    let t = self.play.as_ref().map_or(0, |p| p.world.tick);
+                    self.screen = Some(Screen::Message(format!("{who} wins after {}:{:02}.", t / 3600, t / 60 % 60)));
+                    return;
+                }
                 if let Some(o) = outcome {
                     // 0x4357a0: the mission-end speech, then the banner over the frozen frame
                     let won = o == sim::Outcome::Victory;
+                    // a skirmish won with the map's default setup earns the star of its level (stars.rs)
+                    if let Some(run) = self.skirmish.clone().filter(|r| won && r.default_setup) {
+                        if self.stars.record(&run.map, run.difficulty) {
+                            self.stars.save();
+                        }
+                    }
                     self.sfx.say(&self.assets.game, if won { "01-mis-complet.wav" } else { "01-mis-failed.wav" });
                     let p = self.play.as_ref().unwrap();
                     let stats = [p.world.stats[0], p.world.stats[1]];
@@ -742,7 +941,12 @@ impl Game {
                 if self.campaign {
                     // CPassedLevels::Pass (0x4565a0, called by the statistics screen): this land is done and the next one opens
                     let n = level.trim_start_matches(['M', 'm']).parse().unwrap_or(0);
-                    self.progress.pass(n);
+                    if self.assets.game.edition == opensow_formats::Edition::Warmonger {
+                        self.progress.pass_warmonger(n);
+                    } else {
+                        self.progress.pass(n);
+                    }
+                    self.save_progress();
                 }
                 let done = Screen::Message("Campaign complete!\nThe enemy is defeated.".into());
                 if level.eq_ignore_ascii_case(FINAL_LEVEL) {
@@ -786,6 +990,11 @@ impl Game {
         if let Some(m) = self.net_menu.as_mut() {
             m.mouse_moved(x, y, w, h);
             self.net_event(multiplayer::Event::None);
+            return;
+        }
+        if let Some(m) = self.skirmish_menu.as_mut() {
+            m.mouse_moved(x, y, w, h);
+            self.skirmish_event(skirmish_ui::Event::None);
             return;
         }
         if self.results.is_some() || self.play.as_ref().is_some_and(|p| p.paused && self.screen.is_none()) {
@@ -838,8 +1047,9 @@ impl Game {
         if let Some(l) = self.lands.as_mut() {
             if down && button == MouseButton::Left {
                 let e = l.click(x, y, w, h);
-                if !self.dev.unlock_all {
+                if !self.dev.unlock_all && self.progress != l.progress {
                     self.progress = l.progress.clone();
+                    self.save_progress();
                 }
                 self.lands_sounds();
                 self.lands_event(e);
@@ -866,6 +1076,13 @@ impl Game {
             if down && button == MouseButton::Left {
                 let e = m.click(x, y, w, h);
                 self.net_event(e);
+            }
+            return;
+        }
+        if let Some(m) = self.skirmish_menu.as_mut() {
+            if down && button == MouseButton::Left {
+                let e = m.click(x, y, w, h);
+                self.skirmish_event(e);
             }
             return;
         }
@@ -951,7 +1168,7 @@ impl Game {
 
     fn key(&mut self, key: &Key, down: bool, w: usize, h: usize) {
         if down && self.intro.is_none() {
-            let typing = self.saveui.is_some() || self.net_menu.is_some();
+            let typing = self.saveui.is_some() || self.net_menu.is_some() || self.play.as_ref().is_some_and(|p| p.chat.is_some());
             match key {
                 Key::Named(NamedKey::F12) => {
                     self.dev.toggle_visible();
@@ -1005,6 +1222,25 @@ impl Game {
                 let e = m.escape();
                 self.options_sounds();
                 self.options_event(e);
+            }
+            return;
+        }
+        if let Some(m) = self.skirmish_menu.as_mut() {
+            if down {
+                let e = match key {
+                    Key::Named(NamedKey::Escape) => m.escape(),
+                    Key::Named(NamedKey::Enter) => m.enter(),
+                    Key::Named(NamedKey::ArrowUp) => {
+                        m.step_map(false);
+                        skirmish_ui::Event::None
+                    }
+                    Key::Named(NamedKey::ArrowDown) => {
+                        m.step_map(true);
+                        skirmish_ui::Event::None
+                    }
+                    _ => skirmish_ui::Event::None,
+                };
+                self.skirmish_event(e);
             }
             return;
         }
@@ -1069,6 +1305,21 @@ impl Game {
         if self.intro.is_some() {
             if down {
                 self.end_movie();
+            }
+            return;
+        }
+        // the open chat line takes every key press (Esc closes it, Enter sends, Tab recalls the last line)
+        if down && self.screen.is_none() && self.play.as_ref().is_some_and(|p| p.chat.is_some()) {
+            if let Some(p) = self.play.as_mut() {
+                match key {
+                    Key::Named(NamedKey::Escape) => p.chat_cancel(),
+                    Key::Named(NamedKey::Enter) => p.chat_send(),
+                    Key::Named(NamedKey::Backspace) => p.chat_backspace(),
+                    Key::Named(NamedKey::Tab) => p.chat_recall(),
+                    Key::Named(NamedKey::Space) => p.chat_type(' '),
+                    Key::Character(c) => c.chars().for_each(|ch| p.chat_type(ch)),
+                    _ => {}
+                }
             }
             return;
         }
@@ -1150,6 +1401,11 @@ impl Game {
             Key::Named(NamedKey::Backspace) if self.screen.is_none() => {
                 if let Some(p) = self.play.as_mut() {
                     p.look_at_hq();
+                }
+            }
+            Key::Named(NamedKey::Enter) if self.screen.is_none() && !self.numpad => {
+                if let Some(p) = self.play.as_mut() {
+                    p.chat_open();
                 }
             }
             Key::Named(NamedKey::Enter) if self.screen.is_none() && self.numpad => {
@@ -1235,6 +1491,8 @@ struct App {
     game: Game,
     window: Option<Arc<Window>>,
     surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
+    /// The GPU presenter (scales and presents with vsync); `None` = the softbuffer path.
+    gpu: Option<gpu::Gpu>,
     last: Instant,
     /// The mission pointer as the system's cursor (moved by the compositor at the mouse's rate, not once per frame): the
     /// pictures made so far and the one that is set.
@@ -1242,6 +1500,39 @@ struct App {
     cursor_key: Option<(usize, u32)>,
     /// `OPENSOW_PERF=1`: per second frames and the milliseconds spent in update / cursor / draw / present.
     perf: Option<Perf>,
+    /// The game renders at the Options resolution into this buffer; it is scaled into the window (aspect kept, black bars).
+    frame: Vec<u32>,
+    /// The resolution the window was last sized for (a change in the options resizes the window once).
+    window_res: (u32, u32),
+    /// Mission frames are drawn by the GPU (`OPENSOW_CPU_DRAW=1` draws them on the CPU and only presents on the GPU).
+    replay: bool,
+    /// Open the window fullscreen (borderless on the current screen); `--windowed` turns it off, F11 toggles.
+    fullscreen: bool,
+}
+
+/// Where a `iw` x `ih` picture lands in a `ww` x `wh` window: the largest centred rectangle of the same aspect `(x, y, w, h)`.
+fn fit_rect(ww: usize, wh: usize, iw: usize, ih: usize) -> (usize, usize, usize, usize) {
+    let s = (ww as f64 / iw as f64).min(wh as f64 / ih as f64);
+    let (dw, dh) = (((iw as f64 * s).round() as usize).clamp(1, ww), ((ih as f64 * s).round() as usize).clamp(1, wh));
+    ((ww - dw) / 2, (wh - dh) / 2, dw, dh)
+}
+
+/// Scales `src` (`iw` x `ih`) into `dst` (`ww` x `wh`) inside `rect` (nearest neighbour); the rest is black.
+fn blit_scaled(dst: &mut [u32], ww: usize, wh: usize, src: &[u32], iw: usize, ih: usize, rect: (usize, usize, usize, usize)) {
+    let (ox, oy, dw, dh) = rect;
+    if (dw, dh) == (iw, ih) && (ww, wh) == (iw, ih) {
+        dst.copy_from_slice(src);
+        return;
+    }
+    dst.fill(0);
+    let xs: Vec<usize> = (0..dw).map(|x| (x * iw / dw).min(iw - 1)).collect();
+    for y in 0..dh {
+        let sy = (y * ih / dh).min(ih - 1);
+        let (row, out) = (&src[sy * iw..(sy + 1) * iw], &mut dst[(oy + y) * ww + ox..(oy + y) * ww + ox + dw]);
+        for (o, &sx) in out.iter_mut().zip(&xs) {
+            *o = row[sx];
+        }
+    }
 }
 
 #[derive(Default)]
@@ -1271,6 +1562,11 @@ impl App {
         }
         let ui = (h as f32 / 768.0).max(1.0);
         // macOS sizes a custom cursor in points, the other systems in pixels
+        // the picture is stretched into the window: the cursor is as big as the game's pixels are on screen
+        let (ww, wh) = self.window_size();
+        let (iw, ih) = self.size();
+        let shown = fit_rect(ww, wh, iw, ih).3 as f32 / ih as f32;
+        let ui = ui * shown;
         let ui_img = if cfg!(target_os = "macos") { ui / self.game.scale.max(1.0) } else { ui };
         let Some(play) = self.game.play.as_ref() else { return };
         let Some((key, hot, w, h2, rgba)) = play.pointer_cursor(&mut self.game.assets, ui_img) else {
@@ -1294,8 +1590,30 @@ impl App {
         }
     }
 
-    fn size(&self) -> (usize, usize) {
+    /// The window's pixel size.
+    fn window_size(&self) -> (usize, usize) {
         self.window.as_ref().map_or((1280, 800), |w| (w.inner_size().width.max(1) as usize, w.inner_size().height.max(1) as usize))
+    }
+
+    /// The resolution the game renders at: the Options setting (any window size shows it scaled), or the window's own
+    /// pixel size for NATIVE.
+    fn size(&self) -> (usize, usize) {
+        if self.game.options.native() {
+            let (w, h) = self.window_size();
+            return (w.clamp(320, 7680), h.clamp(240, 4320));
+        }
+        let c = &self.game.options.cfg;
+        (c.width.clamp(320, 7680) as usize, c.height.clamp(240, 4320) as usize)
+    }
+
+    /// A window point (pixels) -> the game's pixel; points on the bars stick to the nearest edge.
+    fn to_game(&self, x: f64, y: f64) -> (i32, i32) {
+        let (ww, wh) = self.window_size();
+        let (iw, ih) = self.size();
+        let (ox, oy, dw, dh) = fit_rect(ww, wh, iw, ih);
+        let gx = ((x - ox as f64) * iw as f64 / dw as f64).floor().clamp(0.0, iw as f64 - 1.0);
+        let gy = ((y - oy as f64) * ih as f64 / dh as f64).floor().clamp(0.0, ih as f64 - 1.0);
+        (gx as i32, gy as i32)
     }
 }
 
@@ -1304,10 +1622,24 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes().with_title("OpenSOW").with_inner_size(LogicalSize::new(1280.0, 800.0));
+        let c = &self.game.options.cfg;
+        self.window_res = (c.width, c.height);
+        let mut attrs = Window::default_attributes().with_title("OpenSOW");
+        if !self.game.options.native() {
+            let (rw, rh) = self.size();
+            attrs = attrs.with_inner_size(LogicalSize::new(rw as f64, rh as f64));
+        }
+        if self.fullscreen {
+            attrs = attrs.with_fullscreen(Some(Fullscreen::Borderless(None)));
+        }
         let window = Arc::new(el.create_window(attrs).expect("window"));
-        let ctx = softbuffer::Context::new(window.clone()).expect("softbuffer context");
-        self.surface = Some(softbuffer::Surface::new(&ctx, window.clone()).expect("surface"));
+        if std::env::var_os("OPENSOW_SOFTWARE").is_none() {
+            self.gpu = gpu::Gpu::new(window.clone());
+        }
+        if self.gpu.is_none() {
+            let ctx = softbuffer::Context::new(window.clone()).expect("softbuffer context");
+            self.surface = Some(softbuffer::Surface::new(&ctx, window.clone()).expect("surface"));
+        }
         self.game.scale = window.scale_factor() as f32;
         self.window = Some(window);
     }
@@ -1320,11 +1652,25 @@ impl ApplicationHandler for App {
         if let Some(w) = &self.window {
             w.request_redraw();
         }
-        el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + std::time::Duration::from_millis(16)));
+        if self.gpu.is_some() {
+            // the vsync'd present paces the frames at the display's refresh
+            el.set_control_flow(ControlFlow::Poll);
+        } else {
+            el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + std::time::Duration::from_millis(16)));
+        }
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         let (w, h) = self.size();
+        let res = (self.game.options.cfg.width, self.game.options.cfg.height);
+        if self.window_res != res {
+            // a new resolution from the options menu: the window takes that size (it can still be resized by hand;
+            // fullscreen and NATIVE keep the window as it is)
+            self.window_res = res;
+            if let Some(win) = self.window.as_ref().filter(|w| w.fullscreen().is_none() && !self.game.options.native()) {
+                let _ = win.request_inner_size(LogicalSize::new(w as f64, h as f64));
+            }
+        }
         match event {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::RedrawRequested => {
@@ -1336,16 +1682,39 @@ impl ApplicationHandler for App {
                 let t1 = Instant::now();
                 self.update_cursor(el, h);
                 let t2 = Instant::now();
+                let (ww, wh) = self.window_size();
+                let (mut t3, mut t4) = (t2, t2);
+                self.frame.resize(w * h, 0);
+                if let Some(gpu) = self.gpu.as_mut() {
+                    // a mission frame is recorded and drawn by the GPU; anything that cannot be recorded is drawn on the CPU
+                    let mut replayed = false;
+                    if self.game.gpu_drawable() && self.replay {
+                        opensow_viewer::record::begin(w, h);
+                        self.game.draw(&mut self.frame, w, h);
+                        if let Some(rec) = opensow_viewer::record::end().filter(|r| !r.tainted) {
+                            t3 = Instant::now();
+                            gpu.present_recording(&rec, ww, wh, fit_rect(ww, wh, w, h));
+                            replayed = true;
+                        }
+                    }
+                    if !replayed {
+                        self.game.draw(&mut self.frame, w, h);
+                        t3 = Instant::now();
+                        gpu.present(&self.frame, w, h, ww, wh, fit_rect(ww, wh, w, h));
+                    }
+                    t4 = Instant::now();
+                } else {
                 let Some(surface) = self.surface.as_mut() else { return };
-                if surface.resize(NonZeroU32::new(w as u32).unwrap(), NonZeroU32::new(h as u32).unwrap()).is_err() {
+                if surface.resize(NonZeroU32::new(ww as u32).unwrap(), NonZeroU32::new(wh as u32).unwrap()).is_err() {
                     return;
                 }
-                let (mut t3, mut t4) = (t2, t2);
+                self.game.draw(&mut self.frame, w, h);
                 if let Ok(mut buf) = surface.buffer_mut() {
-                    self.game.draw(&mut buf, w, h);
+                    blit_scaled(&mut buf, ww, wh, &self.frame, w, h, fit_rect(ww, wh, w, h));
                     t3 = Instant::now();
                     let _ = buf.present();
                     t4 = Instant::now();
+                }
                 }
                 if let Some(p) = self.perf.as_mut() {
                     let ms = |a: Instant, b: Instant| b.duration_since(a).as_secs_f64() * 1000.0;
@@ -1361,7 +1730,10 @@ impl ApplicationHandler for App {
                     }
                 }
             }
-            WindowEvent::CursorMoved { position, .. } => self.game.mouse_moved(position.x as i32, position.y as i32, w, h),
+            WindowEvent::CursorMoved { position, .. } => {
+                let (x, y) = self.to_game(position.x, position.y);
+                self.game.mouse_moved(x, y, w, h)
+            }
             WindowEvent::MouseInput { state, button, .. } => {
                 let (x, y) = self.game.cursor;
                 self.game.mouse_button(button, state == ElementState::Pressed, x, y, w, h);
@@ -1371,10 +1743,17 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
                 };
-                if self.game.screen.is_none() && self.game.results.is_none() {
+                if let Some(m) = self.game.skirmish_menu.as_mut() {
+                    m.wheel(dy, w, h);
+                } else if self.game.screen.is_none() && self.game.results.is_none() {
                     if let Some(p) = self.game.play.as_mut().filter(|p| !p.paused) {
                         p.wheel(dy, w, h);
                     }
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed && !event.repeat && event.logical_key == Key::Named(NamedKey::F11) => {
+                if let Some(win) = &self.window {
+                    win.set_fullscreen(if win.fullscreen().is_some() { None } else { Some(Fullscreen::Borderless(None)) });
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -1409,16 +1788,43 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let get = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let has = |name: &str| args.iter().any(|a| a == name);
-    let game_dir = GameDir::locate().unwrap_or_else(|| {
+    let mut game_dir = GameDir::locate().unwrap_or_else(|| {
         eprintln!("error: game not found; set OPENSOW_GAME_DIR");
         std::process::exit(1);
     });
+    // Warmonger: a sibling folder is found by `locate`; otherwise `--warmonger DIR` or OPENSOW_WARMONGER_DIR (a launcher will set it)
+    if let Some(dir) = get("--warmonger") {
+        if !game_dir.set_warmonger(std::path::Path::new(&dir)) {
+            eprintln!("error: {dir} is not a Warmonger install");
+            std::process::exit(1);
+        }
+    }
+    let headless = has("--screenshot");
+    game_dir.edition = match get("--edition").as_deref() {
+        Some(e) if e.eq_ignore_ascii_case("warmonger") => opensow_formats::Edition::Warmonger,
+        Some(_) => opensow_formats::Edition::Original,
+        None if !headless => edition::saved(),
+        None => opensow_formats::Edition::Original,
+    };
+    if game_dir.edition == opensow_formats::Edition::Warmonger && game_dir.warmonger.is_none() {
+        eprintln!("error: Warmonger was asked for but its install was not found; use --warmonger DIR or set OPENSOW_WARMONGER_DIR");
+        game_dir.edition = opensow_formats::Edition::Original;
+    }
+    // --lang takes a code (EN SK CZ CS CT; PL HU RU fall back to English) or the movie folder name; else the launcher's / install's language
+    let chosen = get("--lang").and_then(|l| opensow_formats::lang::Language::from_code(&l).or_else(|| (l.eq_ignore_ascii_case("CHINNESSE")).then_some(opensow_formats::lang::Language::ChineseSimplified)));
+    if let Some(l) = chosen {
+        game_dir.set_language(l);
+    }
     let assets = Assets::load(game_dir).unwrap_or_else(|e| {
         eprintln!("error: {e}");
         std::process::exit(1);
     });
     let mut game = Game::new(assets);
-    game.language = get("--lang").and_then(|l| intro::LANGUAGES.iter().position(|n| n.eq_ignore_ascii_case(&l))).unwrap_or(0);
+    game.apply_enhance();
+    let lang = game.assets.game.language();
+    game.assets.game.set_language(lang);
+    // movie folders (both Chinese scripts share one)
+    game.language = intro::LANGUAGES.iter().position(|n| Some(*n) == lang.diff_dir().or(Some(""))).unwrap_or(0);
 
     if let Some(path) = get("--screenshot") {
         if let Some(n) = get("--boot-page").and_then(|n| n.parse().ok()) {
@@ -1437,13 +1843,19 @@ fn main() {
             }
         }
         let (w, h) = get("--size").and_then(|s| s.split_once('x').map(|(a, b)| (a.parse().unwrap_or(1280), b.parse().unwrap_or(800)))).unwrap_or((1280, 800));
-        if let Some(level) = get("--play") {
-            game.start(&level.to_ascii_uppercase());
+        let skirmish_map = get("--skirmish");
+        if let Some(level) = get("--play").or_else(|| skirmish_map.clone()) {
+            if let Some(map) = &skirmish_map {
+                start_skirmish_from_args(&mut game, map, &get, &has);
+            } else {
+                game.start(&level.to_ascii_uppercase());
+            }
             if let Some(p) = game.play.as_mut() {
                 let pair = |s: String| s.split_once(',').map(|(a, b)| (a.parse::<f32>().unwrap_or(0.0), b.parse::<f32>().unwrap_or(0.0)));
                 p.update(0.0, &game.settings, w, h);
                 if let Some(z) = get("--zoom").and_then(|z| z.parse().ok()) {
                     p.view.zoom = z;
+                    p.scene.warm_ground();
                     p.centre_on_player(w, h);
                 }
                 if let Some((cx, cy)) = get("--center").and_then(pair) {
@@ -1465,6 +1877,14 @@ fn main() {
                     let (sx, sy) = p.view.to_screen(cx * 32.0 + 16.0, cy * 32.0 + 16.0);
                     p.cursor = (sx, sy);
                     p.edge_scroll = true;
+                }
+                if let Some(text) = get("--chat") {
+                    // headless: the chat line is open with this text typed (--chat-send presses Enter on it, so a cheat takes effect)
+                    p.chat_open();
+                    text.chars().for_each(|c| p.chat_type(c));
+                    if has("--chat-send") {
+                        p.chat_send();
+                    }
                 }
                 if let Some(c) = get("--arm-strike").and_then(|c| c.parse::<i32>().ok()) {
                     // headless: the air-strike mode is armed for this force (the pointer and the stock pill show it)
@@ -1645,9 +2065,15 @@ fn main() {
                     for b in &p.world.bullets {
                         println!("bullet type {} strength {} owner {} index {}/{} from {:?} to {:?}", b.bullet_type, b.strength, b.owner, b.index, b.path.points.len(), b.path.points.first(), b.path.points.last());
                     }
+                    // the positional sounds the run raised (the first 64; nothing drains them headless)
+                    println!("sounds {:?}", p.world.sounds.iter().map(|s| s.0).collect::<Vec<_>>());
                     for a in &p.world.aircraft {
                         println!("aircraft {:?} at ({}, {}) alt {} hp {} frame {}", a.force, a.x, a.y, a.altitude, a.hp, a.frame);
                     }
+                    println!("air stock {:?} launched {:?}", p.world.air_stock, [p.world.stats[0][6], p.world.stats[1][6]]);
+                    println!("credits {:?} research {:?} enemy turrets {:?}", p.world.credits, p.world.research, p.world.structures.iter().filter(|s| s.alive() && (25..=29).contains(&s.kind_id) && format!("{:?}", s.owner) == "Enemy").map(|s| (s.kind_id, s.cell)).collect::<Vec<_>>());
+                    let owned = |o: &str| p.world.structures.iter().filter(|s| s.alive() && (100..=108).contains(&s.kind_id) && format!("{:?}", s.owner) == o).count();
+                    println!("buildings player {} enemy {} neutral {}", owned("Player"), owned("Enemy"), owned("Neutral"));
                     println!("turret tiers player {:?} enemy {:?}", p.world.turret_flags[0], p.world.turret_flags[1]);
                     println!("bullets {} tick {} outcome {:?}", p.world.bullets.len(), p.world.tick, p.world.outcome);
                 }
@@ -1682,8 +2108,17 @@ fn main() {
                 Some("prototype") => Screen::Options,
                 Some("options") => {
                     game.open_options();
+                    // --page 0|1; --hover N: 0..13 arrow, 14.. label, 100+k row k of page 2, 200 page arrow
+                    if let (Some(m), Some(n)) = (game.options_menu.as_mut(), get("--page").and_then(|n| n.parse::<usize>().ok())) {
+                        m.page = n.min(options::PAGES - 1);
+                    }
                     if let (Some(m), Some(hit)) = (game.options_menu.as_mut(), get("--hover").and_then(|n| n.parse::<usize>().ok())) {
-                        let p = m.centre(if hit < 14 { options::Hit::Arrow(hit) } else { options::Hit::Label(hit - 14) });
+                        let p = m.centre(match hit {
+                            0..=13 => options::Hit::Arrow(hit),
+                            14..=99 => options::Hit::Label(hit - 14),
+                            100..=199 => options::Hit::Extra(hit - 100),
+                            _ => options::Hit::Page(if m.page == 0 { 1 } else { 0 }),
+                        });
                         let (ox, oy, sc) = (0.0, 0.0, 1.0f32);
                         let _ = (ox, oy, sc);
                         m.mouse_moved(p.0 * w as i32 / 640, p.1 * h as i32 / 480, w, h);
@@ -1710,6 +2145,39 @@ fn main() {
                         if let Some(n) = get("--hover").and_then(|n| n.parse::<usize>().ok()) {
                             let p = m.centre(multiplayer::Hit::Arrow(n));
                             m.mouse_moved(p.0 * w as i32 / 640, p.1 * h as i32 / 480, w, h);
+                        }
+                    }
+                    Screen::Main
+                }
+                Some("skirmish") => {
+                    // --guest (human plays green), --map N (list index), --hover N (air card N 0..4 / turret card 5..9), --changed (one value off its default)
+                    game.open_skirmish();
+                    if let Some(m) = game.skirmish_menu.as_mut() {
+                        if let Some(n) = get("--map").and_then(|n| n.parse::<usize>().ok()) {
+                            m.select_map(n);
+                        }
+                        if has("--guest") {
+                            m.press(skirmish_ui::Hit::Swap);
+                        }
+                        if has("--changed") {
+                            m.press(skirmish_ui::Hit::Step(0, 11));
+                        }
+                        m.sounds.clear();
+                        // --stars easy,normal,hard,brutal,...: demo stars on the first maps of the list
+                        for (i, v) in get("--stars").unwrap_or_default().split(',').enumerate() {
+                            if let Some(d) = sim::Difficulty::ALL.into_iter().find(|d| d.name().eq_ignore_ascii_case(v)) {
+                                m.demo_star(i, d);
+                            }
+                        }
+                        if let Some(d) = get("--difficulty").and_then(|v| sim::Difficulty::ALL.into_iter().find(|d| d.name().eq_ignore_ascii_case(&v))) {
+                            m.difficulty = d;
+                        }
+                        if let Some(n) = get("--hover").and_then(|n| n.parse::<usize>().ok()) {
+                            let hit = if n < 5 { skirmish_ui::Hit::Step(0, n * 2 + 1) } else { skirmish_ui::Hit::Turret(0, (n - 5).min(4)) };
+                            if let Some(p) = m.centre(hit, w, h) {
+                                m.mouse_moved(p.0, p.1, w, h);
+                                m.update(37);
+                            }
                         }
                     }
                     Screen::Main
@@ -1766,6 +2234,9 @@ fn main() {
                     if let Some(l) = game.lands.as_mut() {
                         l.show(get("--land").and_then(|n| n.parse().ok()).unwrap_or(0), get("--age").and_then(|n| n.parse().ok()).unwrap_or(10.0));
                         l.set_hover(get("--hover").and_then(|n| n.parse().ok()));
+                        if has("--missing-warmonger") {
+                            l.show_missing();
+                        }
                         l.update(get("--clock").and_then(|n| n.parse().ok()).unwrap_or(0.0));
                     }
                     Screen::Main
@@ -1773,7 +2244,7 @@ fn main() {
                 _ => Screen::Main,
             });
         }
-        if game.lands.is_some() || game.options_menu.is_some() || game.saveui.is_some() || game.net_menu.is_some() || game.results.is_some() {
+        if game.lands.is_some() || game.options_menu.is_some() || game.saveui.is_some() || game.net_menu.is_some() || game.skirmish_menu.is_some() || game.results.is_some() {
             game.screen = None;
         } else {
             game.hover = get("--hover").and_then(|h| h.parse().ok());
@@ -1818,6 +2289,9 @@ fn main() {
                 }
             }
         }
+        if has("--gpu-check") {
+            gpu_check(&mut game, w, h);
+        }
         if has("--mouse-px") {
             // the HUD layout exists only after a draw: draw once, let the pointer hover, draw again
             game.draw(&mut buf, w, h);
@@ -1833,7 +2307,12 @@ fn main() {
 
     game.mute = has("--mute");
     game.sfx.enabled = !game.mute;
-    if !has("--no-intro") {
+    // a windowed `--skirmish MAP` goes straight into the game (no intro, no menus)
+    let straight = get("--skirmish");
+    if let Some(map) = &straight {
+        start_skirmish_from_args(&mut game, map, &get, &has);
+    }
+    if !has("--no-intro") && straight.is_none() {
         game.movies = true;
         match boot::Boot::open(&game.assets.game) {
             Some(b) => {
@@ -1847,8 +2326,112 @@ fn main() {
         game.start(&m);
     }
     let event_loop = EventLoop::new().expect("event loop");
-    let mut app = App { game, window: None, surface: None, last: Instant::now(), cursors: std::collections::HashMap::new(), cursor_key: None, perf: std::env::var_os("OPENSOW_PERF").map(|_| Perf::default()) };
+    let mut app = App { game, window: None, surface: None, gpu: None, last: Instant::now(), cursors: std::collections::HashMap::new(), cursor_key: None, frame: Vec::new(), window_res: (0, 0), replay: std::env::var_os("OPENSOW_CPU_DRAW").is_none(), fullscreen: !has("--windowed"), perf: std::env::var_os("OPENSOW_PERF").map(|_| Perf::default()) };
     event_loop.run_app(&mut app).expect("run");
+}
+
+/// `--skirmish MAP [--side green] [--difficulty easy|normal|hard|brutal] [--credits BLUE,GREEN] [--research BLUE,GREEN]
+/// [--spectate [--blue-difficulty D]]`: the lobby's choices from the command line (docs/skirmish.md), headless or windowed.
+fn start_skirmish_from_args(game: &mut Game, map: &str, get: &dyn Fn(&str) -> Option<String>, has: &dyn Fn(&str) -> bool) {
+    let pair = |k: &str| get(k).and_then(|s| s.split_once(',').and_then(|(a, b)| Some((a.parse::<i32>().ok()?, b.parse::<i32>().ok()?))));
+    let level = |k: &str| sim::Difficulty::ALL.into_iter().find(|d| get(k).is_some_and(|v| v.eq_ignore_ascii_case(d.name())));
+    let difficulty = level("--difficulty").unwrap_or_default();
+    let spectate = has("--spectate").then(|| level("--blue-difficulty").unwrap_or(difficulty));
+    game.headless_skirmish(map, usize::from(get("--side").is_some_and(|s| s.eq_ignore_ascii_case("green"))), pair("--credits"), pair("--research"), difficulty, spectate);
+}
+
+/// `--gpu-check`: the frame drawn on the CPU, recorded + replayed on the CPU, and replayed on the GPU; prints how many pixels differ.
+fn gpu_check(game: &mut Game, w: usize, h: usize) {
+    use opensow_viewer::record;
+    let mut cpu = vec![0u32; w * h];
+    let t0 = Instant::now();
+    game.draw(&mut cpu, w, h);
+    let t_cpu = t0.elapsed();
+    let mut dummy = vec![0u32; w * h];
+    let t0 = Instant::now();
+    record::begin(w, h);
+    game.draw(&mut dummy, w, h);
+    let rec = record::end().expect("recording");
+    let t_rec = t0.elapsed();
+    let diff = |a: &[u32], b: &[u32]| {
+        let bad: Vec<usize> = (0..a.len()).filter(|&i| a[i] != b[i]).collect();
+        let first: Vec<String> = bad.iter().take(5).map(|&i| format!("({},{}) cpu {:06x} got {:06x}", i % w, i / w, a[i], b[i])).collect();
+        format!("{} differ{}", bad.len(), if first.is_empty() { String::new() } else { format!(": {}", first.join(", ")) })
+    };
+    println!("gpu-check {w}x{h}: {} commands, {} lens, {} map words, tainted {}; cpu draw {:.1} ms, record {:.1} ms", rec.cmds.len(), rec.cmds.iter().filter(|c| c.op == record::op::LENS).count(), rec.maps.len(), rec.tainted, t_cpu.as_secs_f64() * 1e3, t_rec.as_secs_f64() * 1e3);
+    let mut replayed = vec![0u32; w * h];
+    record::replay(&rec, &mut replayed);
+    println!("  cpu replay: {}", diff(&cpu, &replayed));
+    match gpu::headless() {
+        Some((device, queue, name)) => {
+            let mut r = replay::Replay::new(&device);
+            let out = r.readback(&device, &queue, &rec);
+            let t0 = Instant::now();
+            let _ = r.readback(&device, &queue, &rec);
+            println!("  gpu replay ({name}, {:.1} ms incl. upload + readback): {}; against the cpu replay: {}", t0.elapsed().as_secs_f64() * 1e3, diff(&cpu, &out), diff(&replayed, &out));
+        }
+        None => println!("  no GPU adapter"),
+    }
+    gpu_check_synthetic();
+}
+
+/// Every recorded operation (all blend modes, the lens, masks, the `ui` and `gdi` helpers) on made-up sprites at several zooms,
+/// drawn on the CPU and replayed on the GPU.
+fn gpu_check_synthetic() {
+    use opensow_formats::effects::Blit;
+    use opensow_formats::sprite::Frame;
+    use opensow_viewer::record;
+    use opensow_viewer::render::{self, View};
+    let Some((device, queue, _)) = gpu::headless() else { return };
+    let mut r = replay::Replay::new(&device);
+    let frame = |w: u16, h: u16, seed: u32| {
+        let n = (w as usize) * (h as usize);
+        let px: Vec<u16> = (0..n as u32).map(|i| (i.wrapping_mul(2_654_435_761).wrapping_add(seed.wrapping_mul(40_503)) >> 7) as u16).collect();
+        Frame { width: w, height: h, hot_x: (w / 3) as i16, hot_y: (h / 2) as i16, extra: [0; 4], pixels: px, mask: (0..n).map(|i| (i * 7 + seed as usize) % 5 != 0).collect(), enhanced: Default::default() }
+    };
+    let (a, b, m) = (frame(23, 17, 1), frame(60, 44, 2), frame(30, 22, 3));
+    let gdi = gdi::Gdi::load();
+    let (w, h) = (331usize, 207usize);
+    for zoom in [1.0f32, 1.37, 2.0, 2.5, 3.0] {
+        let view = View { x: -3.3, y: 4.1, zoom };
+        let draw = |buf: &mut [u32]| {
+            let mut mask = vec![false; w * h];
+            render::rect(buf, w, h, -5, 3, 140, 170, (200, 10, 99), 77);
+            render::blit(buf, w, h, &view, &a, 10, 12, false);
+            render::blit(buf, w, h, &view, &b, 30, 20, true);
+            render::stamp_frame(&mut mask, w, h, &view, &m, 25, 25);
+            render::blit_shadow_masked(buf, w, h, &view, &a, 28, 26, &mask);
+            for (k, mode) in [Blit::Plain, Blit::Additive, Blit::AddHalf, Blit::Average, Blit::Smoke, Blit::Darken, Blit::Shade, Blit::Lens, Blit::Lens].into_iter().enumerate() {
+                let masked = (k % 2 == 1).then_some(&mask[..]);
+                render::blit_blend_masked(buf, w, h, &view, &b, 5 + 9 * k as i32, 8 + 5 * k as i32, mode, masked);
+            }
+            render::blit_masked(buf, w, h, &view, &b, &m, 40, 30, (3, 2, 290, 150));
+            render::blit_clip(buf, w, h, &view, &a, 60, 40, false, (50, 30, 180, 155));
+            ui::sprite_lit(buf, w, h, &a, 200, 10, zoom, 90);
+            ui::sprite_glow(buf, w, h, &b, 210, 40, zoom);
+            ui::sprite_add(buf, w, h, &b, 150, 100, zoom, true);
+            ui::sprite_add(buf, w, h, &a, 250, 120, zoom, false);
+            ui::sprite_dim(buf, w, h, &b, 170, 150, zoom, 120);
+            ui::dim_sub(buf, w, h, ui::Rect { x: 100, y: 90, w: 80, h: 60 }, 40);
+            ui::dim(buf, w, h, ui::Rect { x: 120, y: 140, w: 280, h: 30 }, 90);
+            if let Some(g) = &gdi {
+                g.draw_rgb(buf, w, h, "Lens & glow 123", 12.0, 170.0, zoom.min(2.0), (255, 220, 90));
+            }
+        };
+        // both start from black (the GPU clears its picture)
+        let mut cpu_black = vec![0u32; w * h];
+        draw(&mut cpu_black);
+        record::begin(w, h);
+        let mut dummy = vec![0u32; w * h];
+        draw(&mut dummy);
+        let rec = record::end().unwrap();
+        let out = r.readback(&device, &queue, &rec);
+        let bad = (0..w * h).filter(|&i| out[i] != cpu_black[i]).count();
+        for i in (0..w * h).filter(|&i| out[i] != cpu_black[i]).take(4) {
+            println!("    ({},{}) cpu {:06x} gpu {:06x}", i % w, i / w, cpu_black[i], out[i]);
+        }
+        println!("  synthetic zoom {zoom}: {} commands ({} lens), {bad} differ", rec.cmds.len(), rec.cmds.iter().filter(|c| c.op == record::op::LENS).count());
+    }
 }
 
 #[cfg(test)]
@@ -1865,7 +2448,7 @@ mod tests {
         let Some(mut g) = game() else { return };
         let (w, h) = (1280, 800);
         let b = g.buttons(w, h);
-        assert_eq!(b.len(), 6);
+        assert_eq!(b.len(), 7, "the six original rows and SKIRMISH");
         let first = b[0].rect;
         g.mouse_moved(first.x + 5, first.y + 5, w, h);
         assert_eq!(g.hover, Some(0));
@@ -1883,6 +2466,14 @@ mod tests {
         assert!(g.saveui.is_some() && g.screen.is_none());
         g.key(&Key::Named(NamedKey::Escape), true, w, h);
         assert!(g.saveui.is_none());
+        assert_eq!(g.screen, Some(Screen::Main));
+        // Skirmish opens the lobby against the computer; Escape returns
+        let sk = g.buttons(w, h)[4].rect;
+        g.mouse_button(MouseButton::Left, true, sk.x + 5, sk.y + 5, w, h);
+        g.mouse_button(MouseButton::Left, false, sk.x + 5, sk.y + 5, w, h);
+        assert!(g.skirmish_menu.is_some() && g.screen.is_none());
+        g.key(&Key::Named(NamedKey::Escape), true, w, h);
+        assert!(g.skirmish_menu.is_none());
         assert_eq!(g.screen, Some(Screen::Main));
         let mut buf = vec![0u32; w * h];
         g.draw(&mut buf, w, h);
@@ -1942,6 +2533,18 @@ mod tests {
         let parsed = State::parse(&bytes, 1).expect("the written stream parses");
         assert_eq!(parsed.to_bytes().unwrap(), bytes);
         assert_eq!(parsed.squads.iter().map(|g| g.1.len()).sum::<usize>(), airborne, "{mission}: squads");
+        // with the install's sprite sheets every top and chassis carries its size words (the exe's initialiser reads them)
+        for (_, o) in parsed.units.iter().flat_map(|g| g.1.iter()) {
+            if o.get(0x2c).unwrap_or(0) != 0 {
+                continue; // corpses have no parts
+            }
+            if let Some(t) = o.child(4).filter(|t| t.get(0x54).is_some_and(|i| i != u32::MAX)) {
+                assert!(t.get(0x64).unwrap_or(0) > 0 && t.get(0x68).unwrap_or(0) > 0, "{mission}: top sprite size of kind {:?}", o.get(0x40));
+            }
+            if let Some(c) = o.child(8) {
+                assert!(c.get(0x20).unwrap_or(0) > 1 && c.get(0x24).unwrap_or(0) > 1, "{mission}: chassis sprite size of kind {:?}", o.get(0x40));
+            }
+        }
         assert_eq!(parsed.bullets.iter().map(|g| g.1.len()).sum::<usize>(), shots, "{mission}: bullets");
         assert!(!units.is_empty() && !structures.is_empty(), "{mission}: nothing to save");
         assert!(parsed.buildings.iter().map(|b| b.1.len()).sum::<usize>() > 0, "{mission}: no building in the stream");
@@ -1965,10 +2568,10 @@ mod tests {
         }
         // through the save container as a file of the original (no OpenSOW extension): the level comes from the head, the stream applies
         let dir = std::env::temp_dir().join(format!("opensow-bridge-{}-{}", mission, std::process::id()));
-        let store = saveui::Store { write: dir.clone(), also: None };
+        let store = saveui::Store { write: dir.clone(), also: None, edition: opensow_formats::Edition::Original };
         store.write(2, "t", mission, &saveui::pack_payload(&bytes, &[]), &vec![0u16; 160 * 120]).unwrap();
-        let (level, payload) = store.level_of(2).unwrap();
-        assert_eq!(level, mission);
+        let (level, edition, payload) = store.level_of(2).unwrap();
+        assert_eq!((level.as_str(), edition), (mission, opensow_formats::Edition::Original));
         g.start(mission);
         let p = g.play.as_mut().unwrap();
         p.restore(&payload).unwrap();
@@ -1976,6 +2579,32 @@ mod tests {
         got.sort();
         assert_eq!(got, units, "{mission}: units differ after loading the file");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The original's stream has no tutorial script (its step `[0x70f2cc]` is outside the saved ranges), so a stream without our
+    /// extension loads level 0 as a plain mission; with the extension the script continues.
+    #[test]
+    fn the_tutorial_script_is_only_in_our_extension() {
+        let Some(mut g) = game() else { return };
+        g.start("M00");
+        let a = {
+            let p = g.play.as_mut().unwrap();
+            for _ in 0..30 {
+                p.world.step();
+            }
+            assert!(p.world.tutorial.is_some());
+            p.snapshot()
+        };
+        let (stream, ours) = saveui::unpack_payload(&a).unwrap();
+        assert!(!ours.is_empty());
+        g.start("M00");
+        g.play.as_mut().unwrap().restore(&a).unwrap();
+        assert!(g.play.as_ref().unwrap().world.tutorial.is_some(), "our extension keeps the script");
+        g.start("M00");
+        let bare = saveui::pack_payload(stream, &[]);
+        g.play.as_mut().unwrap().restore(&bare).unwrap();
+        let w = &g.play.as_ref().unwrap().world;
+        assert!((w.tutorial.is_none(), w.tutorial_step, w.ai) == (true, None, true), "the bare stream is a plain mission");
     }
 
     #[test]
@@ -1996,9 +2625,9 @@ mod tests {
         assert_eq!(b, 1500);
         // through the save container: write a slot, read it back
         let dir = std::env::temp_dir().join(format!("opensow-roundtrip-{}", std::process::id()));
-        let store = saveui::Store { write: dir.clone(), also: None };
+        let store = saveui::Store { write: dir.clone(), also: None, edition: opensow_formats::Edition::Original };
         store.write(3, "t", "M05", &a, &vec![0u16; 160 * 120]).unwrap();
-        let (level, snap) = store.level_of(3).unwrap();
+        let (level, _, snap) = store.level_of(3).unwrap();
         assert_eq!((level.as_str(), snap.len()), ("M05", a.len()));
         // a fresh play of the level takes the snapshot and both run on identically
         g.start("M05");
@@ -2369,6 +2998,47 @@ mod tests {
     }
 
     #[test]
+    fn options_page_two_toggles_the_enhancement() {
+        let Some(mut g) = game() else { return };
+        let (w, h) = (1280, 800);
+        g.screen = Some(Screen::Pause);
+        g.act(Action::Options);
+        let click = |g: &mut Game, hit: options::Hit| {
+            let c = g.options_menu.as_ref().unwrap().centre(hit);
+            let (s, ox) = (h as f32 / 480.0, (w as f32 - 640.0 * h as f32 / 480.0) / 2.0);
+            let (x, y) = ((c.0 as f32 * s + ox) as i32, (c.1 as f32 * s) as i32);
+            g.mouse_moved(x, y, w, h);
+            g.mouse_button(MouseButton::Left, true, x, y, w, h);
+        };
+        click(&mut g, options::Hit::Page(1));
+        assert_eq!(g.options_menu.as_ref().unwrap().page, 1);
+        let mut buf = vec![0u32; w * h];
+        g.draw(&mut buf, w, h);
+        click(&mut g, options::Hit::Extra(0));
+        assert!(!g.options_menu.as_ref().unwrap().opts.extra.enhance);
+        click(&mut g, options::Hit::Ok);
+        assert!(!g.options.extra.enhance);
+        assert!(!opensow_viewer::upscale::enabled(), "OK applies the switch");
+        // back on, so the other tests are not affected
+        g.act(Action::Options);
+        click(&mut g, options::Hit::Page(1));
+        click(&mut g, options::Hit::Extra(0));
+        click(&mut g, options::Hit::Ok);
+        assert!(g.options.extra.enhance && opensow_viewer::upscale::enabled());
+        // the sound row (the last one) switches the sound enhancement the same way
+        g.act(Action::Options);
+        click(&mut g, options::Hit::Page(1));
+        click(&mut g, options::Hit::Extra(5));
+        click(&mut g, options::Hit::Ok);
+        assert!(!g.options.extra.sound && !hifi::enabled(), "OK applies the sound switch");
+        g.act(Action::Options);
+        click(&mut g, options::Hit::Page(1));
+        click(&mut g, options::Hit::Extra(5));
+        click(&mut g, options::Hit::Ok);
+        assert!(g.options.extra.sound && hifi::enabled());
+    }
+
+    #[test]
     fn pause_menu_flow() {
         let Some(mut g) = game() else { return };
         let (w, h) = (1280, 800);
@@ -2413,6 +3083,73 @@ mod tests {
     }
 
     #[test]
+    fn enter_opens_the_chat_line_and_cheat_phrases_take_effect() {
+        let Some(mut g) = game() else { return };
+        let (w, h) = (1024, 768);
+        g.start("M01");
+        g.update(0.0, w, h);
+        let chr = |c: &str| Key::Character(SmolStr::new(c));
+        let say = |g: &mut Game, text: &str| {
+            g.key(&Key::Named(NamedKey::Enter), true, w, h);
+            assert!(g.play.as_ref().unwrap().chat.is_some(), "Enter opens the line");
+            for c in text.chars() {
+                if c == ' ' {
+                    g.key(&Key::Named(NamedKey::Space), true, w, h);
+                } else {
+                    g.key(&chr(&c.to_string()), true, w, h);
+                }
+            }
+            g.key(&Key::Named(NamedKey::Enter), true, w, h);
+            assert!(g.play.as_ref().unwrap().chat.is_none(), "Enter sends and closes");
+        };
+        let before = {
+            let wd = &g.play.as_ref().unwrap().world;
+            (wd.credits[0], wd.research[0], wd.air_stock[0])
+        };
+        // keys typed into the line do not reach the game: "2" would arm a turret, "p" would pause
+        g.play.as_mut().unwrap().world.turret_flags[0] = [true; 5];
+        g.play.as_mut().unwrap().world.credits[0] = 5000;
+        g.key(&Key::Named(NamedKey::Enter), true, w, h);
+        g.key(&chr("2"), true, w, h);
+        g.key(&chr("p"), true, w, h);
+        assert_eq!(g.play.as_ref().unwrap().chat.as_deref(), Some("2p"));
+        assert!(g.play.as_ref().unwrap().placing.is_none() && !g.play.as_ref().unwrap().paused);
+        g.key(&Key::Named(NamedKey::Backspace), true, w, h);
+        g.key(&Key::Named(NamedKey::Escape), true, w, h);
+        assert!(g.play.as_ref().unwrap().chat.is_none() && g.screen.is_none(), "Esc closes the line, not the game");
+        g.play.as_mut().unwrap().world.credits[0] = before.0;
+        say(&mut g, "give me money");
+        say(&mut g, "speed up my research");
+        say(&mut g, "give me fighter");
+        say(&mut g, "give me bomber");
+        say(&mut g, "give me meteor storm");
+        say(&mut g, "give me carryall");
+        say(&mut g, "give me tripler");
+        let wd = &g.play.as_ref().unwrap().world;
+        assert_eq!((wd.credits[0] - before.0, wd.research[0] - before.1), (1000, 200));
+        assert!((0..5).all(|i| wd.air_stock[0][i] == before.2[i] + 1), "one of every force");
+        assert!(wd.chat.is_empty(), "a cheat is not echoed");
+        // a wrong case is only a chat line; Tab brings the last line back
+        say(&mut g, "Give me money");
+        let wd = &g.play.as_ref().unwrap().world;
+        assert_eq!(wd.credits[0] - before.0, 1000);
+        assert_eq!(wd.chat.last().map(|c| c.1.as_str()), Some("Give me money"));
+        g.key(&Key::Named(NamedKey::Enter), true, w, h);
+        g.key(&Key::Named(NamedKey::Tab), true, w, h);
+        assert_eq!(g.play.as_ref().unwrap().chat.as_deref(), Some("Give me money"));
+        g.key(&Key::Named(NamedKey::Enter), true, w, h);
+        // the mission 1 clock does not run in a mission without a countdown; "one minute" adds to a running one only
+        g.play.as_mut().unwrap().world.timer = Some((3, 10, 0));
+        say(&mut g, "give me one minute");
+        assert_eq!(g.play.as_ref().unwrap().world.timer, Some((4, 10, 0)));
+        g.play.as_mut().unwrap().world.timer_expired = true;
+        say(&mut g, "give me one minute");
+        assert_eq!(g.play.as_ref().unwrap().world.timer, Some((4, 10, 0)), "not after the countdown ended");
+        say(&mut g, "draw fps");
+        assert!(g.play.as_ref().unwrap().show_fps);
+    }
+
+    #[test]
     fn mission_hotkeys_follow_the_exes_key_handler() {
         let Some(mut g) = game() else { return };
         let (w, h) = (1024, 768);
@@ -2444,13 +3181,13 @@ mod tests {
         g.key(&chr("š"), true, w, h);
         g.digit = None;
         assert_eq!(g.play.as_ref().unwrap().placing, Some(3));
-        // building one plays sound 72 (turret-place) at the cell
+        // building one plays sound 72 (turret-place), the player's own: a priority sound, not a positional one
         {
             let wd = &mut g.play.as_mut().unwrap().world;
             let own = wd.structures.iter().find(|s| s.owner == opensow_formats::level::Owner::Player).map(|s| s.cell).unwrap();
             wd.sounds.clear();
             let placed = (-8..8).flat_map(|dy| (-8..8).map(move |dx| (own.0 + dx, own.1 + dy))).any(|c| wd.place_turret(0, 1, c));
-            assert!(placed && wd.sounds.iter().any(|s| s.0 == 72), "turret-place sound");
+            assert!(placed && wd.player_sounds.contains(&72) && !wd.sounds.iter().any(|s| s.0 == 72), "turret-place sound");
         }
         // placement tiles: one verdict per footprint cell (tier 5 is a 1x2 turret), all refused far from the own buildings
         assert_eq!(g.play.as_ref().unwrap().world.turret_cells(0, 5, (3, 3)).len(), 2);
@@ -2663,6 +3400,84 @@ mod tests {
     }
 
     #[test]
+    fn a_win_with_the_default_setup_earns_the_levels_star_and_a_changed_setup_does_not() {
+        let Some(mut g) = game() else { return };
+        g.mute = true;
+        let (w, h) = (640, 480);
+        let win = |g: &mut Game| {
+            g.results = None; // the banner of the previous match
+            g.play.as_mut().unwrap().world.outcome = Some(sim::Outcome::Victory);
+            g.update(0.0, w, h);
+        };
+        assert_eq!(g.stars.get("01-First Spark"), None);
+        // a loss earns nothing
+        g.headless_skirmish("01-First", 0, None, None, sim::Difficulty::Normal, None);
+        g.play.as_mut().unwrap().world.outcome = Some(sim::Outcome::Defeat);
+        g.update(0.0, w, h);
+        assert_eq!(g.stars.get("01-First Spark"), None);
+        // a win with the map's own setup: silver for Normal
+        g.headless_skirmish("01-First", 0, None, None, sim::Difficulty::Normal, None);
+        win(&mut g);
+        assert_eq!(g.stars.get("01-First Spark"), Some(sim::Difficulty::Normal));
+        // changed credits (or research, air, turrets): no star, even on Brutal
+        g.headless_skirmish("01-First", 0, Some((801, 800)), None, sim::Difficulty::Brutal, None);
+        win(&mut g);
+        assert_eq!(g.stars.get("01-First Spark"), Some(sim::Difficulty::Normal));
+        // an easier win with the default setup never lowers it; the side is not part of the setup
+        g.headless_skirmish("01-First", 1, None, None, sim::Difficulty::Easy, None);
+        win(&mut g);
+        assert_eq!(g.stars.get("01-First Spark"), Some(sim::Difficulty::Normal));
+        g.headless_skirmish("01-First", 1, None, None, sim::Difficulty::Hard, None);
+        win(&mut g);
+        assert_eq!(g.stars.get("01-First Spark"), Some(sim::Difficulty::Hard));
+        // the lobby shows it
+        g.open_skirmish();
+        assert_eq!(g.skirmish_menu.as_ref().unwrap().names[0], "01-First Spark");
+    }
+
+    #[test]
+    fn the_main_menu_has_a_skirmish_row_that_opens_the_lobby_against_the_computer() {
+        let Some(mut g) = game() else { return };
+        let buttons = menu::layout(&Screen::Main, &mut g.assets, &g.levels, &g.settings, 640, 480);
+        assert_eq!(buttons.len(), 7);
+        let row = buttons.iter().find(|b| b.action == Action::Skirmish).expect("a SKIRMISH row");
+        assert!(buttons.iter().all(|b| b.rect.y + b.rect.h <= 480), "all rows fit the lowest resolution");
+        g.act(row.action.clone());
+        let m = g.skirmish_menu.as_ref().expect("the skirmish setup screen");
+        assert!(m.map_level().is_some(), "the first map's picture and script are loaded");
+        assert_eq!((m.local, m.map), (0, 0));
+    }
+
+    #[test]
+    fn a_skirmish_starts_with_the_lobbys_choices_for_either_side_and_restarts() {
+        let Some(mut g) = game() else { return };
+        g.mute = true;
+        // blue: the human keeps the map's player 0 side
+        g.headless_skirmish("01-First", 0, Some((1234, 77)), Some((300, 0)), sim::Difficulty::Hard, None);
+        let p = g.play.as_ref().expect("the match started");
+        assert_eq!((p.world.credits[0], p.world.credits[1]), (1234, 77));
+        assert_eq!(p.world.research[0], 300);
+        assert_eq!(p.world.difficulty, sim::Difficulty::Hard, "the lobby's difficulty reaches the world");
+        assert_eq!(g.skirmish.as_ref().map(|s| s.map.as_str()), Some("01-First Spark"));
+        let blue_hq = p.world.structures.iter().find(|s| s.kind_id == 100 && s.owner == opensow_formats::level::Owner::Player).map(|s| s.cell).unwrap();
+        assert_eq!(blue_hq, (16, 3), "First Spark's blue HQ");
+        // green: the sides are exchanged, so the human (player 0) sits at the green HQ and has green's resources
+        g.headless_skirmish("01-First", 1, Some((1234, 77)), None, sim::Difficulty::Normal, None);
+        let p = g.play.as_ref().unwrap();
+        assert_eq!((p.world.credits[0], p.world.credits[1]), (77, 1234));
+        let hq = p.world.structures.iter().find(|s| s.kind_id == 100 && s.owner == opensow_formats::level::Owner::Player).map(|s| s.cell).unwrap();
+        assert_eq!(hq, (9, 55), "First Spark's green HQ");
+        assert!(p.world.units.iter().filter(|u| u.player == 0).all(|u| u.px().1 > 32 * 30), "the human's units start on the green side");
+        assert!(p.world.ai, "the computer plays the other side");
+        // RESTART replays the same skirmish, ESC menu -> main menu forgets it
+        g.act(Action::Restart);
+        assert_eq!(g.play.as_ref().unwrap().world.credits[0], 77);
+        assert_eq!(g.play.as_ref().unwrap().world.difficulty, sim::Difficulty::Normal, "RESTART keeps the level");
+        g.act(Action::ToMain);
+        assert!(g.skirmish.is_none());
+    }
+
+    #[test]
     fn briefing_movie_before_the_mission_and_outro_after_the_last_one() {
         let Some(mut g) = game() else { return };
         let (w, h) = (640, 480);
@@ -2760,6 +3575,61 @@ mod tests {
     }
 
     #[test]
+    fn the_warmonger_edition_has_its_own_missions_progress_and_saves() {
+        use opensow_formats::{config::PassedLevels, Edition};
+        let Some(mut g) = game() else { return };
+        if g.assets.game.warmonger.is_none() {
+            return;
+        }
+        assert!(g.levels.iter().any(|l| l == "M05"));
+        let base_m01 = g.assets.game.resolve("Data\\Levels\\M01.map").unwrap();
+        g.set_edition(Edition::Warmonger);
+        assert_eq!(g.progress, PassedLevels::initial_warmonger());
+        assert!(!g.levels.iter().any(|l| l == "M05"), "{:?}", g.levels);
+        assert!(g.levels.iter().any(|l| l == "M07"));
+        assert_ne!(g.assets.game.resolve("Data\\Levels\\M01.map").unwrap(), base_m01);
+        assert_eq!(saveui::Store::locate(&g.assets.game).edition, Edition::Warmonger, "new saves are flagged");
+        // a mission loads from Warmonger's data and passing it follows the Warmonger unlock chain
+        g.campaign = true;
+        g.start("M03");
+        assert!(g.play.as_ref().is_some_and(|p| p.level == "M03" && p.world.units.iter().any(|u| u.kind == 46)), "the convoy mission's Rogon pods");
+        g.progress.pass_warmonger(3);
+        assert_eq!((g.progress.states[3], g.progress.states[4]), (1, 2));
+        g.open_lands(false);
+        assert!(g.lands.as_ref().unwrap().headings(3).0.starts_with("TERRITORY : 03"));
+        g.set_edition(Edition::Original);
+        assert_eq!(g.progress, PassedLevels::initial());
+        assert!(g.levels.iter().any(|l| l == "M05"));
+    }
+
+    #[test]
+    fn a_save_slot_remembers_its_campaign_and_loading_it_switches_the_edition() {
+        use opensow_formats::Edition;
+        let Some(mut g) = game() else { return };
+        if g.assets.game.warmonger.is_none() {
+            return;
+        }
+        g.set_edition(Edition::Warmonger);
+        g.start("M03");
+        let snapshot = g.play.as_mut().unwrap().snapshot();
+        let dir = std::env::temp_dir().join(format!("opensow-edition-save-{}", std::process::id()));
+        let mut store = saveui::Store { write: dir.clone(), also: None, edition: Edition::Warmonger };
+        let thumb = vec![0u16; 160 * 120];
+        store.write(1, "wm", "M03", &snapshot, &thumb).unwrap();
+        store.edition = Edition::Original;
+        store.write(2, "base", "M03", &snapshot, &thumb).unwrap();
+        let (level, edition, payload) = store.level_of(1).unwrap();
+        assert_eq!((level.as_str(), edition), ("M03", Edition::Warmonger));
+        assert_eq!(store.level_of(2).unwrap().1, Edition::Original);
+        // loading it from the base game's campaign selects Warmonger and its mission
+        g.set_edition(Edition::Original);
+        g.saveui_event(saveui::Event::Load(level, edition, payload));
+        assert_eq!(g.assets.game.edition, Edition::Warmonger);
+        assert!(g.play.as_ref().is_some_and(|p| p.level == "M03" && p.world.units.iter().any(|u| u.kind == 46)), "Warmonger's convoy mission");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn campaign_map_to_mission_and_back_with_progress() {
         let Some(mut g) = game() else { return };
         let (w, h) = (640, 480);
@@ -2821,6 +3691,35 @@ mod tests {
         g.update(0.0, w, h);
         assert!(!g.sfx.played.contains(&5));
         assert!(g.sfx.played.contains(&4), "{:?}", g.sfx.played);
+        // the player's own actions raised by the world (air strike far off screen, turret placed) are always heard
+        g.sfx.played.clear();
+        g.play.as_mut().unwrap().world.player_sounds.extend([68, 72]);
+        g.update(0.0, w, h);
+        assert_eq!(g.sfx.played, vec![68, 72]);
+        assert!(g.play.as_ref().unwrap().world.player_sounds.is_empty());
+    }
+
+    #[test]
+    fn clicking_any_building_plays_a_click() {
+        let Some(mut g) = game() else { return };
+        let (w, h) = (1024, 768);
+        g.start("M01");
+        g.update(0.0, w, h);
+        for owner in [opensow_formats::level::Owner::Player, opensow_formats::level::Owner::Enemy] {
+            let p = g.play.as_mut().unwrap();
+            p.world.clear_selection();
+            p.sel_building = None;
+            let b = p.world.structures.iter().position(|s| s.alive() && s.owner == owner && !matches!(s.kind, opensow_formats::level::ObjectKind::Turret(_))).unwrap();
+            let (cx, cy) = (p.world.structures[b].cell.0 * sim::CELL + 8, p.world.structures[b].cell.1 * sim::CELL + 8);
+            assert_eq!(p.world.structure_at(cx, cy), Some(b));
+            p.view.x = cx as f32 - 300.0 / p.view.zoom;
+            p.view.y = cy as f32 - 300.0 / p.view.zoom;
+            g.sfx.played.clear();
+            g.mouse_button(MouseButton::Left, true, 300, 300, w, h);
+            g.mouse_button(MouseButton::Left, false, 300, 300, w, h);
+            assert!(g.sfx.played.contains(&play::BUILDING_CLICK_SOUND), "{owner:?}: {:?}", g.sfx.played);
+            assert_eq!(g.play.as_ref().unwrap().sel_building.is_some(), owner == opensow_formats::level::Owner::Player);
+        }
     }
 
     #[test]

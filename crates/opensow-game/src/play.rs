@@ -34,6 +34,9 @@ const STARTER_SQUAD: [i32; 8] = [8, 8, 9, 5, 11, 11, 7, 14];
 
 /// `AnimSprite` draw mode of the smoke puffs: they live in their own list, drawn before the units.
 const PUFF_MODE: u8 = 8;
+/// A click on a building plays `tt-click` (54). Not in the exe: its building select (`0x417be0` -> `0x43ad60`) only sounds when
+/// units of that group join the selection, so a building click is silent there.
+pub const BUILDING_CLICK_SOUND: u8 = 54;
 
 pub struct Play {
     /// Headless debugging (`--no-mask`): draw the smoke and the top shadows without the screen mask.
@@ -56,6 +59,15 @@ pub struct Play {
     keys: HashSet<&'static str>,
     time: f32,
     pub paused: bool,
+    /// The chat line while it is open (Enter, docs/chat.md): the text typed so far.
+    pub chat: Option<String>,
+    /// The line sent last (Tab brings it back).
+    last_chat: String,
+    /// Pixel width of the open chat line at the last drawn frame; typing stops once it reaches `cheats::MAX_LINE_WIDTH`.
+    chat_width: std::cell::Cell<i32>,
+    /// The "draw fps" cheat is on, with the frames counted in the running second and the last second's count.
+    pub show_fps: bool,
+    fps: (std::time::Instant, u32, u32),
     /// Round-robin positions of Tab (`[pointer+0x2dc]`) and H / numpad + (`[pointer+0x2e0]`), docs/hotkeys.md.
     tab_next: usize,
     adv_next: usize,
@@ -105,11 +117,41 @@ pub struct Play {
     lang: Option<opensow_formats::lang::LangFile>,
     /// GDI stand-in for the satellite-protection label (11 px Times New Roman bold).
     label_font: Option<crate::gdi::Gdi>,
+    /// Unicode text for the HUD messages, countdown, hints and pause banner when the language is not English: the bitmap fonts only
+    /// have ASCII (the exe draws all of these through GDI, docs/text.md). `None` for English keeps the bitmap look.
+    hud_gdi: Option<crate::gdi::Gdi>,
+    /// The info box's Arial for languages other than English (accents; the bitmap font is ASCII only).
+    info_gdi: Option<crate::gdi::Gdi>,
 }
 
 impl Play {
     pub fn new(assets: &mut Assets, level: &str, settings: &Settings, carry_counter: usize) -> Result<Play, String> {
-        let mut scene = Scene::load(&assets.game, level, 0, None)?;
+        let scene = Scene::load(&assets.game, level, 0, None)?;
+        Play::with_scene(assets, level, scene, settings, carry_counter)
+    }
+
+    /// A skirmish on a `.net` map (docs/skirmish.md): the terrain of the mission the map belongs to, the script `level` already
+    /// prepared by [`crate::skirmish::prepare`] (the human is player 0, the computer player 1).
+    pub fn new_skirmish(assets: &mut Assets, map: &str, level: opensow_formats::level::Level, settings: &Settings, difficulty: sim::Difficulty) -> Result<Play, String> {
+        let (game, terrain) = assets.game.net_terrain(map, level.level_id());
+        let scene = Scene::load_with(&game, &terrain, 0, None, Some(level))?;
+        let mut play = Play::with_scene(assets, map, scene, settings, 0)?;
+        play.world.difficulty = difficulty;
+        play.world.skirmish = true;
+        // maps that relied on starting carryalls get ground units instead, the same for both sides (docs/skirmish.md)
+        // (out in the open: not under the trees and rock tops of the map's foreground layer)
+        let (fg, w, h) = (play.scene.foreground.clone(), play.scene.bg_w, play.scene.bg_h);
+        let hidden = |c: (i32, i32)| {
+            let (x0, y0) = (c.0.max(0) as usize * 32, c.1.max(0) as usize * 32);
+            (y0..(y0 + 32).min(h)).any(|y| (x0..(x0 + 32).min(w)).any(|x| fg.get(y * w + x).copied().unwrap_or(false)))
+        };
+        for side in 0..2 {
+            play.world.add_start_units(side, crate::skirmish::start_units(map), &hidden);
+        }
+        Ok(play)
+    }
+
+    fn with_scene(assets: &mut Assets, level: &str, mut scene: Scene, settings: &Settings, carry_counter: usize) -> Result<Play, String> {
         let lvl = scene.level.as_ref().ok_or("level has no script (.edt)")?;
         let mut world = World::from_level(&scene.map, lvl);
         if let Some(rng) = std::fs::read(assets.game.data().join("generic.file")).ok().and_then(|d| opensow_formats::rng::GameRng::from_file(&d)) {
@@ -160,6 +202,11 @@ impl Play {
             keys: HashSet::new(),
             time: 0.0,
             paused: false,
+            chat: None,
+            last_chat: String::new(),
+            chat_width: std::cell::Cell::new(0),
+            show_fps: false,
+            fps: (std::time::Instant::now(), 0, 0),
             tab_next: 0,
             adv_next: 0,
             bookmarks: [None; 9],
@@ -187,8 +234,11 @@ impl Play {
             pills: Vec::new(),
             viewport: (0, 0),
             label_font: crate::gdi::Gdi::load_sized(11.0, 1.0),
-            lang: assets.game.resolve("Data\\Language\\langEN.txt").and_then(|p| std::fs::read(p).ok()).and_then(|d| opensow_formats::lang::LangFile::parse(&d).ok()),
+            info_gdi: crate::gdi::Gdi::arial_for_language(assets.game.language(), 9.0),
+            hud_gdi: (assets.game.language() != opensow_formats::lang::Language::English).then(|| crate::gdi::Gdi::load_sized(15.0, 1.0)).flatten(),
+            lang: assets.game.resolve(&format!("Data\\Language\\{}", assets.game.language().file_name())).and_then(|p| std::fs::read(p).ok()).and_then(|d| opensow_formats::lang::LangFile::parse(&d).ok()).map(|f| f.with_supplement(assets.game.language())),
         };
+        play.world.sheet_sizes = assets.art.sheet_sizes();
         play.world.set_mission(level.trim_start_matches(['M', 'm']).parse().ok());
         play.world.carry_counter = carry_counter; // `[0x89cf50]` survives from mission to mission
         play.world.start_airlift();
@@ -222,6 +272,13 @@ impl Play {
         if ours.is_empty() {
             let state = opensow_formats::save::State::parse(stream, 1).map_err(|e| e.to_string())?;
             self.world.apply_state(&state)?;
+            // the tutorial script (`[0x70f2cc]`, its panel and arrow) is not in the original's stream: a save of level 0 loads as a plain
+            // mission without the script (`-1` after the load's new-game reset, so the HQ rules and the computer opponent are on)
+            if self.world.tutorial.is_some() {
+                self.world.tutorial = None;
+                self.world.tutorial_step = None;
+                self.world.ai = true;
+            }
             self.view = View { x: state.map.scroll_x as f32, y: state.map.scroll_y as f32, zoom: self.view.zoom };
         } else {
             let (cam, world) = ours.split_at_checked(12).ok_or("snapshot too short")?;
@@ -271,6 +328,22 @@ impl Play {
         ((self.view.x + sx as f32 / self.view.zoom) as i32, (self.view.y + sy as f32 / self.view.zoom) as i32)
     }
 
+    /// True when the camera sits in the map's top-right corner: the radar then covers world the view can never scroll off, so
+    /// it lets clicks through (an object under it, e.g. a corner HQ with an Advancer over it, stays reachable).
+    fn radar_passes_through(&self) -> bool {
+        let w = self.viewport.0;
+        let vw = w as f32 / self.view.zoom;
+        let mw = self.scene.bg_w as f32;
+        self.view.y <= 0.5 && (vw >= mw || self.view.x >= mw - vw - 0.5)
+    }
+
+    /// The HUD element under a screen position; the radar and its frame are skipped in the top-right corner of the map.
+    fn hud_hit(&self, x: i32, y: i32) -> Option<Hit> {
+        let hit = self.hud.as_ref().and_then(|l| l.hit(x, y))?;
+        let radar_area = matches!(hit, Hit::Radar) || self.hud.as_ref().is_some_and(|l| l.on_radar_frame(x, y));
+        (!(radar_area && self.radar_passes_through())).then_some(hit)
+    }
+
     pub fn left_down(&mut self, x: i32, y: i32) {
         if self.world.tutorial.as_ref().is_some_and(|t| t.arrow) && self.tutorial_arrow_at(x, y) {
             self.world.tutorial_arrow_clicked();
@@ -279,7 +352,7 @@ impl Play {
         }
         // a disabled air pill is not a click target (`0x454d02`): the click goes on to the map
         let locked = self.hud.as_ref().is_some_and(|l| l.pills_locked);
-        if let Some(hit) = self.hud.as_ref().and_then(|l| l.hit(x, y)).filter(|h| !(locked && matches!(h, Hit::Air(_)))) {
+        if let Some(hit) = self.hud_hit(x, y).filter(|h| !(locked && matches!(h, Hit::Air(_)))) {
             self.hud_click(hit, x, y);
             return;
         }
@@ -341,7 +414,7 @@ impl Play {
 
     /// The building under the pointer, whoever owns it (`0x418da0` in `0x455ab0`); none while the pointer is on the HUD or outside.
     fn hovered_building(&self) -> Option<usize> {
-        if !self.edge_scroll || self.hud.as_ref().is_some_and(|l| l.hit(self.cursor.0, self.cursor.1).is_some()) {
+        if !self.edge_scroll || self.hud_hit(self.cursor.0, self.cursor.1).is_some() {
             return None;
         }
         let (mx, my) = self.to_map(self.cursor.0, self.cursor.1);
@@ -476,6 +549,51 @@ impl Play {
         }
     }
 
+    /// Enter (`0x41612d`): opens the chat line.
+    pub fn chat_open(&mut self) {
+        self.chat.get_or_insert_with(String::new);
+    }
+
+    /// A typed character (`0x4284bf`: characters from 0x20 on, while the line is narrower than `cheats::MAX_LINE_WIDTH`).
+    pub fn chat_type(&mut self, ch: char) {
+        let full = self.chat_width.get() >= opensow_formats::cheats::MAX_LINE_WIDTH;
+        if let Some(t) = self.chat.as_mut().filter(|_| !full && (' '..='~').contains(&ch)) {
+            t.push(ch);
+        }
+    }
+
+    pub fn chat_backspace(&mut self) {
+        if let Some(t) = self.chat.as_mut() {
+            t.pop();
+        }
+    }
+
+    /// Tab (`0x426c90`, character 9): the line sent last replaces the text.
+    pub fn chat_recall(&mut self) {
+        if let Some(t) = self.chat.as_mut() {
+            *t = self.last_chat.clone();
+        }
+    }
+
+    /// Esc (`0x426d0d`, character 0x1b): the text is dropped and the line closes.
+    pub fn chat_cancel(&mut self) {
+        self.chat = None;
+    }
+
+    /// Enter on an open line: a cheat phrase takes effect (single player, `0x426d73`), any other text becomes a chat line of
+    /// the local player; the line closes either way.
+    pub fn chat_send(&mut self) {
+        let Some(text) = self.chat.take().filter(|t| !t.is_empty()) else { return };
+        self.last_chat = text.clone();
+        match opensow_formats::cheats::parse(&text) {
+            Some(opensow_formats::cheats::Cheat::DrawFps) => self.show_fps = true,
+            Some(c) => {
+                self.world.apply_cheat(c);
+            }
+            None => self.world.say_chat(&text),
+        }
+    }
+
     /// Space / numpad 0 (`0x416177`): jumps to where the last message event happened, while a message line is shown.
     pub fn look_at_event(&mut self) {
         if let Some((x, y)) = self.world.event_position() {
@@ -597,17 +715,18 @@ impl Play {
                     } else if let Some(t) = self.world.structure_at(p.0, p.1) {
                         self.world.clear_selection();
                         self.sel_building = Some(t);
+                        self.ui_sounds.push(BUILDING_CLICK_SOUND);
                     }
                 }
                 _ => {
                     // nothing selected: a click on an own building shows its info box and slots; only the own building gets the
                     // selected flag (`0x417b9a`: `[b+0x8c] == player`), an enemy's slots show on hover alone
                     if !selected {
-                        if let Some(t) = self.world.structure_by_art(p.0, p.1).filter(|&t| self.world.structures[t].owner == Owner::Player) {
-                            self.sel_building = Some(t);
-                        } else {
-                            self.sel_building = None;
+                        let clicked = self.world.structure_by_art(p.0, p.1);
+                        if clicked.is_some() {
+                            self.ui_sounds.push(BUILDING_CLICK_SOUND); // any building, own or not (not in the exe)
                         }
+                        self.sel_building = clicked.filter(|&t| self.world.structures[t].owner == Owner::Player);
                     }
                 }
             }
@@ -658,9 +777,9 @@ impl Play {
         if panning {
             return;
         }
-        if self.hud.as_ref().is_some_and(|l| l.hit(x, y).is_some()) {
+        if self.hud_hit(x, y).is_some() {
             // a right click on the radar toggles the black radar (`0x416e94`: `[0x5baad8] ^= 1` on the release edge)
-            if self.hud.as_ref().and_then(|l| l.hit(x, y)) == Some(Hit::Radar) {
+            if self.hud_hit(x, y) == Some(Hit::Radar) {
                 self.radar_black = !self.radar_black;
             }
             self.placing = None;
@@ -685,7 +804,7 @@ impl Play {
     pub fn pointer(&self) -> Pointer {
         let (x, y) = self.cursor;
         let (w, h) = self.viewport;
-        let on_panel = self.hud.as_ref().is_some_and(|l| l.hit(x, y).is_some());
+        let on_panel = self.hud_hit(x, y).is_some();
         // screen edges: scroll arrows
         let edge = 6;
         let dx = if x < edge { -1 } else if x >= w as i32 - edge && !on_panel { 1 } else { 0 };
@@ -711,9 +830,9 @@ impl Play {
         if self.world.units.iter().any(|u| u.hp > 0 && u.player == 0 && (u.x - mx as f32).hypot(u.sprite_y() - my as f32) < 22.0) {
             return Pointer::Own;
         }
-        if let Some(Target::Unit(_)) = self.world.enemy_at(mx, my).filter(|t| matches!(t, Target::Unit(_))) {
-            // the Advancer cannot attack units: the plain move pointer
-            return if advancer { Pointer::Move } else if selected { Pointer::Attack } else { Pointer::Arrow };
+        if let Some(t @ Target::Unit(_)) = self.world.enemy_at(mx, my).filter(|t| matches!(t, Target::Unit(_))) {
+            // `0x417a8c`: the Advancer only gets the attack pointer over flyers (enemy Advancers) and anti-air units
+            return if advancer && !self.world.advancer_can_attack(t) { Pointer::Move } else if selected { Pointer::Attack } else { Pointer::Arrow };
         }
         if let Some(t) = self.world.structure_at(mx, my) {
             if advancer {
@@ -802,7 +921,7 @@ impl Play {
             let (cx, cy) = self.cursor;
             self.radar_look(cx, cy);
         }
-        let hover = self.hud.as_ref().and_then(|l| l.hit(self.cursor.0, self.cursor.1)).filter(|h| !matches!(h, Hit::Panel));
+        let hover = self.hud_hit(self.cursor.0, self.cursor.1).filter(|h| !matches!(h, Hit::Panel));
         if hover != self.hud_hover {
             if hover.is_some_and(|h| h != Hit::Radar) {
                 self.ui_sounds.push(50); // icon-move
@@ -825,7 +944,7 @@ impl Play {
         let (mut dx, mut dy) = (0.0, 0.0);
         let edge = 6;
         let at = self.edge_scroll;
-        let on_panel = self.hud.as_ref().is_some_and(|l| l.hit(self.cursor.0, self.cursor.1).is_some());
+        let on_panel = self.hud_hit(self.cursor.0, self.cursor.1).is_some();
         if self.keys.contains("left") {
             dx -= kspeed;
         }
@@ -914,6 +1033,10 @@ impl Play {
     pub fn draw(&mut self, assets: &mut Assets, settings: &Settings, buf: &mut [u32], w: usize, h: usize, _ui_scale: f32) {
         self.limit_zoom(w, h);
         self.viewport = (w, h);
+        self.fps.1 += 1;
+        if self.fps.0.elapsed().as_secs_f32() >= 1.0 {
+            self.fps = (std::time::Instant::now(), 0, self.fps.1);
+        }
         if self.fit {
             self.centre_on_player(w, h);
             self.fit = false;
@@ -936,7 +1059,8 @@ impl Play {
             self.scene.placed.sort_by_key(|p| (p.sort_y, p.layer));
         }
         // destroyed buildings and turrets disappear when their destruction animation ends (they stay, dead, while it runs: `Structure::dying`)
-        let dead: HashSet<usize> = self.world.structures.iter().filter(|s| !s.present()).map(|s| s.object).collect();
+        // a turret's gun top (unit kinds 109-113) is freed the moment it dies, so a turret vanishes with its first explosion
+        let dead: HashSet<usize> = self.world.structures.iter().filter(|s| !s.present() || (s.dying.is_some() && matches!(s.kind, ObjectKind::Turret(_)))).map(|s| s.object).collect();
         if !dead.is_empty() {
             self.scene.placed.retain(|p| !matches!(p.source, Source::Object(i) if dead.contains(&i)));
         }
@@ -957,6 +1081,8 @@ impl Play {
             }
         }
         let overlays = Overlays { blocked: false, grid: false, objects: false, markers: false, sprites: true, muzzles: false, walk: None, fire: None, foreground: false, minimap: false };
+        // the world (ground, buildings, units, effects) may use the enhanced art above zoom 1; the HUD below keeps the exe's pixels
+        opensow_viewer::upscale::set_world(true);
         render(&self.scene, &self.view, overlays, buf, w, h);
         for d in &self.world.decals {
             if let Some((set, i)) = Self::extra_frame(assets, opensow_formats::effects::DECAL_ARRAY, d.frame as usize) {
@@ -1006,6 +1132,7 @@ impl Play {
                 blit_blend(buf, w, h, &self.view, &set[i], x, y, Blit::Additive);
             }
         }
+        opensow_viewer::upscale::set_world(false);
         if self.sel_building.is_some_and(|i| !self.world.structures.get(i).is_some_and(|b| b.alive())) {
             self.sel_building = None;
         }
@@ -1156,6 +1283,12 @@ impl Play {
             let cframe = u.chassis.as_ref().map_or(0, |c| c.frame() as usize);
             // the hovering Advancers' shadows were drawn before the bullets (`draw_air_pass`)
             let shadow = u.kind != 40;
+            if let (Some(set), true, true) = (&sp.chassis, shadow, opensow_viewer::fx::contact()) {
+                // contact shadow: a soft dark pool under the unit (docs/fx.md)
+                let f = &set[cframe.min(set.len() - 1)];
+                let rx = f.width as f32 * 0.55;
+                opensow_viewer::fx::blob(buf, w, h, &view, ax as f32, ay as f32, rx, rx * 0.6, 140.0);
+            }
             if let (Some(set), true) = (&sp.chassis_shadow, shadow) {
                 blit(buf, w, h, &view, &set[cframe.min(set.len() - 1)], ax, ay, true);
             }
@@ -1200,7 +1333,7 @@ impl Play {
         }
         // a building's health bar (`0x409400` -> `0x437140`): only while it is selected (clicked) or under the pointer
         let (mx, my) = self.to_map(self.cursor.0, self.cursor.1);
-        let hovered = if self.edge_scroll && self.hud.as_ref().is_none_or(|l| l.hit(self.cursor.0, self.cursor.1).is_none()) { self.world.structure_at(mx, my) } else { None };
+        let hovered = if self.edge_scroll && self.hud_hit(self.cursor.0, self.cursor.1).is_none() { self.world.structure_at(mx, my) } else { None };
         for t in [self.selected_building(), hovered].into_iter().flatten().collect::<std::collections::BTreeSet<_>>() {
             let s = &self.world.structures[t];
             // width = max / scale (scale 144 for buildings, 72 for turrets, `0x40a981..0x40aa01`), centred on the footprint, at its top edge
@@ -1237,7 +1370,7 @@ impl Play {
     /// (`0x5e68cc`) where not. A click only builds when all cells are good (`[pointer+0x1e0]`, `0x4172cb`).
     fn draw_placement(&self, assets: &mut Assets, buf: &mut [u32], w: usize, h: usize) {
         let Some(tier) = self.placing else { return };
-        if self.hud.as_ref().is_some_and(|l| l.hit(self.cursor.0, self.cursor.1).is_some()) {
+        if self.hud_hit(self.cursor.0, self.cursor.1).is_some() {
             return;
         }
         let (mx, my) = self.to_map(self.cursor.0, self.cursor.1);
@@ -1448,7 +1581,7 @@ impl Play {
         if self.info_text.as_ref().map(|t| t.0) != kind {
             self.info_text = kind.and_then(|k| {
                 let l = self.lang.as_ref().and_then(|lang| opensow_formats::infobox::lines(k, lang))?;
-                let d = infobox::wrap_description(&font, &l.description);
+                let d = infobox::wrap_description(&font, self.info_gdi.as_ref(), &l.description);
                 Some((k, l, d))
             });
         }
@@ -1464,28 +1597,76 @@ impl Play {
         }
     }
 
+    /// Width of a HUD line in natural pixels (bitmap or GDI, whichever draws it).
+    fn hud_width(&self, font: &(opensow_formats::font::Font, opensow_formats::font::Font), text: &str) -> i32 {
+        match &self.hud_gdi {
+            Some(g) => g.width(text),
+            None => ui::text_width(font, text, 1.0),
+        }
+    }
+
+    /// A HUD line with its shadow `(2, 2)` window pixels away; `shadow` None = no shadow.
+    #[allow(clippy::too_many_arguments)]
+    fn hud_put(&self, font: &(opensow_formats::font::Font, opensow_formats::font::Font), buf: &mut [u32], w: usize, h: usize, text: &str, x: i32, y: i32, ui: f32, fg: (u8, u8, u8), shadow: Option<(u8, u8, u8)>) {
+        if let Some(g) = &self.hud_gdi {
+            match shadow {
+                Some(sh) => g.draw_shadowed(buf, w, h, text, x as f32, y as f32, ui, fg, sh),
+                None => g.draw_shadowed(buf, w, h, text, x as f32, y as f32, ui, fg, fg),
+            }
+            return;
+        }
+        if let Some(sh) = shadow {
+            ui::text(buf, w, h, font, text, x + (2.0 * ui).round() as i32, y + (2.0 * ui).round() as i32, ui, sh, sh);
+        }
+        ui::text(buf, w, h, font, text, x, y, ui, fg, (0, 0, 0));
+    }
+
     fn draw_hud(&self, assets: &mut Assets, buf: &mut [u32], w: usize, h: usize, ui: f32) {
         let font = assets.font("small");
         let u = |v: f32| (v * ui).round() as i32;
         // countdown (`0x430d50`, called from `0x4209d3` with x = W/2, y = 13): "<string> mm:ss", left aligned at the screen's middle
         if let (Some((min, sec, _)), false) = (self.world.timer, self.world.timer_expired) {
-            let label = self.lang.as_ref().and_then(|l| (0..400).filter_map(|i| l.get(i)).find(|t| t.trim().eq_ignore_ascii_case("remaining time"))).unwrap_or("Remaining Time");
+            let label = self.lang.as_ref().and_then(|l| l.get(REMAINING_TIME_STRING - 1)).unwrap_or("Remaining Time");
             let text = format!("{} {min:02}:{sec:02}", label.trim()).to_uppercase();
             // `0x467060` passes text colour (255,255,255) and shadow (0,0,0) to `0x466f40` (shadow at +2,+2, as for messages)
-            ui::text(buf, w, h, &font, &text, w as i32 / 2 + u(2.0), u(13.0) + u(2.0), ui, (0, 0, 0), (0, 0, 0));
-            ui::text(buf, w, h, &font, &text, w as i32 / 2, u(13.0), ui, (255, 255, 255), (0, 0, 0));
+            self.hud_put(&font, buf, w, h, &text, w as i32 / 2, u(13.0), ui, (255, 255, 255), Some((0, 0, 0)));
         }
         // messages (`MESSAGES` holds the exe's 1-based string numbers, `LangFile::get` is 0-based; `0x4036a0` draw, `0x404820` add, `0x4047a0` update, see `message_pose`): text colour (255,243,148),
         // shadow (74,4,0) at +2,+2
-        let births: Vec<u32> = self.world.log.iter().map(|&(t, _)| t as u32).collect();
-        for (k, &(t, id)) in self.world.log.iter().enumerate() {
-            let Some(text) = opensow_formats::messages::lang_index(id).and_then(|i| self.lang.as_ref().and_then(|l| l.get(i - 1))) else { continue };
-            let text = text.trim();
-            let tw = ui::text_width(&font, text, 1.0);
-            let Some((x, y)) = message_pose(t as u32, tw, &births[k + 1..], self.world.tick as u32) else { continue };
+        // lang messages and chat lines share one queue (each newer line pushes the older ones down)
+        let mut lines: Vec<(u32, &str, (u8, u8, u8), (u8, u8, u8))> = Vec::new();
+        for &(t, id) in &self.world.log {
+            if let Some(text) = opensow_formats::messages::lang_index(id).and_then(|i| self.lang.as_ref().and_then(|l| l.get(i - 1))) {
+                lines.push((t as u32, text.trim(), (255, 243, 148), (74, 4, 0)));
+            }
+        }
+        // chat lines of the local (blue) player: light blue (`0xff8080` COLORREF, docs/multiplayer-menus.md)
+        lines.extend(self.world.chat.iter().map(|(t, text)| (*t as u32, text.as_str(), (128, 128, 255), (0, 0, 0))));
+        lines.sort_by_key(|l| l.0);
+        let births: Vec<u32> = lines.iter().map(|l| l.0).collect();
+        for (k, &(t, text, fg, shadow)) in lines.iter().enumerate() {
+            let tw = self.hud_width(&font, text);
+            let Some((x, y)) = message_pose(t, tw, &births[k + 1..], self.world.tick as u32) else { continue };
             let y = h as i32 + u(y as f32);
-            ui::text(buf, w, h, &font, text, u(x as f32) + u(2.0), y + u(2.0), ui, (74, 4, 0), (74, 4, 0));
-            ui::text(buf, w, h, &font, text, u(x as f32), y, ui, (255, 243, 148), (0, 0, 0));
+            self.hud_put(&font, buf, w, h, text, u(x as f32), y, ui, fg, Some(shadow));
+        }
+        // the open chat line, above the message slots; the cursor blinks twice a second
+        if let Some(t) = &self.chat {
+            self.chat_width.set(ui::text_width(&font, t, 1.0));
+            let cursor = if (self.world.tick / 30) % 2 == 0 { "_" } else { "" };
+            let text = format!("{t}{cursor}");
+            let (x, y) = (u(10.0), h as i32 - u(64.0));
+            let r = ui::Rect { x: x - u(4.0), y: y - u(3.0), w: u((opensow_formats::cheats::MAX_LINE_WIDTH + 24) as f32), h: u(19.0) };
+            ui::dim_sub(buf, w, h, r, 32);
+            ui::text(buf, w, h, &font, &text, x + u(2.0), y + u(2.0), ui, (0, 0, 0), (0, 0, 0));
+            ui::text(buf, w, h, &font, &text, x, y, ui, (255, 255, 255), (0, 0, 0));
+        }
+        // "draw fps" (`0x4302e0`, from `0x420987`): "FPS: n" at the screen's middle, ten pixels above the bottom edge
+        if self.show_fps {
+            let text = format!("FPS: {}", self.fps.2);
+            let (x, y) = (w as i32 / 2, h as i32 - u(10.0));
+            ui::text(buf, w, h, &font, &text, x, y, ui, (0, 0, 0), (0, 0, 0));
+            ui::text(buf, w, h, &font, &text, x + u(2.0), y, ui, (255, 255, 255), (0, 0, 0));
         }
         // the tutorial's instruction panel (`0x430fd0`): the dark box, the text lines, the spinning coin and the arrow button
         if let (Some(panel), true) = (&self.tut_panel, self.world.tutorial.is_some()) {
@@ -1497,7 +1678,7 @@ impl Play {
                 let (cx, cy) = (w as i32 / 2, h as i32 / 2);
                 let r = ui::Rect { x: cx - u(hint.half as f32), y: cy - u(15.0), w: 2 * u(hint.half as f32), h: u(25.0) };
                 ui::dim_sub(buf, w, h, r, 32);
-                ui::text(buf, w, h, &font, text.trim(), cx - u(hint.text_dx as f32), cy - u(7.0), ui, (255, 255, 255), (0, 0, 0));
+                self.hud_put(&font, buf, w, h, text.trim(), cx - u(hint.text_dx as f32), cy - u(7.0), ui, (255, 255, 255), None);
             }
         }
         self.draw_placement(assets, buf, w, h);
@@ -1507,7 +1688,7 @@ impl Play {
             hud::draw_slots(layout, &state, assets, buf, w, h);
             let hs = layout.s;
             let (lines, desc) = self.info_text.as_ref().map_or((None, Vec::new()), |(_, l, d)| (Some(l.clone()), d.clone()));
-            infobox::draw(&self.infobox, lines.as_ref(), &desc, assets, buf, w, h, hs);
+            infobox::draw(&self.infobox, lines.as_ref(), &desc, self.info_gdi.as_ref(), assets, buf, w, h, hs);
         }
         if self.paused {
             self.draw_pause(assets, buf, w, h);
@@ -1550,12 +1731,21 @@ impl Play {
     /// (white, black shadow at +2,+2) with its left edge at `width / 2 - text width / 2` and its top at the screen's middle row. The exe
     /// uses a 28 px bold italic Times New Roman through GDI; the big bitmap font stands in.
     fn draw_pause(&self, assets: &mut Assets, buf: &mut [u32], w: usize, h: usize) {
-        for y in (0..h).step_by(2) {
-            buf[y * w..(y + 1) * w].fill(0);
+        if opensow_viewer::record::active() {
+            opensow_viewer::record::stripes(0, 0, w as i32, h as i32);
+        } else {
+            for y in (0..h).step_by(2) {
+                buf[y * w..(y + 1) * w].fill(0);
+            }
         }
         let font = assets.font("big");
         let text = self.lang.as_ref().and_then(|l| l.get(PAUSE_STRING - 1)).map_or("P A U S E", str::trim);
         let ui = (h as f32 / 768.0).max(1.0);
+        if let Some(g) = crate::gdi::Gdi::load_sized(28.0, 1.0).filter(|_| self.hud_gdi.is_some()) {
+            let (x, y) = ((w as f32 - g.width(text) as f32 * ui) / 2.0, h as f32 / 2.0);
+            g.draw_rgb(buf, w, h, text, x, y, ui, (255, 255, 255));
+            return;
+        }
         let tw = ui::text_width(&font, text, ui);
         let (x, y) = ((w as i32 - tw) / 2, h as i32 / 2);
         ui::text(buf, w, h, &font, text, x + 2, y + 2, ui, (0, 0, 0), (0, 0, 0));
@@ -1565,6 +1755,8 @@ impl Play {
 
 /// The lang string of the pause (1-based id pushed at `0x43543a`).
 const PAUSE_STRING: usize = 362;
+/// "Remaining Time" (1-based, `0x430d50`).
+const REMAINING_TIME_STRING: usize = 363;
 
 /// Position of a message `now - born` ticks after it was added, or `None` once it is gone (`0x4047a0`, `0x404820`).
 /// It starts at x = 10 - width, y = -42 (relative to the screen's bottom) and slides in 3 px per tick up to x = 10; only then

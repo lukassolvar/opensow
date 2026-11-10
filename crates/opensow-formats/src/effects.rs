@@ -313,6 +313,19 @@ impl BulletAnim {
     }
 }
 
+/// Sound id the bullet constructor `0x411dc0` plays when a bullet of type `ty` is created, at its start point with the +-10 % pitch
+/// jitter (`0x4075b0(id, x, y, 1, 0)`): type 28 (special tier 2, weapon kind 14) -> 8 `special/02` (case `0x412299`), type 29 (special
+/// tier 3, kind 15) -> 9 `special/03` (`0x4121ed`), type 31 (the Advancer gun) -> 56 `tt-fire` (`0x412240`). It sounds once per bullet;
+/// the volley spawner's muzzle switch (`sfx::muzzle`) has no case for these kinds.
+pub fn constructor_sound(ty: u8) -> Option<u8> {
+    match ty {
+        28 => Some(8),
+        29 => Some(9),
+        31 => Some(56),
+        _ => None,
+    }
+}
+
 /// Sound ids played at a bullet's end point by the impact function `0x40f590` (table `0x410a14` -> `0x4109f0`), see
 /// `sfx::SFX`. Type 18 plays its sound only half of the time (`random(2) == 0`).
 pub fn impact_sound(ty: u8) -> Option<u8> {

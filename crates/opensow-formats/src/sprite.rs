@@ -45,6 +45,8 @@ pub struct Frame {
     pub pixels: Vec<u16>,
     /// Row-major coverage: `true` where a pixel is drawn.
     pub mask: Vec<bool>,
+    /// Lazily made 2x enhanced copy of this frame (`opensow_viewer::upscale`); never part of the file format.
+    pub enhanced: std::sync::OnceLock<std::sync::Arc<Frame>>,
 }
 
 impl Frame {
@@ -127,7 +129,52 @@ fn parse_frame(data: &[u8], base: usize, kind: Kind) -> Result<Frame> {
             return Err(Error::Invalid(format!("row {y} covers {x} of {w} pixels")));
         }
     }
-    Ok(Frame { width, height, hot_x, hot_y, extra, pixels, mask })
+    Ok(Frame { width, height, hot_x, hot_y, extra, pixels, mask, enhanced: Default::default() })
+}
+
+/// Inverse of [`parse`]: encodes frames as a sprite file (frames, then a zero `u32`).
+/// Rows are written as alternating transparent / opaque runs (the first flag says which comes first);
+/// `Kind::Shadow` frames carry coverage only. Output of `parse` re-encodes to the same frames.
+pub fn encode(frames: &[Frame], kind: Kind) -> Vec<u8> {
+    let mut out = Vec::new();
+    for f in frames {
+        let (w, h) = (f.width as usize, f.height as usize);
+        let mut body: Vec<u16> = vec![f.width, f.height, f.hot_x as u16, f.hot_y as u16];
+        body.extend(f.extra);
+        let table_at = body.len();
+        body.extend(std::iter::repeat(0).take(h * 2));
+        for y in 0..h {
+            let off = body.len() as u32;
+            body[table_at + y * 2] = off as u16;
+            body[table_at + y * 2 + 1] = (off >> 16) as u16;
+            let row = y * w..(y + 1) * w;
+            let mask = &f.mask[row.clone()];
+            let px = &f.pixels[row];
+            let mut runs: Vec<u16> = Vec::new();
+            let mut x = 0;
+            let first_opaque = mask.first().copied().unwrap_or(false);
+            let mut count = 0u16;
+            while x < w {
+                let cur = mask[x];
+                let start = x;
+                while x < w && mask[x] == cur {
+                    x += 1;
+                }
+                runs.push((x - start) as u16);
+                if cur && kind == Kind::Color {
+                    runs.extend(&px[start..x]);
+                }
+                count += 1;
+            }
+            body.push(count);
+            body.push(first_opaque as u16);
+            body.extend(runs);
+        }
+        out.extend(((body.len() * 2) as u32).to_le_bytes());
+        out.extend(body.iter().flat_map(|v| v.to_le_bytes()));
+    }
+    out.extend(0u32.to_le_bytes());
+    out
 }
 
 #[cfg(test)]
@@ -173,5 +220,14 @@ mod tests {
     fn rejects_bad_row_width() {
         let data = frame_bytes(&[&[1, 0, 3]], 4);
         assert!(parse(&data, Kind::Shadow).is_err());
+    }
+
+    #[test]
+    fn encode_round_trips() {
+        let data = frame_bytes(&[&[3, 0, 1, 2, 0xFFFF, 0xF800, 1], &[1, 1, 4, 1, 2, 3, 4]], 4);
+        let frames = parse(&data, Kind::Color).unwrap();
+        assert_eq!(encode(&frames, Kind::Color), data);
+        let sh = frame_bytes(&[&[3, 0, 1, 2, 1]], 4);
+        assert_eq!(encode(&parse(&sh, Kind::Shadow).unwrap(), Kind::Shadow), sh);
     }
 }

@@ -40,7 +40,7 @@ Arrow buttons (frame 13 + k, jump table `0x44c4d8`, sound 33 `options-arrow`; "-
 | 6 / 7 | MUSIC row | music volume `0x6b3d88` `-5` / `+5` (`0x408490`; also sets the playing music's volume) |
 | 8 / 9 | KEYS SCROLL | `+0x18` `-1` (min 0) / `+1` (max 10) (`0x452bd0` / `0x452c10`) |
 | 10 / 11 | MOUSE SCROLL | `+0x14` the same (`0x452be0` / `0x452c20`) |
-| 12 / 13 | RESOLUTION | previous / next of 640x480, 800x600, 1024x768, 1600x900, 1920x1080 (table `0x49ce68`, 8 bytes each; no match = nothing) |
+| 12 / 13 | RESOLUTION | previous / next of 640x480, 800x600, 1024x768, 1600x900, 1920x1080 (table `0x49ce68`, 8 bytes each; no match = nothing); this port adds 2560x1440 and 3840x2160 |
 
 Numbers are drawn with `options_numbers` by `0x44b1f0(x, y, value)`: the value is capped at 999; three digits at x-12, x, x+12; two digits at x-6, x+6; one digit at x (no leading zeros). Shown: detail (x = centre-65), the three volumes (x = centre+230), the two scroll speeds (x = centre-36); the resolution shows its text from the table instead.
 
@@ -73,6 +73,20 @@ Every button's hover sound is 30 (`mainmenu-move`; `+0x54 = 0x1e`). Click sounds
 
 ## Open
 - RADAR off (no radar widget: not drawn, not clickable) and QUAKE are honoured (`Settings::radar_on/quake_on`). CLOUDS is honoured too (`Settings::cloud_detail`, docs/clouds.md).
-- Resolution, VBLANK and HW CURSOR are stored only: the window is resizable and presented by the OS.
+- VBLANK and HW CURSOR are stored only: the window is presented by the OS. Resolution is the size the game draws at (docs/game.md). Deviation: after the exe's table the arrows offer 2560x1440, 3840x2160 and NATIVE (stored as 0 x 0, `options::NATIVE`): the game draws at the window's own pixel size, the whole screen when fullscreen. NATIVE is also our first-run value (no settings file) instead of the exe's 1024 x 768.
 
 Deviation: the camera scroll (arrow keys, screen edge) is `options::SCROLL_BOOST` = 1.5 times the exe's `2 * ticks * speed` (the original defaults feel slow on large windows); the Options values and the right-drag scroll are unchanged. Set the constant to 1.0 for the original speed.
+
+## Page 2: this port's options (not in the exe)
+A green arrow at the right edge of the exe's page (design 596,227) leads to page 2 ("2/2" at the top right); a left arrow at the left edge (12,227) leads back. Page 2 uses the same picture and cogs; the baked-in arrow slots of the picture are filled from their surroundings (`wipe_arrow_slots`) because page 2 has no such arrows. Rows are `OWN_ROWS` (label, On/Off from strings 267/268, a one-line hint under it); text is English (these options do not exist in the language files). O.K. / CANCEL work for both pages (CANCEL restores page 2's values too).
+
+| row | setting | effect |
+|---|---|---|
+| Enhanced textures | `Extra::enhance` (default on) | run-time 2x sprite/ground enhancement above zoom 1 (docs/enhance.md); applied on O.K. (`Game::apply_enhance`); `--no-enhance` / `OPENSOW_ENHANCE=0` force it off for a run |
+| Soft shadows | `Extra::soft_shadows` (on) | blurred shadow edges (docs/fx.md) |
+| Contact shadows | `Extra::contact_shadows` (on) | dark halo around buildings and under units (docs/fx.md) |
+| Turret shadows | `Extra::turret_shadows` (**off**) | every turret casts a shadow, not only the A.A. turret (docs/fx.md) |
+| Enhanced sound | `Extra::sound` (on) | sinc resampling, 2/3 ms fades and a limiter on the effects mix (docs/audio.md, "Sound enhancement"); `--no-sound-enhance` / `OPENSOW_SOUND_ENHANCE=0` force it off |
+| Explosion glow | `Extra::glow` (on) | explosions and muzzle flashes light the ground (docs/fx.md); the three effects are forced off by `--no-fx` / `OPENSOW_FX=0` |
+
+These values live in `opensow.cfg` (current directory, next to the exe's `State of War_1.cfg`, whose fixed layout is left alone): one `name=0|1` line per option (`enhance_textures`, `soft_shadows`, `contact_shadows`, `explosion_glow`, `turret_shadows`, `enhance_sound`), unknown lines ignored, missing file = defaults. `--screen options --page 1 [--hover 100]` renders page 2 headless.

@@ -9,7 +9,7 @@ The game hides the system cursor and draws its own sprite: `cursor.ps6` (in `spr
 | 0 | arrow (offset -12,-8) | default |
 | 1 | arrow over blocked ground (walkers' grid `0x6c7a4c`; with an Advancer selected the air grid `0x6d7a4c` is used instead) | `0x417879` |
 | 2 | over an own unit or own building (select) | `0x417a25`, `0x417bca` |
-| 3 | go-to: ground, an enemy *unit* while an Advancer is selected, the own HQ under an Advancer, an own building the Advancer cannot use | `0x417a98`, `0x417e11`, `0x417bea` |
+| 3 | go-to: ground, an enemy *ground non-anti-air unit* while an Advancer is selected (an enemy Advancer, `[unit+0x4b]`, or anti-air unit, `[unit+0x4c]`, gets the attack pointer, test at `0x417a8c`; the click loop `0x417af2` has no kind filter, so the Advancer is ordered to chase it), the own HQ under an Advancer, an own building the Advancer cannot use | `0x417a98`, `0x417e11`, `0x417bea` |
 | 4 / 5 | attack (red brackets; 5 = modifier key) over enemy units/buildings with a selection | `0x417ac1`, `0x417d21` |
 | 6 | **repair** (purple wrench) | `0x417c4a` |
 | 7 | **destroy / capture** (red arrow) | `0x417cdd` |

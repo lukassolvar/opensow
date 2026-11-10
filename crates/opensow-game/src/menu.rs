@@ -13,6 +13,8 @@ pub enum Action {
     /// The load page (state `0x11`).
     LoadGame,
     Multiplayer,
+    /// Main menu SKIRMISH: a match on a multiplayer map against the computer (not in the original, docs/skirmish.md).
+    Skirmish,
     /// The prototype's own settings (game speed, health bars ...), key `P`.
     Prototype,
     Exit,
@@ -69,14 +71,20 @@ pub struct Button {
     pub sprite: Option<usize>,
 }
 
-const MAIN: [(&str, Action); 6] = [
-    ("New game", Action::NewGame),
-    ("Load game", Action::LoadGame),
-    ("Tutorial", Action::Tutorial),
-    ("Multiplayer", Action::Multiplayer),
-    ("Options", Action::Options),
-    ("Exit game", Action::Exit),
+/// Main menu rows: label, action and the index of the original's art button / language string (`None` = the port's own SKIRMISH row,
+/// which has no art and no translation and is drawn as text).
+const MAIN: [(&str, Action, Option<usize>); 7] = [
+    ("New game", Action::NewGame, Some(0)),
+    ("Load game", Action::LoadGame, Some(1)),
+    ("Tutorial", Action::Tutorial, Some(2)),
+    ("Multiplayer", Action::Multiplayer, Some(3)),
+    ("Skirmish", Action::Skirmish, None),
+    ("Options", Action::Options, Some(4)),
+    ("Exit game", Action::Exit, Some(5)),
 ];
+
+/// Distance between main menu rows in 1080p pixels (the original's six art buttons sat 65 apart; seven rows need a little less).
+const MAIN_PITCH: f32 = 58.0;
 
 pub const SPEEDS: [u32; 4] = [20, 40, 60, 120];
 
@@ -86,21 +94,44 @@ pub fn layout(screen: &Screen, assets: &mut Assets, levels: &[String], settings:
     let s = h as f32 / 1080.0;
     let mut out = Vec::new();
     match screen {
-        Screen::Main if assets.buttons.len() >= 12 => {
+        Screen::Main if assets.buttons.len() >= 12 && assets.main_labels().is_none() => {
             // The art was drawn for 640x480 with the frame hotspot = offset from the screen centre; here the column
             // sits under the logo of the 1920x1080 backdrop (x = 20.6% of the width, starting at 58% of the height).
-            let cx = (w as f32 * 0.206) as i32;
+            // in the backdrop's own fractions: it is scaled to cover and anchored left (`ui::backdrop_left`)
+            let (iw, ih) = assets.backdrop.as_ref().map_or((1920.0, 1080.0), |b| (b.w as f32, b.h as f32));
+            let cover = (w as f32 / iw).max(h as f32 / ih);
+            let cx = (iw * cover * 0.206) as i32;
             let top = (h as f32 * 0.58) as i32;
-            let pitch = (65.0 * s * 1.0) as i32;
-            for (i, (label, action)) in MAIN.iter().enumerate() {
-                let f = &assets.buttons[6 + i];
-                let (bw, bh) = ((f.width as f32 * s) as i32, (f.height as f32 * s) as i32);
-                out.push(Button { rect: Rect { x: cx - bw / 2, y: top + i as i32 * pitch, w: bw, h: bh.max(pitch * 3 / 4) }, action: action.clone(), label: (*label).into(), sprite: Some(i) });
+            let pitch = (MAIN_PITCH * s) as i32;
+            for (i, (label, action, art)) in MAIN.iter().enumerate() {
+                let y = top + i as i32 * pitch;
+                match art {
+                    Some(a) => {
+                        let f = &assets.buttons[6 + a];
+                        let (bw, bh) = ((f.width as f32 * s) as i32, (f.height as f32 * s) as i32);
+                        out.push(Button { rect: Rect { x: cx - bw / 2, y, w: bw, h: bh.max(pitch * 3 / 4) }, action: action.clone(), label: (*label).into(), sprite: Some(*a) });
+                    }
+                    None => out.push(Button { rect: Rect { x: cx - 160, y, w: 320, h: pitch * 3 / 4 }, action: action.clone(), label: (*label).into(), sprite: None }),
+                }
             }
         }
         Screen::Main => {
-            for (i, (label, action)) in MAIN.iter().enumerate() {
-                out.push(text_button(wi / 5, hi / 2 + i as i32 * 60, label, action.clone()));
+            let labels: Option<Vec<String>> = assets.main_labels().map(|l| l.to_vec());
+            let tr = crate::tr::Tr::new(assets.game.language());
+            if let (Some(labels), true) = (&labels, assets.backdrop.is_some()) {
+                // other languages: the exe draws the strings itself (GDI text, rows 62 px apart in 640x480), here under the logo as the sprites sit
+                let (iw, ih) = assets.backdrop.as_ref().map_or((1920.0, 1080.0), |b| (b.w as f32, b.h as f32));
+                let cover = (w as f32 / iw).max(h as f32 / ih);
+                let cx = (iw * cover * 0.206) as i32;
+                let (top, pitch) = ((h as f32 * 0.58) as i32, (MAIN_PITCH * s) as i32);
+                for (i, (name, action, art)) in MAIN.iter().enumerate() {
+                    let label = art.map_or_else(|| if *name == "Skirmish" { tr.menu_row().to_owned() } else { (*name).to_owned() }, |a| labels[a].clone());
+                    out.push(Button { rect: Rect { x: cx - 160, y: top + i as i32 * pitch, w: 320, h: pitch.max(24) * 3 / 4 }, action: action.clone(), label, sprite: None });
+                }
+            } else {
+                for (i, (label, action, _)) in MAIN.iter().enumerate() {
+                    out.push(text_button(wi / 5, hi / 2 - 30 + i as i32 * 54, label, action.clone()));
+                }
             }
         }
         Screen::Levels => {
@@ -145,9 +176,13 @@ pub fn draw(screen: &Screen, buttons: &[Button], hover: Option<usize>, assets: &
     if over_game {
         ui::dim(buf, w, h, Rect { x: 0, y: 0, w: w as i32, h: h as i32 }, 150);
     } else if let Some(img) = &assets.backdrop {
-        ui::backdrop(buf, w, h, img);
+        if matches!(screen, Screen::Main) {
+            ui::backdrop_left(buf, w, h, img);
+        } else {
+            ui::backdrop(buf, w, h, img);
+        }
     } else {
-        buf.fill(0x00101810);
+        ui::clear(buf, w, h, 0x00101810);
     }
     let big = assets.font("big");
     let medium = assets.font("medium");
@@ -187,6 +222,11 @@ pub fn draw(screen: &Screen, buttons: &[Button], hover: Option<usize>, assets: &
             } else {
                 ui::sprite_lit(buf, w, h, frame, fx, fy, sc, lift);
             }
+        } else if let (Screen::Main, Some(g)) = (screen, (b.sprite.is_none() && assets.backdrop.is_some() && !over_game && matches!(screen, Screen::Main)).then(|| crate::gdi::Gdi::load_sized((44.0 * h as f32 / 1080.0).max(16.0), 1.0)).flatten()) {
+            // localized main menu: GDI text, white when hovered, grey otherwise (`0x445620`), centred on the button
+            let tw = g.width(&b.label);
+            let c = if hot { 255 } else { 0xb4 };
+            g.draw_rgb(buf, w, h, &b.label, (b.rect.x + (b.rect.w - tw) / 2) as f32, b.rect.y as f32, 1.0, (c, c, c));
         } else {
             if hot {
                 ui::fill(buf, w, h, b.rect, (60, 220, 90), 70);

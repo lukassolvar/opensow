@@ -24,6 +24,21 @@ pub struct Entry {
     pub size: u32,
 }
 
+/// Builds `sprites.info` / `sprites.data` contents from (game path, bytes) pairs, in the given order.
+pub fn build(files: &[(String, Vec<u8>)]) -> (Vec<u8>, Vec<u8>) {
+    let (mut info, mut data) = (Vec::new(), Vec::new());
+    info.extend(MAGIC.to_le_bytes());
+    info.extend((files.len() as u32).to_le_bytes());
+    for (name, bytes) in files {
+        info.extend(name.bytes().map(|b| b.wrapping_add(NAME_SHIFT)));
+        info.push(0);
+        info.extend((data.len() as u32).to_le_bytes());
+        info.extend((bytes.len() as u32).to_le_bytes());
+        data.extend(bytes);
+    }
+    (info, data)
+}
+
 pub fn parse_index(info: &[u8]) -> Result<Vec<Entry>> {
     let mut r = Reader::new(info);
     let magic = r.u32("megafile magic")?;

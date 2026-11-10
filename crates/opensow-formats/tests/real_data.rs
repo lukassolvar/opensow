@@ -1049,6 +1049,39 @@ fn savegame_constants_match_the_exes_save_code() {
 }
 
 #[test]
+fn constructor_sounds_match_the_exes_bullet_constructor() {
+    // every case of the bullet constructor's switch (`0x411dc0`, jump table `0x412490`, 35 types) runs to the shared tail `0x412468`;
+    // a case that plays a sound calls `0x4075b0` after `push edi; push edx; push <id>` (57 52 6A id)
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    const TAIL: u32 = 0x412468;
+    let rel = |va: u32, b: &[u8]| va.wrapping_add(5).wrapping_add(u32::from_le_bytes(b[1..5].try_into().unwrap()));
+    let mut sounding = 0;
+    let cases: Vec<u32> = exe.at(0x412490, 35 * 4).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+    for (k, case) in cases.into_iter().enumerate() {
+        let ty = k as u8 + 1;
+        let mut found = None;
+        let mut va = case;
+        while va < TAIL {
+            let b = exe.at(va, 5);
+            if b[0] == 0xE9 && rel(va, b) == TAIL {
+                break;
+            }
+            if b[0] == 0xE8 && rel(va, b) == 0x4075b0 {
+                let before = exe.at(case, (va - case) as usize);
+                let at = before.windows(4).rposition(|w| w[0] == 0x57 && w[1] == 0x52 && w[2] == 0x6A).unwrap_or_else(|| panic!("type {ty}: no id push before the call at {va:#x}"));
+                found = Some(before[at + 3]);
+                sounding += 1;
+                break;
+            }
+            va += 1;
+        }
+        assert_eq!(opensow_formats::effects::constructor_sound(ty), found, "bullet type {ty} (case {case:#x})");
+    }
+    assert_eq!(sounding, 3, "types 28, 29 and 31 sound");
+}
+
+#[test]
 fn muzzle_sounds_match_the_exes_volley_spawner() {
     let Some(game) = GameDir::locate() else { return };
     let Some(exe) = Exe::open(&game) else { return };
@@ -2089,4 +2122,151 @@ fn shot_spread_and_rounds_match_the_exes_top_constructor() {
         assert_eq!(f.get(&0x20).copied(), Some(spread(kind as i32) as i32), "spread of kind {kind}");
         assert_eq!(f.get(&0x30).copied(), Some(rounds(kind as i32) as i32), "rounds of kind {kind}");
     }
+}
+
+/// The sprite encoder and the archive builder reproduce the installed files exactly (so re-imported art is a drop-in).
+#[test]
+fn sprite_encoder_and_archive_builder_reproduce_the_install() {
+    use opensow_formats::{megafile::{self, MegaFile}, sprite};
+    let Some(game) = GameDir::locate() else { return };
+    let mega = MegaFile::open(&game.data().join("sprites.info"), &game.data().join("sprites.data")).unwrap();
+    let mut all = Vec::new();
+    let (mut sprites, mut differ) = (0, Vec::new());
+    for e in &mega.entries {
+        let bytes = mega.read(e).unwrap();
+        if let Some(kind) = sprite::Kind::from_extension(std::path::Path::new(&e.name)) {
+            let again = sprite::encode(&sprite::parse(&bytes, kind).unwrap(), kind);
+            sprites += 1;
+            if again != bytes {
+                differ.push(e.name.clone());
+            }
+        }
+        all.push((e.name.clone(), bytes));
+    }
+    assert!(sprites > 200);
+    assert!(differ.is_empty(), "{} of {sprites} sprite files re-encode differently: {:?}", differ.len(), &differ[..differ.len().min(5)]);
+    let (info, data) = megafile::build(&all);
+    assert_eq!(info, std::fs::read(game.data().join("sprites.info")).unwrap(), "sprites.info");
+    assert_eq!(data, std::fs::read(game.data().join("sprites.data")).unwrap(), "sprites.data");
+}
+
+/// The chat cheats (`0x426c90`): the phrases the exe compares the typed line with and the amounts / air force codes they hand
+/// out are the ones in `formats::cheats` (docs/chat.md).
+#[test]
+fn cheat_phrases_match_the_exes_key_function() {
+    use opensow_formats::cheats::{MAX_LINE_WIDTH, MONEY, PHRASES, RESEARCH};
+    let Some(game) = GameDir::locate() else { return };
+    let Some(exe) = Exe::open(&game) else { return };
+    let (start, len) = (0x426c90u32, 0x428620u32 - 0x426c90);
+    let code = exe.at(start, len as usize);
+    // `push index; lea ecx,[ecx+4]; call [0x4855f8]; cmp al, imm8`: character `index` of the typed line against `imm8`
+    let call = [0xFF, 0x15, 0xF8, 0x55, 0x48, 0x00, 0x3C];
+    let mut phrases: Vec<String> = Vec::new();
+    for i in 5..code.len() - 8 {
+        if code[i..i + 7] == call && code[i - 5] == 0x6A && code[i - 3..i] == [0x8D, 0x49, 0x04] {
+            let (index, ch) = (code[i - 4] as usize, code[i + 7] as char);
+            if index == 0 {
+                phrases.push(String::new());
+            }
+            let p = phrases.last_mut().expect("the first comparison is character 0");
+            assert_eq!(p.len(), index, "characters come in order");
+            p.push(ch);
+        }
+    }
+    let ours: Vec<&str> = PHRASES.iter().map(|&(p, _)| p).collect();
+    assert_eq!(phrases, ours);
+    // the effects: `add dword ptr [4*eax + 0x517af8], 0x3e8` and `... + 0x517b04], 0xc8`
+    let find = |pat: &[u8]| code.windows(pat.len()).position(|w| w == pat);
+    let money = find(&[0x81, 0x04, 0x85, 0xF8, 0x7A, 0x51, 0x00, 0xE8, 0x03, 0x00, 0x00]).expect("money add");
+    assert_eq!(MONEY, 0x3e8);
+    let research = find(&[0x81, 0x04, 0x85, 0x04, 0x7B, 0x51, 0x00, 0xC8, 0x00, 0x00, 0x00]).expect("research add");
+    assert_eq!(RESEARCH, 0xc8);
+    assert!(money < research);
+    // `push code; add ecx, 0x70ba50; call 0x453e80` per air force, in phrase order
+    let mut at = research;
+    for &(_, c) in PHRASES.iter().filter(|(_, c)| c.air_code().is_some()) {
+        let code_byte = c.air_code().unwrap() as u8;
+        let pat = [0x6A, code_byte, 0x81, 0xC1, 0x50, 0xBA, 0x70, 0x00, 0xE8];
+        let off = code[at..].windows(pat.len()).position(|w| w == pat).unwrap_or_else(|| panic!("{c:?}")) + at;
+        at = off + 1;
+    }
+    // one minute: `inc dword ptr [0x5baac4]` after `cmp byte ptr [0x5baa99], 0` (the countdown has not ended)
+    assert!(find(&[0x80, 0x3D, 0x99, 0xAA, 0x5B, 0x00, 0x00, 0x75, 0x06, 0xFF, 0x05, 0xC4, 0xAA, 0x5B, 0x00]).is_some());
+    // the line stops growing once its width reaches 0x18b
+    assert!(find(&[0x81, 0x7D, 0xE8, 0x8B, 0x01, 0x00, 0x00]).is_some(), "cmp [ebp-0x18], 0x18b");
+    assert_eq!(MAX_LINE_WIDTH, 0x18b);
+}
+
+/// Every installed `.srf` / `.srfa` survives to_jpeg -> from_jpeg unchanged.
+#[test]
+fn srf_wrapper_reproduces_the_install() {
+    use opensow_formats::srf;
+    let Some(game) = GameDir::locate() else { return };
+    let mut n = 0;
+    for dir in ["Data\\PICTURES", "Data\\Levels"] {
+        for e in std::fs::read_dir(game.resolve(dir).unwrap()).unwrap().flatten() {
+            let p = e.path();
+            let ext = p.extension().and_then(|x| x.to_str()).unwrap_or("").to_ascii_lowercase();
+            if ext == "srf" || ext == "srfa" {
+                let bytes = std::fs::read(&p).unwrap();
+                assert_eq!(srf::from_jpeg(&bytes, &srf::to_jpeg(&bytes).unwrap()).unwrap(), bytes, "{}", p.display());
+                n += 1;
+            }
+        }
+    }
+    assert!(n > 40);
+}
+
+#[test]
+fn warmonger_missions_and_texts_load_through_the_edition_overlay() {
+    use opensow_formats::{warmonger, Edition};
+    let Some(mut game) = GameDir::locate() else { return eprintln!("game not found, skipping") };
+    if game.warmonger.is_none() {
+        return eprintln!("Warmonger not found, skipping");
+    }
+    let base_m01 = read(&game, "Data\\Levels\\M01.map").unwrap();
+    game.edition = Edition::Warmonger;
+    assert_ne!(read(&game, "Data\\Levels\\M01.map").unwrap(), base_m01, "Warmonger's M01 is its own map");
+    // unlike the base game, Warmonger's M07 puts two player turrets (kind 26, cells 68/69,45) on blocked cells: allow only those
+    let mut blocked = 0;
+    for &n in &warmonger::LANDS {
+        let name = format!("M{n:02}");
+        let map = Map::parse(&read(&game, &format!("Data\\Levels\\{name}.map")).unwrap()).unwrap();
+        let level = Level::parse(&read(&game, &format!("Data\\Levels\\{name}.edt")).unwrap()).unwrap();
+        assert_eq!(level.level_id(), n as i32, "{name} header level id");
+        for o in &level.objects {
+            let c = map.cell(o.cell_x as u32, o.cell_y as u32).unwrap_or_else(|| panic!("{name}: object outside map"));
+            blocked += usize::from(c.blocked);
+        }
+        assert!(game.resolve(&format!("Data\\Levels\\{name}.sgv")).is_some(), "{name} briefing movie");
+    }
+    assert!(blocked <= 2, "{blocked} objects on blocked cells");
+    // the missing lands have no data
+    assert!(game.resolve("Data\\Levels\\M05.map").is_none());
+    let exe = std::fs::read(game.warmonger_exe().expect("exe")).unwrap();
+    let texts = warmonger::parse_texts(&exe).expect("eleven land texts in the exe");
+    assert!(texts[0].heading.starts_with("TERRITORY : 01") && texts[10].heading.starts_with("TERRITORY : 11"));
+    assert!(texts[2].briefing.contains("convoy") && texts[10].objective.contains("Rahman"));
+    assert!(game.level_files().iter().any(|f| f.to_ascii_lowercase().ends_with(".net")));
+}
+
+/// A `.net` map has no terrain files of its own: it is played on the mission `M<level id>` of the edition that owns it
+/// (`GameDir::net_terrain`, docs/skirmish.md). Every object of the script is inside that map and off its blocked cells.
+#[test]
+fn net_maps_are_played_on_the_terrain_of_their_level_id_mission() {
+    let Some(game) = GameDir::locate() else { return };
+    let mut checked = 0;
+    for file in game.level_files().into_iter().filter(|n| n.to_lowercase().ends_with(".net")) {
+        let name = file.rsplit_once('.').unwrap().0;
+        let level = Level::parse(&read(&game, &format!("Data\\Levels\\{file}")).unwrap()).unwrap();
+        let (terrain_game, mission) = game.net_terrain(name, level.level_id());
+        assert_eq!(mission, format!("M{:02}", level.level_id()));
+        let map = Map::parse(&read(&terrain_game, &format!("Data\\Levels\\{mission}.map")).unwrap_or_else(|| panic!("{name}: no {mission}.map"))).unwrap();
+        for o in &level.objects {
+            let c = map.cell(o.cell_x as u32, o.cell_y as u32).unwrap_or_else(|| panic!("{name}: object outside {mission}"));
+            assert!(!c.blocked, "{name}: {} at ({},{}) on a blocked cell of {mission}", o.object_kind().name(), o.cell_x, o.cell_y);
+        }
+        checked += 1;
+    }
+    assert!(checked >= 8);
 }

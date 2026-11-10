@@ -231,12 +231,12 @@ pub fn total_chars(l: &InfoLines) -> i32 {
 }
 
 /// Wraps the description to the box (`0x43e1ba`).
-pub fn wrap_description(font: &(opensow_formats::font::Font, opensow_formats::font::Font), text: &str) -> Vec<String> {
-    infobox::wrap(text, WRAP_WIDTH, |s| ui::text_width(font, s, 1.0))
+pub fn wrap_description(font: &(opensow_formats::font::Font, opensow_formats::font::Font), gdi: Option<&crate::gdi::Gdi>, text: &str) -> Vec<String> {
+    infobox::wrap(text, WRAP_WIDTH, |s| gdi.map_or_else(|| ui::text_width(font, s, 1.0), |g| g.width(s)))
 }
 
 /// Draws the box at the top right: frame, window (static, picture), text. `w` is the screen width, `s` the HUD scale.
-pub fn draw(b: &InfoBox, lines: Option<&InfoLines>, desc: &[String], assets: &mut Assets, buf: &mut [u32], w: usize, h: usize, s: f32) {
+pub fn draw(b: &InfoBox, lines: Option<&InfoLines>, desc: &[String], gdi: Option<&crate::gdi::Gdi>, assets: &mut Assets, buf: &mut [u32], w: usize, h: usize, s: f32) {
     if b.mode == 0 {
         return;
     }
@@ -271,7 +271,7 @@ pub fn draw(b: &InfoBox, lines: Option<&InfoLines>, desc: &[String], assets: &mu
     }
     let font = assets.font("small");
     let white = (255, 255, 255);
-    let put = |buf: &mut [u32], text: &str, dx: i32, dy: i32, typed_left: &mut i32, caret: &mut bool| {
+    let put = |buf: &mut [u32], text: &str, dx: i32, dy: i32, max_w: i32, typed_left: &mut i32, caret: &mut bool| {
         if *typed_left <= 0 {
             return;
         }
@@ -283,14 +283,32 @@ pub fn draw(b: &InfoBox, lines: Option<&InfoLines>, desc: &[String], assets: &mu
             *caret = true;
         }
         *typed_left -= n;
-        ui::text(buf, w, h, &font, &out, ax + u(dx), ay + u(dy), s, white, (0, 0, 0));
+        match gdi {
+            Some(g) => g.draw_fit(buf, w, h, text, &out, (ax + u(dx)) as f32, (ay + u(dy)) as f32 - 1.0 * s, s, white, max_w),
+            None => ui::text(buf, w, h, &font, &out, ax + u(dx), ay + u(dy), s, white, (0, 0, 0)),
+        }
     };
     match (b.mode, lines) {
         (4, Some(l)) => {
             let order = [&l.name, &l.kind_line, &l.offence, &l.scope, &l.defence, &l.speed, &l.shell];
             let (mut left, mut caret) = (b.typed, false);
+            let mut prev_w = 0;
             for (text, &(dx, dy)) in order.iter().zip(LINE_POS.iter()) {
-                put(buf, text, dx, dy, &mut left, &mut caret);
+                // the box is 52 px right of the anchor; the first of two columns must stay left of the second, which moves left
+                // when a translated first column is short
+                let first_of_two = dx < 0 && LINE_POS.iter().any(|&(x, y)| y == dy && x > dx);
+                let (dx, max_w) = match gdi {
+                    Some(g) if dx > 0 => {
+                        let x2 = dx.min(-54 + prev_w + 6);
+                        (x2, 48 - x2)
+                    }
+                    Some(g) if first_of_two => {
+                        prev_w = g.width(text).min(60);
+                        (dx, 60)
+                    }
+                    _ => (dx, if first_of_two { 60 } else { 48 - dx }),
+                };
+                put(buf, text, dx, dy, max_w, &mut left, &mut caret);
             }
         }
         (5, Some(_)) => {
@@ -298,7 +316,7 @@ pub fn draw(b: &InfoBox, lines: Option<&InfoLines>, desc: &[String], assets: &mu
             let before: i32 = desc.iter().take(b.first_line).map(|l| l.chars().count() as i32 + 1).sum();
             left -= before;
             for (i, text) in desc.iter().skip(b.first_line).take(5).enumerate() {
-                put(buf, text, -54, 13 + 9 * i as i32, &mut left, &mut caret);
+                put(buf, text, -54, 13 + 9 * i as i32, 106, &mut left, &mut caret);
                 left -= 1;
             }
         }
@@ -311,7 +329,10 @@ pub fn draw(b: &InfoBox, lines: Option<&InfoLines>, desc: &[String], assets: &mu
         if b.typed < n {
             out.push('|');
         }
-        ui::text(buf, w, h, &font, &out, ax - u(50), ay - u(50), s, white, (0, 0, 0));
+        match gdi {
+            Some(g) => g.draw_flat(buf, w, h, &out, (ax - u(50)) as f32, (ay - u(50)) as f32 - 1.0 * s, s, white),
+            None => ui::text(buf, w, h, &font, &out, ax - u(50), ay - u(50), s, white, (0, 0, 0)),
+        }
     }
 }
 

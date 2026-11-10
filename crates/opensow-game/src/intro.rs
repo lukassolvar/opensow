@@ -110,6 +110,15 @@ impl Anim {
 
     /// Draw the frame scaled into the rectangle (x, y, w, h) of the buffer (nearest neighbour).
     pub fn draw(&self, buf: &mut [u32], bw: usize, bh: usize, (x, y, w, h): (usize, usize, usize, usize)) {
+        if opensow_viewer::record::active() {
+            let (x0, y0) = (x as i32, y as i32);
+            let (fw, fh) = (self.width, self.height);
+            let col = |dx: i32| ((dx - x0) as usize * fw / w).min(fw - 1) as i32;
+            let row = |dy: i32| ((dy - y0) as usize * fh / h).min(fh - 1) as i32;
+            let (x1, y1) = (x0 + w.min(bw.saturating_sub(x)) as i32, y0 + h.min(bh.saturating_sub(y)) as i32);
+            opensow_viewer::record::picture_words(&self.rgb, fw, x0, y0, x1, y1, col, row);
+            return;
+        }
         for dy in 0..h.min(bh.saturating_sub(y)) {
             let sy = (dy * self.height / h).min(self.height - 1);
             for dx in 0..w.min(bw.saturating_sub(x)) {
@@ -119,9 +128,44 @@ impl Anim {
     }
 }
 
+/// Open the system's default output. rodio asks for a ~2048-frame buffer, which some devices (Bluetooth headphones such as
+/// AirPods accept only 15..=960) reject, leaving the game silent; so smaller buffers are tried until the device accepts one.
+/// `on_error` runs when the stream later fails (device unplugged or switched).
+pub fn open_output(on_error: impl Fn() + Clone + Send + 'static) -> Result<rodio::MixerDeviceSink, rodio::DeviceSinkError> {
+    use rodio::cpal::BufferSize;
+    let mut last = None;
+    let mut sizes = vec![BufferSize::Fixed(2048), BufferSize::Fixed(960), BufferSize::Fixed(512), BufferSize::Fixed(256), BufferSize::Default];
+    // OPENSOW_AUDIO_BUFFER=N tries N frames first (to compare devices / buffer sizes by ear); OPENSOW_AUDIO_BUFFER=0 the device default
+    if let Some(n) = std::env::var("OPENSOW_AUDIO_BUFFER").ok().and_then(|v| v.parse::<u32>().ok()) {
+        sizes.insert(0, if n == 0 { BufferSize::Default } else { BufferSize::Fixed(n) });
+    }
+    for size in sizes {
+        let cb = on_error.clone();
+        let r = rodio::DeviceSinkBuilder::from_default_device().and_then(|b| {
+            b.with_buffer_size(size)
+                .with_error_callback(move |e| {
+                    eprintln!("audio stream error: {e}");
+                    cb();
+                })
+                .open_stream()
+        });
+        match r {
+            Ok(mut d) => {
+                d.log_on_drop(false);
+                return Ok(d);
+            }
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.expect("at least one attempt"))
+}
+
 pub struct Sound {
     _device: rodio::MixerDeviceSink,
     pub player: rodio::Player,
+    /// Set when the output stream reported an error (the device was unplugged or switched, the system slept...): rodio's player then
+    /// goes on "playing" into a dead stream, so the owner has to open a new one (`Music::tick`).
+    pub failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub struct Intro {
@@ -146,7 +190,9 @@ impl Intro {
         let dir = LANGUAGES.get(language).ok_or("unknown language")?;
         let default = format!("data\\levels\\{name}.sgv");
         // only the intro and outro have language copies; everything else falls back to the main folder
-        let file = (!dir.is_empty())
+        // the language copies of the ending are the base game's; Warmonger has its own (docs/warmonger.md)
+        let own_ending = game.edition == opensow_formats::Edition::Warmonger && name.eq_ignore_ascii_case("mO");
+        let file = (!dir.is_empty() && !own_ending)
             .then(|| game.resolve(&format!("data\\diffdata\\{dir}\\levels\\{name}.sgv")))
             .flatten()
             .or_else(|| game.resolve(&default))
@@ -212,11 +258,21 @@ impl Intro {
 
     /// Fill the buffer: the frame scaled to fit with black bars.
     pub fn draw(&self, buf: &mut [u32], w: usize, h: usize) {
-        buf.fill(0);
+        crate::ui::clear(buf, w, h, 0);
         let Some(f) = &self.frame else { return };
         let scale = (w as f64 / f.width as f64).min(h as f64 / f.height as f64);
         let (dw, dh) = (((f.width as f64 * scale) as usize).clamp(1, w), ((f.height as f64 * scale) as usize).clamp(1, h));
         let (x0, y0) = ((w - dw) / 2, (h - dh) / 2);
+        if opensow_viewer::record::active() {
+            // the decoded picture's colours, once per drawn frame (a movie frame is small next to the screen)
+            let (fw, fh) = (f.width, f.height);
+            let words: Vec<u32> = (0..fh).flat_map(|y| (0..fw).map(move |x| (x, y))).map(|(x, y)| f.rgb_at(x, y)).collect();
+            let (ax, ay) = (x0 as i32, y0 as i32);
+            let col = |x: i32| ((x - ax) as usize * fw / dw).min(fw - 1) as i32;
+            let row = |y: i32| ((y - ay) as usize * fh / dh).min(fh - 1) as i32;
+            opensow_viewer::record::picture_words(&words, fw, ax, ay, ax + dw as i32, ay + dh as i32, col, row);
+            return;
+        }
         for y in 0..dh {
             let sy = (y * f.height / dh).min(f.height - 1);
             let row = &mut buf[(y0 + y) * w + x0..(y0 + y) * w + x0 + dw];
@@ -234,9 +290,18 @@ impl Sound {
 
     /// Open the default audio device and play interleaved samples.
     pub fn start_pcm(channels: u16, rate: u32, samples: Vec<f32>, looping: bool) -> Option<Sound> {
-        let mut device = rodio::DeviceSinkBuilder::open_default_sink().ok()?;
+        let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = failed.clone();
+        let mut device = open_output(move || flag.store(true, std::sync::atomic::Ordering::Relaxed)).ok()?;
         device.log_on_drop(false);
         let player = rodio::Player::connect_new(device.mixer());
+        let out = device.config().sample_rate();
+        if crate::hifi::enabled() && out.get() != rate {
+            // windowed-sinc conversion to the device rate (docs/audio.md, "Sound enhancement"); a loop gets no fades, it wraps seamlessly
+            let data = crate::hifi::prepare(samples, channels, rate, !looping);
+            player.append(crate::hifi::Resampled::new(data, channels, rate, 1.0, out, looping));
+            return Some(Sound { _device: device, player, failed });
+        }
         let buffer = rodio::buffer::SamplesBuffer::new(NonZero::new(channels)?, NonZero::new(rate)?, samples);
         if looping {
             use rodio::Source;
@@ -244,7 +309,7 @@ impl Sound {
         } else {
             player.append(buffer);
         }
-        Some(Sound { _device: device, player })
+        Some(Sound { _device: device, player, failed })
     }
 }
 

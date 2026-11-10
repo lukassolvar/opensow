@@ -13,3 +13,4 @@ path = "src/main.rs"
 [dependencies]
 opensow-formats.workspace = true
 png = "0.17"
+jpeg-encoder = "0.6"

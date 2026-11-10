@@ -44,6 +44,38 @@ pub fn unit_art(kind: i32) -> Option<UnitArt> {
     Some(UnitArt { chassis: CHASSIS[chassis], top: top.map(|t| TOPS[t]) })
 }
 
+/// The first frame's header words of every unit sprite sheet, as the exe reads them to size a new unit (`0x479eb0` for the top, `0x46ff50`
+/// for the chassis): `(extra[0], extra[1])` of `units\\{name}_blue.ps6` frame 0 (`sprite::Frame::extra`, the 16-bit words at `+8` / `+0xa`
+/// of the frame), `None` for a sheet that is not there. They come from the install, so they are not part of any table in the code.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SheetSizes {
+    pub chassis: [Option<(u16, u16)>; 6],
+    pub tops: [Option<(u16, u16)>; 25],
+}
+
+fn sext16(v: u16) -> u32 {
+    v as i16 as i32 as u32
+}
+
+impl SheetSizes {
+    /// Top `+0x64` / `+0x68` (sprite width and height): the words plus 1 as a signed 16-bit value, 0 without a sheet. Verified against the
+    /// exe's initialiser by `scripts/gen_unit_defaults.py` (two marker values, including the sign wrap at `0xffff`).
+    pub fn top(&self, sheet: usize) -> (u32, u32) {
+        match self.tops.get(sheet).copied().flatten() {
+            Some((w, h)) => (sext16(w.wrapping_add(1)), sext16(h.wrapping_add(1))),
+            None => (0, 0),
+        }
+    }
+
+    /// Chassis `+0x20` / `+0x24`: the same plus one more, 1 without a sheet.
+    pub fn chassis(&self, sheet: usize) -> (u32, u32) {
+        match self.chassis.get(sheet).copied().flatten() {
+            Some((w, h)) => (sext16(w.wrapping_add(1)).wrapping_add(1), sext16(h.wrapping_add(1)).wrapping_add(1)),
+            None => (1, 1),
+        }
+    }
+}
+
 impl UnitKind {
     /// Human name using the decoded class names, e.g. "Artillery tier 2" or "Walker 3".
     pub fn describe(id: i32) -> String {
@@ -59,6 +91,17 @@ impl UnitKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sheet_sizes_follow_the_exes_arithmetic() {
+        let mut s = SheetSizes::default();
+        assert_eq!((s.top(3), s.chassis(2)), ((0, 0), (1, 1)), "no sheet");
+        s.tops[3] = Some((0x1000, 0x1111));
+        s.chassis[2] = Some((0xffff, 0x7fff));
+        assert_eq!(s.top(3), (0x1001, 0x1112));
+        // 0xffff + 1 wraps to 0; 0x7fff + 1 = 0x8000 is -32768 as a signed 16-bit value, plus the chassis' extra 1
+        assert_eq!(s.chassis(2), (1, (-32767i32) as u32));
+    }
 
     #[test]
     fn art_mapping() {

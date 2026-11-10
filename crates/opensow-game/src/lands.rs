@@ -10,6 +10,7 @@ use crate::gdi::Gdi;
 use crate::intro::Anim;
 use crate::ui::{self, Image};
 use opensow_formats::config::PassedLevels;
+use opensow_formats::{warmonger, Edition};
 use opensow_formats::font::Font;
 use opensow_formats::lang::{self, LangFile};
 use opensow_formats::sprite::{self, rgb565_to_rgb8, Frame, Kind};
@@ -32,6 +33,10 @@ const ZOOM_ROWS: f32 = 560.0;
 const WRAP: i32 = 400;
 /// Ticks of the 60 Hz clock per second.
 const TICKS: f64 = 60.0;
+/// The campaign labels (docs/warmonger.md) at the top of the map, in window pixels.
+const TOGGLE: [&str; 2] = ["STATE OF WAR", "WARMONGER"];
+const TOGGLE_Y: i32 = 30;
+const TOGGLE_H: i32 = 22;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
@@ -40,6 +45,8 @@ pub enum Event {
     Back,
     /// ACCEPT in a land's briefing: play mission `1..=22`.
     Accept(usize),
+    /// The edition toggle was clicked: show this campaign's map.
+    Edition(Edition),
 }
 
 enum Stage {
@@ -49,6 +56,8 @@ enum Stage {
     Map,
     /// A land is selected and its text types (state 4); seconds since the click.
     Selected { land: usize, t: f64 },
+    /// Warmonger was asked for but its install was not found: an error box until a click or Esc.
+    Missing,
 }
 
 pub struct Lands {
@@ -67,6 +76,13 @@ pub struct Lands {
     small: Font,
     gdi: Option<Gdi>,
     pub progress: PassedLevels,
+    /// The campaign shown, and (Warmonger) the land texts of its exe, in the order of [`warmonger::LANDS`].
+    edition: Edition,
+    wm_texts: Vec<warmonger::LandText>,
+    /// The Warmonger install is known, so the toggle can switch without asking.
+    wm_known: bool,
+    /// Mouse position in window pixels (natural size).
+    mouse: (i32, i32),
     hover: Option<usize>,
     /// Ticks since the hovered land changed (`[+0x338]` of the exe object).
     hover_ticks: f64,
@@ -180,8 +196,8 @@ fn timeline(g: &Geometry, c: i64) -> Timeline {
 impl Lands {
     /// `video`: play the `mA` animation first (New game); `mute` opens no audio device.
     pub fn new(assets: &mut Assets, progress: PassedLevels, video: bool, mute: bool) -> Lands {
-        let language = assets.game.resolve("Data\\lang.dat").and_then(|p| std::fs::read(p).ok()).and_then(|d| lang::read_lang_dat(&d)).unwrap_or(lang::Language::English);
-        let strings = assets.game.resolve(&format!("Data\\Language\\{}", language.file_name())).and_then(|p| std::fs::read(p).ok()).and_then(|d| LangFile::parse(&d).ok());
+        let language = assets.game.language();
+        let strings = assets.game.resolve(&format!("Data\\Language\\{}", language.file_name())).and_then(|p| std::fs::read(p).ok()).and_then(|d| LangFile::parse(&d).ok()).map(|f| f.with_supplement(language));
         let mut font = |n: &str| Font::new(assets.art.load(&format!("extras\\fonts\\{n}.ps6")).map(|f| (*f).clone()).unwrap_or_default());
         let (big, small) = (font("font_briefing_big"), font("font_briefing_small"));
         let stage = match video.then(|| Anim::open(&assets.game, "mA")).and_then(Result::ok) {
@@ -194,7 +210,16 @@ impl Lands {
             }
             None => Stage::Map,
         };
+        let edition = assets.game.edition;
+        let wm_texts = (edition == Edition::Warmonger)
+            .then(|| assets.game.warmonger_exe().and_then(|p| std::fs::read(p).ok()).and_then(|d| warmonger::parse_texts(&d)))
+            .flatten()
+            .unwrap_or_default();
         Lands {
+            edition,
+            wm_texts,
+            wm_known: assets.game.warmonger.is_some(),
+            mouse: (-1, -1),
             stage,
             art: load_backdrop(&assets.game, "Briefing2"),
             bg: load_backdrop(&assets.game, "Briefing"),
@@ -272,6 +297,7 @@ impl Lands {
                 *t += dt;
             }
             Stage::Map => self.hover_ticks += ticks,
+            Stage::Missing => {}
         }
         match self.stage {
             Stage::Selected { land, t } => {
@@ -296,7 +322,7 @@ impl Lands {
                     typing = typing_a || typing_b; // briefing-type02 under the headings
                 }
             }
-            Stage::Video(_) => {}
+            Stage::Video(_) | Stage::Missing => {}
         }
         if typing {
             // `[+0x380]` = min(it, 4) + frame ticks; every 4 ticks one sound
@@ -354,6 +380,7 @@ impl Lands {
         let (x, y) = ((x as f32 / s) as i32, (y as f32 / s) as i32);
         let (w, h) = (vw, vh);
         self.size = (w, h);
+        self.mouse = (x, y);
         let (ox, oy) = Self::origin(w, h);
         self.cursor = (x - ox, y - oy);
         let hover = if matches!(self.stage, Stage::Map) { self.land_at(self.cursor) } else { None };
@@ -379,9 +406,16 @@ impl Lands {
                 self.skip_video();
                 Event::None
             }
+            Stage::Missing => {
+                self.stage = Stage::Map;
+                Event::None
+            }
             Stage::Map => {
                 if self.over_button(true) {
                     return Event::Back;
+                }
+                if let Some(e) = self.toggle_at(self.mouse) {
+                    return self.pick_edition(e);
                 }
                 if let Some(l) = self.hover.filter(|&l| self.progress.states[l] != 0) {
                     self.stage = Stage::Selected { land: l, t: 0.0 };
@@ -420,6 +454,10 @@ impl Lands {
                 Event::None
             }
             Stage::Map => Event::Back,
+            Stage::Missing => {
+                self.stage = Stage::Map;
+                Event::None
+            }
             Stage::Selected { .. } => {
                 self.stage = Stage::Map;
                 self.hover_ticks = 0.0;
@@ -432,11 +470,18 @@ impl Lands {
         self.strings.as_ref().and_then(|s| s.get(index)).unwrap_or("")
     }
 
+    /// Warmonger's own text of a land (compiled into its exe, not in a language file).
+    fn wm_text(&self, land: usize) -> Option<&warmonger::LandText> {
+        (self.edition == Edition::Warmonger).then(|| warmonger::case_of(land).and_then(|c| self.wm_texts.get(c))).flatten()
+    }
+
     /// The two heading lines of a land: `TERRITORY : nn DIFFICULTY : n from 10` and `Coordinate: ... Battle ground: ...`
     /// (strings 30+L and 53+L; the exe's string numbers are one higher); a locked land only says "No data available" (53).
     pub fn headings(&self, land: usize) -> (String, String) {
         if self.progress.states[land] == 0 {
             (self.string(53).to_owned(), String::new())
+        } else if let Some(t) = self.wm_text(land) {
+            (t.heading.clone(), t.coordinate.clone())
         } else {
             (self.string(30 + land).to_owned(), self.string(53 + land).to_owned())
         }
@@ -444,6 +489,9 @@ impl Lands {
 
     /// The briefing and the objectives of a land (strings 75+L and 97+L).
     pub fn briefing(&self, land: usize) -> (String, String) {
+        if let Some(t) = self.wm_text(land) {
+            return (t.briefing.replace("\r\n", " "), t.objective.replace("\r\n", " "));
+        }
         (self.string(75 + land).replace("\r\n", " "), self.string(97 + land).replace("\r\n", " "))
     }
 
@@ -490,7 +538,7 @@ impl Lands {
     /// Draw the screen into the window buffer: the art backdrop, the 640x480 map picture at 1:1 in the centre, text relative to the
     /// window's centre or its top edge exactly like the exe.
     pub fn draw(&mut self, buf: &mut [u32], w: usize, h: usize) {
-        buf.fill(0);
+        crate::ui::clear(buf, w, h, 0);
         if let Stage::Video(a) = &self.stage {
             let (x, y, dw, dh) = fit(w, h);
             a.draw(buf, w, h, (x, y, dw, dh));
@@ -499,15 +547,26 @@ impl Lands {
         let (s, vw, vh) = Self::natural(w, h);
         self.scaled = s > 1.0;
         self.texts.borrow_mut().clear();
-        if !self.scaled {
+        let recording = opensow_viewer::record::active();
+        if !self.scaled && !recording {
             self.draw_native(buf, w, h);
             self.draw_texts(buf, w, h, 1.0);
             return;
         }
+        // a recorded frame draws the map picture on the CPU (at its natural size) and hands it over as one picture
+        let (s, vw, vh) = if self.scaled { (s, vw, vh) } else { (1.0, w, h) };
         let mut virt = std::mem::take(&mut self.virt);
         virt.clear();
         virt.resize(vw * vh, 0);
-        self.draw_native(&mut virt, vw, vh);
+        opensow_viewer::record::cpu(|| self.draw_native(&mut virt, vw, vh));
+        if recording {
+            let col = |x: i32| ((x as f32 / s) as usize).min(vw - 1) as i32;
+            let row = |y: i32| ((y as f32 / s) as usize).min(vh - 1) as i32;
+            opensow_viewer::record::picture_words(&virt, vw, 0, 0, w as i32, h as i32, col, row);
+            self.virt = virt;
+            self.draw_texts(buf, w, h, s);
+            return;
+        }
         for y in 0..h {
             let sy = ((y as f32 / s) as usize).min(vh - 1);
             for x in 0..w {
@@ -568,6 +627,11 @@ impl Lands {
                     self.typed_headings(buf, (w, h), &a, &b);
                 }
                 self.draw_button(buf, (w, h), true, self.over_button(true));
+                self.draw_toggle(buf, (w, h));
+            }
+            Stage::Missing => {
+                self.draw_toggle(buf, (w, h));
+                self.draw_missing(buf, (w, h));
             }
             Stage::Selected { land, t } => {
                 let (a, b) = self.headings(land);
@@ -614,6 +678,98 @@ impl Lands {
                 }
             }
         }
+    }
+
+    /// The two campaign labels at the top of the map: window rectangles (x, y, w, h), original first.
+    fn toggle_rects(&self) -> [(i32, i32, i32, i32); 2] {
+        const GAP: i32 = 44;
+        let w = self.size.0 as i32;
+        let widths = TOGGLE.map(|s| self.big.measure(s, 1));
+        let x0 = (w - widths[0] - widths[1] - GAP) / 2;
+        [(x0, TOGGLE_Y, widths[0], TOGGLE_H), (x0 + widths[0] + GAP, TOGGLE_Y, widths[1], TOGGLE_H)]
+    }
+
+    fn toggle_at(&self, (x, y): (i32, i32)) -> Option<Edition> {
+        let hit = |r: (i32, i32, i32, i32)| x >= r.0 - 8 && x < r.0 + r.2 + 8 && y >= r.1 - 6 && y < r.1 + r.3 + 6;
+        let [a, b] = self.toggle_rects();
+        if hit(a) {
+            Some(Edition::Original)
+        } else if hit(b) {
+            Some(Edition::Warmonger)
+        } else {
+            None
+        }
+    }
+
+    /// A click on a label: the other campaign, or (Warmonger unknown) the question for its folder.
+    fn pick_edition(&mut self, e: Edition) -> Event {
+        if e == self.edition {
+            return Event::None;
+        }
+        if e == Edition::Warmonger && !self.wm_known {
+            self.stage = Stage::Missing;
+            return Event::None;
+        }
+        self.sounds.push(29);
+        Event::Edition(e)
+    }
+
+    fn draw_toggle(&self, buf: &mut [u32], (w, h): (usize, usize)) {
+        let over = self.toggle_at(self.mouse);
+        for (i, (label, r)) in TOGGLE.iter().zip(self.toggle_rects()).enumerate() {
+            let e = if i == 0 { Edition::Original } else { Edition::Warmonger };
+            let active = e == self.edition;
+            // the label of the other campaign is drawn dimmed: only the glyph pixels lose brightness, not the backdrop around them
+            let (x0, x1) = ((r.0 - 4).max(0) as usize, ((r.0 + r.2 + 8).max(0) as usize).min(w));
+            let (y0, y1) = ((r.1 - 4).max(0) as usize, ((r.1 + r.3 + 8).max(0) as usize).min(h));
+            let before: Option<Vec<u32>> = (!active).then(|| (y0..y1).flat_map(|y| buf[y * w + x0..y * w + x1].to_vec()).collect());
+            draw_text(buf, w, h, &self.big, label, r.0, r.1);
+            if let Some(before) = before {
+                let amount = if over == Some(e) { 70 } else { 150 };
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        let i = y * w + x;
+                        if buf[i] != before[(y - y0) * (x1 - x0) + (x - x0)] {
+                            let c = |sh: u32| (((buf[i] >> sh) & 0xff).saturating_sub(amount)) << sh;
+                            buf[i] = (buf[i] & 0xff00_0000) | c(16) | c(8) | c(0);
+                        }
+                    }
+                }
+            } else {
+                // a green bar under the shown campaign
+                for x in r.0.max(0)..(r.0 + r.2).min(w as i32) {
+                    for y in (r.1 + r.3 + 3)..(r.1 + r.3 + 5) {
+                        if y >= 0 && (y as usize) < h {
+                            buf[y as usize * w + x as usize] = pack(0x46, 0xc3, 0x46);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The error box shown when Warmonger is asked for and its install is not known.
+    fn draw_missing(&self, buf: &mut [u32], (w, h): (usize, usize)) {
+        let (cx, cy) = (w as i32 / 2, h as i32 / 2);
+        let (bw, bh) = (440, 110);
+        let r = ui::Rect { x: cx - bw / 2, y: cy - bh / 2, w: bw, h: bh };
+        ui::dim_sub(buf, w, h, r, 200);
+        for (v, x) in [(true, r.x), (true, r.x + r.w), (false, r.y), (false, r.y + r.h)] {
+            glow_line(buf, w, h, v, x, [0x200, 0x3e0]);
+        }
+        let lines = ["WARMONGER WAS NOT FOUND", "Install State of War Warmonger next to the", "game folder. Click or press Esc to close."];
+        for (i, l) in lines.iter().enumerate() {
+            draw_text(buf, w, h, &self.small, l, r.x + 20, r.y + 18 + 24 * i as i32);
+        }
+    }
+
+    /// Show the error box (headless screenshots use it).
+    pub fn show_missing(&mut self) {
+        self.stage = Stage::Missing;
+    }
+
+    pub fn missing(&self) -> bool {
+        matches!(self.stage, Stage::Missing)
     }
 
     fn draw_button(&self, buf: &mut [u32], (w, h): (usize, usize), back: bool, hover: bool) {
@@ -751,10 +907,49 @@ mod tests {
     }
 
     fn lands(video: bool) -> Option<(Assets, Lands)> {
-        let game = GameDir::locate()?;
+        // English texts whatever the launcher's language is
+        let mut game = GameDir::locate()?;
+        game.set_language(opensow_formats::lang::Language::English);
         let mut assets = Assets::load(game).ok()?;
         let l = Lands::new(&mut assets, PassedLevels::initial(), video, true);
         Some((assets, l))
+    }
+
+    #[test]
+    fn warmonger_lands_show_the_texts_from_its_exe() {
+        let Some(mut game) = GameDir::locate() else { return };
+        if game.warmonger.is_none() {
+            return;
+        }
+        game.edition = Edition::Warmonger;
+        game.set_language(opensow_formats::lang::Language::English);
+        let mut assets = Assets::load(game).unwrap();
+        let l = Lands::new(&mut assets, PassedLevels::initial_warmonger(), false, true);
+        assert!(l.headings(1).0.starts_with("TERRITORY : 01") && l.headings(1).1.starts_with("Coordinate: X8A3"));
+        assert!(l.briefing(1).0.starts_with("The Crystal Brotherhood") && l.briefing(1).1.starts_with("Objective: Collect 1000"));
+        assert_eq!(l.headings(5).0, "No data available", "a land without a Warmonger mission stays locked");
+        assert!(l.briefing(3).0.contains("convoy"));
+    }
+
+    #[test]
+    fn the_campaign_toggle_switches_and_reports_an_unknown_warmonger_install() {
+        let Some((_, mut l)) = lands(false) else { return };
+        l.size = (1280, 800);
+        let [a, b] = l.toggle_rects();
+        assert_eq!(l.toggle_at((a.0 + 2, a.1 + 2)), Some(Edition::Original));
+        assert_eq!(l.toggle_at((b.0 + 2, b.1 + 2)), Some(Edition::Warmonger));
+        assert_eq!(l.toggle_at((5, 700)), None);
+        assert_eq!(l.pick_edition(Edition::Original), Event::None, "already shown");
+        l.wm_known = true;
+        assert_eq!(l.pick_edition(Edition::Warmonger), Event::Edition(Edition::Warmonger));
+        l.wm_known = false;
+        assert_eq!(l.pick_edition(Edition::Warmonger), Event::None);
+        assert!(l.missing(), "an unknown install shows the error box");
+        assert_eq!(l.click(5, 5, 1280, 800), Event::None);
+        assert!(!l.missing(), "a click closes it");
+        l.show_missing();
+        assert_eq!(l.back(), Event::None);
+        assert!(!l.missing(), "Esc closes it");
     }
 
     #[test]

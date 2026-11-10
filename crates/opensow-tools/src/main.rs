@@ -1,6 +1,7 @@
 //! `opensow` - inspect and extract assets from a State of War installation.
 
 use opensow_formats::{aim, font, lang, level, projectile, recoil, map, megafile::MegaFile, sprite, srf, GameDir};
+mod art;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -27,6 +28,8 @@ opensow <command> [args]
   hover                              the Advancer's hover bob table (0x89cf58)
   scanlines banner|banner555|pause W H HEXPIXELS..   the pause / mission-end frame effects (0x45d3a0 / 0x45d400)
   beamtick STATE COUNTER RELOAD      one tick of the Advancer beam cooldown (0x47c6b0): prints new state and counter
+  export <out_dir>                   every colour sprite frame (PNG, flat dir) + background (JPG) + manifest.csv, for upscaling
+  import <art_dir> <out_dir> [--quality Q] [--alpha A]   encode edited PNG/JPG back (drop-in Data overlay; see docs/art-import.md)
   frames <sprite file>               list every frame's size and hotspot
   level <file.edt|.net>              print header values, objects and markers of a level script
   map <Mxx.map> <out.png>            render blocked/border/flag cells as a 1px-per-cell image
@@ -59,6 +62,20 @@ fn run(args: &[String]) -> Res<()> {
     match a.as_slice() {
         ["where"] => println!("{}", game()?.root.display()),
         ["check"] => check(&game()?)?,
+        ["export", out] => art::export(&game()?, Path::new(out))?,
+        ["import", src, out, opts @ ..] => {
+            let (mut quality, mut alpha) = (95u8, 128u8);
+            let mut it = opts.iter();
+            while let Some(o) = it.next() {
+                let v = it.next().ok_or("missing option value")?;
+                match *o {
+                    "--quality" => quality = v.parse()?,
+                    "--alpha" => alpha = v.parse()?,
+                    _ => return Err(format!("unknown option {o}").into()),
+                }
+            }
+            art::import(&game()?, Path::new(src), Path::new(out), quality, alpha)?
+        }
         ["unpack", out] => unpack(&game()?, Path::new(out))?,
         ["srf", src, dst] => std::fs::write(dst, srf::to_jpeg(&std::fs::read(src)?)?)?,
         ["sprite", src, dst] => sprite_sheet(Path::new(src), Path::new(dst), None)?,

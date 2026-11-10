@@ -16,6 +16,8 @@ pub struct Assets {
     infobox_pictures: HashMap<String, Option<Rc<Vec<Frame>>>>,
     /// `001_buttons.tsp`: frames 0..6 highlighted, 6..12 normal (NEW GAME, LOAD GAME, TUTORIAL, MULTIPLAYER, OPTIONS, EXIT GAME).
     pub buttons: Vec<Frame>,
+    /// The six main-menu strings (lang file 0..=5) when the language is not English, whose labels the sprites do not carry; read once.
+    menu_labels: Option<Option<Vec<String>>>,
 }
 
 impl Assets {
@@ -27,7 +29,23 @@ impl Assets {
             .and_then(|p| std::fs::read(p).ok())
             .and_then(|d| sprite::parse(&d, Kind::Color).ok())
             .unwrap_or_default();
-        Ok(Assets { game, art, fonts: HashMap::new(), backdrop, infobox_pictures: HashMap::new(), buttons })
+        Ok(Assets { game, art, fonts: HashMap::new(), backdrop, infobox_pictures: HashMap::new(), buttons, menu_labels: None })
+    }
+
+    /// Main-menu labels in the chosen language (English too: every language draws the same GDI text, not the English art), `None` when
+    /// the file is missing.
+    pub fn main_labels(&mut self) -> Option<&[String]> {
+        if self.menu_labels.is_none() {
+            let l = self.game.language();
+            let labels = self
+                .game
+                .resolve(&format!("Data\\Language\\{}", l.file_name()))
+                .and_then(|p| std::fs::read(p).ok())
+                .and_then(|d| opensow_formats::lang::LangFile::parse(&d).ok())
+                .and_then(|f| (0..6).map(|i| f.get(i).map(|t| t.trim().to_string())).collect::<Option<Vec<_>>>());
+            self.menu_labels = Some(labels);
+        }
+        self.menu_labels.as_ref().and_then(|l| l.as_deref())
     }
 
     /// An info box picture (`Data\\Sprites2\\InfoBox\\<path>.tsp`, case-insensitive), cached.

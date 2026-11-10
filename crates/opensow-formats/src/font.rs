@@ -120,7 +120,7 @@ mod tests {
     use super::*;
 
     fn glyph(w: u16, h: u16, hot_y: i16) -> Frame {
-        Frame { width: w, height: h, hot_x: -1, hot_y, extra: [0; 4], pixels: vec![0; (w * h) as usize], mask: vec![true; (w * h) as usize] }
+        Frame { width: w, height: h, hot_x: -1, hot_y, extra: [0; 4], pixels: vec![0; (w * h) as usize], mask: vec![true; (w * h) as usize], enhanced: Default::default() }
     }
 
     fn font() -> Font {

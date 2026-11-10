@@ -1,0 +1,52 @@
+# OpenSOW skirmish map tweaks (docs/map-editor.md): edits of the shipped .net maps, applied when a skirmish loads one.
+# Edit with `cargo run --release -p opensow-viewer -- --edit "<map>"` or by hand. Cells are the ones in the shipped file.
+#   move <kind> X,Y -> X,Y | owner <kind> X,Y neutral|blue|green | remove <kind> X,Y | add <kind> X,Y neutral|blue|green [lines]
+#   stock <bomber|carryall|fighter|tripler|asteroid> N (the air force both sides start with)
+#   slots <kind> X,Y active N <line>... (lines: cannon1+1 = cannon line at tier 1, may rise 1 tier; gold1..3 research1..3
+#   energy1..3; bomber carryall fighter tripler asteroid; walker1..5 pod)
+#   kinds: hq light medium heavy air mine lab wind walker turret1..5; units: unit antiair1..3 artillery1..3 cannon1..3
+#   flamer1..3 special1..3 advancer walker1..5 pod (units are blue or green); X,Y#2 = the second of that kind on that cell
+
+[06-Meteor Swarm]
+move mine 27,62 -> 75,47
+
+[08-Island of Fate]
+stock fighter 0
+remove heavy 44,35
+remove medium 6,4
+remove mine 79,73
+remove lab 85,73
+remove mine 91,75
+remove medium 36,72
+remove medium 33,3
+remove medium 16,18
+remove wind 41,51
+remove lab 47,3
+move turret5 24,63 -> 24,67
+move turret5 26,63 -> 25,63
+move turret5 8,52 -> 11,48
+move turret5 79,14 -> 80,13
+move turret5 83,17 -> 84,15
+move walker 69,45 -> 70,48
+move mine 61,18 -> 53,14
+slots mine 61,18 active 1 gold1 gold2 gold3
+move wind 54,27 -> 49,35
+slots wind 54,27 active 1 energy1 energy2
+add lab 43,21 neutral
+add walker 9,3 neutral active 1 pod
+add mine 17,56 blue
+add mine 71,14 green
+add turret2 3,54 blue
+add turret2 1,52 blue
+add turret2 5,61 blue
+add turret2 3,62 blue
+add turret2 92,22 green
+add turret2 80,4 green
+add turret2 81,2 green
+add turret2 93,23 green
+add turret4 70,16 green
+add turret4 20,54 blue
+add mine 80,74 neutral
+add mine 91,73 neutral
+add heavy 38,72 neutral active 1 antiair1+2 special1+2
+add heavy 47,1 neutral active 1 antiair1+2 special1+2

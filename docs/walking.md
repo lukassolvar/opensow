@@ -15,7 +15,7 @@ Units whose type byte `[type+0x4b]` is nonzero - only the **Advancer**, kind 40 
 
 ## `0x46ee80` pixel line
 
-Integer Bresenham, start included: `d = 2*minor - major`; each step moves one pixel along the long axis, and along the short axis too when `d >= 0` (then `d += 2*(minor - major)`, else `d += 2*minor`); equal axes count as y-major. `walk::pixel_line`.
+The line lives in the chassis' local route (`CArray` `[chassis+0x98]`, savegame stream; docs/savegame.md): `0x46f550` pops one point per pixel step, and `Unit.line` holds the same list (`Line { goal, rest }`, next point last). Integer Bresenham, start included: `d = 2*minor - major`; each step moves one pixel along the long axis, and along the short axis too when `d >= 0` (then `d += 2*(minor - major)`, else `d += 2*minor`); equal axes count as y-major. `walk::pixel_line`.
 
 ## `0x476870` local avoidance (mode 0)
 
