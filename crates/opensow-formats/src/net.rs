@@ -11,19 +11,24 @@ use crate::{Error, Result};
 #[derive(Debug, Clone)]
 pub struct Bits<'a> {
     data: &'a [u8],
+    /// The next bit to read.
     pub pos: usize,
+    /// Number of valid bits.
     pub len: usize,
 }
 
 impl<'a> Bits<'a> {
+    /// A reader over the first `len` bits of `data`.
     pub fn new(data: &'a [u8], len: usize) -> Bits<'a> {
         Bits { data, pos: 0, len: len.min(data.len() * 8) }
     }
 
+    /// How many bits are left.
     pub fn remaining(&self) -> usize {
         self.len - self.pos
     }
 
+    /// Reads one bit.
     pub fn bit(&mut self) -> Result<bool> {
         if self.pos >= self.len {
             return Err(Error::Truncated { what: "net bit", offset: self.pos });
@@ -55,11 +60,14 @@ impl<'a> Bits<'a> {
 /// Writes bits into a growing byte vector.
 #[derive(Debug, Clone, Default)]
 pub struct BitWriter {
+    /// The bytes written so far; the last one may be partly filled.
     pub data: Vec<u8>,
+    /// Number of bits written.
     pub len: usize,
 }
 
 impl BitWriter {
+    /// Appends one bit.
     pub fn bit(&mut self, b: bool) {
         if self.len >> 3 >= self.data.len() {
             self.data.push(0);
@@ -77,6 +85,7 @@ impl BitWriter {
         }
     }
 
+    /// Appends the lowest `n` bits of `value`, most significant first (the input package records).
     pub fn msb(&mut self, value: u32, n: u32) {
         for i in (0..n).rev() {
             self.bit(value >> i & 1 == 1);
@@ -87,16 +96,22 @@ impl BitWriter {
 /// A keyboard event of an input package: `01`, a type bit (1 = key down, 0 = key up), the 8-bit scan code (MSB first).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Key {
+    /// The 8-bit scan code.
     pub code: u8,
+    /// True = key pressed, false = released.
     pub down: bool,
 }
 
 /// The mouse record that ends an input package: `10`, two button bits, then x and y as 16-bit words (MSB first).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Mouse {
+    /// The first button bit.
     pub a: bool,
+    /// The second button bit.
     pub b: bool,
+    /// Pointer x.
     pub x: i16,
+    /// Pointer y.
     pub y: i16,
 }
 
@@ -104,12 +119,16 @@ pub struct Mouse {
 /// package is built; the exe starts reading at bit 16), any number of key records, one mouse record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputPackage {
+    /// The 16 reserved bits at the start (zero when the game builds the package).
     pub head: u16,
+    /// The key events, in order.
     pub keys: Vec<Key>,
+    /// The mouse record that ends the package, when present.
     pub mouse: Option<Mouse>,
 }
 
 impl InputPackage {
+    /// Decodes a package of `len_bits` bits.
     pub fn parse(data: &[u8], len_bits: usize) -> Result<InputPackage> {
         let mut r = Bits::new(data, len_bits);
         let head = r.lsb(16)? as u16;
@@ -135,6 +154,7 @@ impl InputPackage {
         Ok(InputPackage { head, keys, mouse })
     }
 
+    /// Encodes the package.
     pub fn write(&self) -> BitWriter {
         let mut w = BitWriter::default();
         w.lsb(self.head as u32, 16);
@@ -160,15 +180,18 @@ impl InputPackage {
 /// `(first bit, width)` for selectors 0..=7 (selector 7 is the 3-bit field at bit 4). The payload starts at bit [`PAYLOAD_BIT`] (header type 0) or bit 7/8 for the
 /// shorter headers the receiver `0x451390` selects.
 pub const HEADER_FIELDS: [(u32, u32); 8] = [(0, 4), (7, 18), (0x19, 6), (0x1f, 12), (0x2b, 9), (0x34, 9), (0x3d, 6), (4, 3)];
+/// Bit where the payload starts after a full (type 0) header.
 pub const PAYLOAD_BIT: u32 = 0x43;
 
 /// The decoded header fields of a transport message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Header {
+    /// The eight fields, indexed by selector (layout in [`HEADER_FIELDS`]).
     pub fields: [u32; 8],
 }
 
 impl Header {
+    /// Reads the eight header fields from a message of `len_bits` bits.
     pub fn parse(data: &[u8], len_bits: usize) -> Result<Header> {
         let mut fields = [0; 8];
         for (i, &(at, n)) in HEADER_FIELDS.iter().enumerate() {
@@ -179,6 +202,7 @@ impl Header {
         Ok(Header { fields })
     }
 
+    /// Encodes the header fields at their bit positions.
     pub fn write(&self) -> BitWriter {
         let mut order: Vec<usize> = (0..8).collect();
         order.sort_by_key(|&i| HEADER_FIELDS[i].0);

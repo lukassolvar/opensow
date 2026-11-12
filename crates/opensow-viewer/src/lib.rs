@@ -5,6 +5,7 @@ pub mod editor;
 pub mod editor_ui;
 pub mod fx;
 pub mod record;
-pub mod upscale;
 pub mod render;
 pub mod scene;
+pub mod screenshot;
+pub mod upscale;

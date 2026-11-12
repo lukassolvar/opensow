@@ -1,15 +1,22 @@
-//! opensow-launcher [--screenshot out.png [--size WxH] [--lang CZ] [--original DIR] [--warmonger DIR]]
+//! opensow-launcher [--screenshot out.png [--size WxH] [--page home|original|warmonger|settings] [--tab launcher|game|extras]
+//!                   [--lang CZ] [--original DIR] [--warmonger DIR] [--hover X,Y] [--message TEXT] [--update STATE]]
 //!
-//! Window with two things to set: the language and the install folder of each game (docs/launcher.md). Choices are saved at once to
-//! `launcher.cfg` (formats::launcher), which the game reads. "Play" starts `opensow-game` from the same folder as this program.
+//! Window with a sidebar (home, State of War, Warmonger, settings): locate each game, start it, choose the language and edit the
+//! game's settings (docs/launcher.md). Folders and language are saved at once to `launcher.cfg` (formats::launcher), which the game
+//! reads; the game settings go to the per-user data folder, where "Play" starts `opensow-game` (from this program's folder).
 
+mod settings;
+mod text;
 mod ui;
+mod update;
 
 use opensow_formats::lang::Language;
+use settings::GameSettings;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::rc::Rc;
-use ui::{Action, App, Slot};
+use ui::{Action, App, Page, Slot, Tab, UpdateState};
+use update::{Fail, Release};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
@@ -17,6 +24,12 @@ use winit::window::{Window, WindowId};
 
 enum UserEvent {
     Picked(Slot, Option<PathBuf>),
+    /// The answer of the release check (failures show only on the Settings page).
+    Checked(Result<Release, Fail>),
+    /// Bytes of the update downloaded so far.
+    Progress(u64),
+    /// The update is in place (or why not).
+    Installed(Result<Release, Fail>),
 }
 
 struct Launcher {
@@ -41,48 +54,112 @@ fn pick_folder(title: &str) -> Option<PathBuf> {
     (out.status.success() && !s.is_empty()).then(|| PathBuf::from(s))
 }
 
-fn play() -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+/// Starts the game in the data folder (where it finds the settings this launcher edits), on the campaign used last.
+fn play(data_dir: &std::path::Path) -> Result<(), text::Message> {
+    let exe = std::env::current_exe().map_err(|e| text::Message::Raw(e.to_string()))?;
     let game = exe.with_file_name(if cfg!(windows) { "opensow-game.exe" } else { "opensow-game" });
     if !game.exists() {
-        return Err(format!("{} not found; build it with cargo build --release -p opensow-game", game.display()));
+        return Err(text::Message::GameMissing(game.display().to_string()));
     }
-    // both campaigns are one game: it opens on the one used last and switches on the world map
-    std::process::Command::new(game).spawn().map(|_| ()).map_err(|e| e.to_string())
+    std::fs::create_dir_all(data_dir).map_err(|e| text::Message::Raw(e.to_string()))?;
+    let mut cmd = std::process::Command::new(game);
+    cmd.current_dir(data_dir);
+    cmd.spawn().map(|_| ()).map_err(|e| text::Message::Raw(e.to_string()))
 }
 
 impl Launcher {
     fn save(&mut self) {
         if let Err(e) = opensow_formats::launcher::save(&self.app.settings) {
-            self.app.message = format!("Could not save the settings: {e}");
+            self.app.message = text::Message::SaveFailed(e.to_string());
         }
     }
 
-    fn logical(&self, p: (f64, f64)) -> (f32, f32) {
-        let size = self.window.as_ref().map(|w| w.inner_size()).unwrap_or_default();
-        let (s, ox, oy) = App::fit(size.width as usize, size.height as usize);
-        ((p.0 as f32 - ox) / s, (p.1 as f32 - oy) / s)
+    fn save_game(&mut self) {
+        if let Err(e) = self.app.game.save_to(&self.app.data_dir) {
+            self.app.message = text::Message::SaveFailed(e.to_string());
+        }
     }
 
     fn act(&mut self, a: Action) {
         match a {
-            Action::Lang(l) => self.app.settings.language = l,
-            Action::Clear(s) => self.app.set_path(s, None),
+            Action::Nav(p) => {
+                self.app.page = p;
+                self.app.refresh();
+                return;
+            }
+            Action::Tab(t) => {
+                self.app.tab = t;
+                return;
+            }
+            Action::Lang(l) => {
+                self.app.settings.language = l;
+                // the page follows at once; the window's title too
+                if let Some(w) = &self.window {
+                    w.set_title(self.app.tx().window_title());
+                }
+            }
             Action::Detect => self.app.detect(),
             Action::Browse(s) => {
                 let proxy = self.proxy.clone();
-                let title = if s == Slot::Warmonger { "Choose the State of War Warmonger folder" } else { "Choose the State of War folder" };
+                let title = self.app.tx().choose_folder(s == Slot::Warmonger);
                 std::thread::spawn(move || {
                     let _ = proxy.send_event(UserEvent::Picked(s, pick_folder(title)));
                 });
                 return;
             }
             Action::Play => {
+                // the folders are looked at again: files may be gone since the page was drawn
+                self.app.refresh();
+                if !self.app.playable(Slot::Original) {
+                    self.app.message = text::Message::Missing(Slot::Original.name().into());
+                    self.app.page = Page::Game(Slot::Original);
+                    return;
+                }
                 self.save();
-                match play() {
-                    Ok(()) => event_exit(),
+                self.save_game();
+                match play(&self.app.data_dir) {
+                    Ok(()) => std::process::exit(0),
                     Err(e) => self.app.message = e,
                 }
+                return;
+            }
+            Action::Toggle(f) => {
+                self.app.game.toggle(f);
+                self.save_game();
+                return;
+            }
+            Action::Step(f, d) => {
+                self.app.game.step(f, d);
+                self.save_game();
+                return;
+            }
+            Action::CheckUpdate => self.check_update(),
+            Action::InstallUpdate => {
+                if let UpdateState::Available(r) = self.app.update.clone() {
+                    self.install_update(r);
+                }
+                return;
+            }
+            Action::ReleaseNotes => {
+                if let UpdateState::Available(r) | UpdateState::Downloading(r, _) | UpdateState::Installed(r) = &self.app.update {
+                    update::open_url(&r.url);
+                }
+                return;
+            }
+            Action::Restart => {
+                // the new launcher replaced this file; start it and leave
+                if let Ok(exe) = std::env::current_exe() {
+                    if std::process::Command::new(exe).spawn().is_ok() {
+                        std::process::exit(0);
+                    }
+                }
+                return;
+            }
+            Action::ToggleAutoCheck => self.app.settings.check_updates = !self.app.settings.check_updates,
+            Action::Reset => {
+                self.app.game = GameSettings::default();
+                self.app.message = text::Message::SettingsReset;
+                self.save_game();
                 return;
             }
         }
@@ -90,8 +167,50 @@ impl Launcher {
     }
 }
 
-fn event_exit() {
-    std::process::exit(0);
+impl Launcher {
+    /// Asks GitHub for the latest release on a thread of its own.
+    fn check_update(&mut self) {
+        if matches!(self.app.update, UpdateState::Checking | UpdateState::Downloading(..)) {
+            return;
+        }
+        self.app.update = UpdateState::Checking;
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let _ = proxy.send_event(UserEvent::Checked(update::fetch_latest()));
+        });
+    }
+
+    /// Downloads the release's archive and its `.sha256` into the data folder's `update` folder, then installs it next to this
+    /// program; the progress is the file's size, read while `curl` writes it.
+    fn install_update(&mut self, r: Release) {
+        let (Some(archive), Some(checksum)) = (r.archive.clone(), r.checksum.clone()) else { return };
+        let Some(target) = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())) else { return };
+        let work = self.app.data_dir.join("update");
+        self.app.update = UpdateState::Downloading(r.clone(), 0);
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let result = (|| {
+                let sha = update::fetch_text(&checksum.browser_download_url)?;
+                let file = work.join(&archive.name);
+                let mut child = update::start_download(&archive.browser_download_url, &file).map_err(|e| Fail::Network(e.to_string()))?;
+                let status = loop {
+                    if let Some(s) = child.try_wait().map_err(|e| Fail::Network(e.to_string()))? {
+                        break s;
+                    }
+                    let _ = proxy.send_event(UserEvent::Progress(std::fs::metadata(&file).map_or(0, |m| m.len())));
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                };
+                if !status.success() {
+                    return Err(Fail::Network(format!("download failed ({status})")));
+                }
+                let _ = proxy.send_event(UserEvent::Progress(archive.size));
+                update::install(&file, &sha, &work, &target)?;
+                let _ = std::fs::remove_file(&file);
+                Ok(r)
+            })();
+            let _ = proxy.send_event(UserEvent::Installed(result));
+        });
+    }
 }
 
 impl ApplicationHandler<UserEvent> for Launcher {
@@ -99,8 +218,11 @@ impl ApplicationHandler<UserEvent> for Launcher {
         if self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes().with_title("OpenSOW Launcher").with_inner_size(winit::dpi::LogicalSize::new(600.0, 520.0)).with_min_inner_size(winit::dpi::LogicalSize::new(300.0, 250.0));
-        let icon = winit::window::Icon::from_rgba(ui::emblem_rgba(64), 64, 64).ok();
+        let attrs = Window::default_attributes()
+            .with_title(self.app.tx().window_title())
+            .with_inner_size(winit::dpi::LogicalSize::new(1000.0, 620.0))
+            .with_min_inner_size(winit::dpi::LogicalSize::new(640.0, 420.0));
+        let icon = winit::window::Icon::from_rgba(ui::icon_rgba(64), 64, 64).ok();
         let attrs = attrs.with_window_icon(icon);
         let window = Rc::new(el.create_window(attrs).expect("window"));
         let ctx = softbuffer::Context::new(window.clone()).expect("context");
@@ -109,10 +231,31 @@ impl ApplicationHandler<UserEvent> for Launcher {
     }
 
     fn user_event(&mut self, _: &ActiveEventLoop, ev: UserEvent) {
-        let UserEvent::Picked(slot, dir) = ev;
-        if let Some(d) = dir {
-            self.app.offer_dir(d, Some(slot));
-            self.save();
+        match ev {
+            UserEvent::Picked(slot, dir) => {
+                if let Some(d) = dir {
+                    self.app.offer_dir(d, Some(slot));
+                    self.save();
+                }
+            }
+            UserEvent::Checked(r) => {
+                self.app.update = match r {
+                    Ok(r) if r.is_newer() => UpdateState::Available(r),
+                    Ok(_) => UpdateState::UpToDate,
+                    Err(f) => UpdateState::Failed(f),
+                }
+            }
+            UserEvent::Progress(n) => {
+                if let UpdateState::Downloading(_, got) = &mut self.app.update {
+                    *got = n;
+                }
+            }
+            UserEvent::Installed(r) => {
+                self.app.update = match r {
+                    Ok(r) => UpdateState::Installed(r),
+                    Err(f) => UpdateState::Failed(f),
+                }
+            }
         }
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -123,8 +266,11 @@ impl ApplicationHandler<UserEvent> for Launcher {
         match ev {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::CursorMoved { position, .. } => {
-                self.app.cursor = self.logical((position.x, position.y));
+                self.app.cursor = self.app.to_logical(position.x as f32, position.y as f32);
             }
+            WindowEvent::CursorLeft { .. } => self.app.cursor = (-1.0, -1.0),
+            // back in the window: the game folders may have changed meanwhile
+            WindowEvent::Focused(true) => self.app.refresh(),
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                 let (x, y) = self.app.cursor;
                 if let Some(a) = self.app.click(x, y) {
@@ -133,14 +279,13 @@ impl ApplicationHandler<UserEvent> for Launcher {
             }
             WindowEvent::DroppedFile(p) => {
                 if p.is_dir() {
-                    let hint = self.app.slot_at(self.app.cursor.1);
+                    let hint = self.app.drop_slot();
                     self.app.offer_dir(p, hint);
                     self.save();
                 } else {
-                    self.app.message = "Drop the game's folder, not a file.".into();
+                    self.app.message = text::Message::DropFolder;
                 }
             }
-            WindowEvent::RedrawRequested => {}
             _ => {}
         }
         if let (Some(w), Some(s)) = (&self.window, &mut self.surface) {
@@ -150,6 +295,7 @@ impl ApplicationHandler<UserEvent> for Launcher {
                 return;
             }
             if let Ok(mut buf) = s.buffer_mut() {
+                self.app.resize(size.width as usize, size.height as usize);
                 self.app.draw(&mut buf, size.width as usize, size.height as usize);
                 let _ = buf.present();
             }
@@ -157,6 +303,8 @@ impl ApplicationHandler<UserEvent> for Launcher {
     }
 }
 
+/// Writes the frame buffer (`0x00RRGGBB` pixels) as a PNG for `--screenshot`. The same helper lives in
+/// `opensow_viewer::screenshot`; the launcher keeps its own copy so that it does not depend on the whole renderer.
 fn write_png(path: &str, buf: &[u32], w: usize, h: usize) {
     let rgb: Vec<u8> = buf.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]).collect();
     let mut enc = png::Encoder::new(std::io::BufWriter::new(std::fs::File::create(path).expect("create png")), w as u32, h as u32);
@@ -165,17 +313,58 @@ fn write_png(path: &str, buf: &[u32], w: usize, h: usize) {
     enc.write_header().and_then(|mut w| w.write_image_data(&rgb)).expect("write png");
 }
 
+/// `--update checking|uptodate|available|downloading|installed|noreleases|failed`: a made-up update state for headless screenshots.
+fn demo_update(state: &str) -> UpdateState {
+    let asset = |n: &str| update::Asset { name: n.into(), browser_download_url: String::new(), size: 40_000_000 };
+    let r = Release {
+        tag: "v0.2.0".into(),
+        version: (0, 2, 0),
+        name: "Skirmish map editor".into(),
+        url: String::new(),
+        archive: Some(asset("opensow.zip")),
+        checksum: Some(asset("opensow.zip.sha256")),
+    };
+    match state {
+        "checking" => UpdateState::Checking,
+        "uptodate" => UpdateState::UpToDate,
+        "available" => UpdateState::Available(r),
+        "downloading" => UpdateState::Downloading(r, 17_000_000),
+        "installed" => UpdateState::Installed(r),
+        "noreleases" => UpdateState::Failed(Fail::NoReleases),
+        "failed" => UpdateState::Failed(Fail::Network("Could not resolve host: api.github.com".into())),
+        _ => UpdateState::Idle,
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let get = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let mut settings = opensow_formats::launcher::load();
+    let data_dir = opensow_formats::launcher::data_dir();
+    let game = GameSettings::load_from(&data_dir);
+    if args.iter().any(|a| a == "--check-update") {
+        // what the launcher would find: the latest release of OPENSOW_UPDATE_REPO (default `update::REPO`) for this system
+        println!("repo {} platform {} this version {}", update::repo(), update::platform(), update::VERSION);
+        match update::fetch_latest() {
+            Ok(r) => println!(
+                "latest {} ({}) newer {} archive {:?} checksum {:?}",
+                r.tag,
+                r.name,
+                r.is_newer(),
+                r.archive.map(|a| a.name),
+                r.checksum.map(|a| a.name)
+            ),
+            Err(f) => println!("{f:?}"),
+        }
+        return;
+    }
     if let Some(path) = get("--icon-png") {
         // the window icon at SIZE (default 256), on a checker so the transparent corners show
         let n: usize = get("--size").and_then(|s| s.parse().ok()).unwrap_or(256);
-        let px = ui::emblem_rgba(n);
+        let px = ui::icon_rgba(n);
         let buf: Vec<u32> = (0..n * n)
             .map(|i| {
-                let bg = if (i % n / 16 + i / n / 16) % 2 == 0 { 0x808080 } else { 0xa0a0a0 };
+                let bg = if (i % n / 16 + i / n / 16).is_multiple_of(2) { 0x808080 } else { 0xa0a0a0 };
                 let a = px[i * 4 + 3] as u32;
                 let ch = |s: u32, c: u8| ((bg >> s & 255) * (255 - a) + c as u32 * a) / 255;
                 ch(16, px[i * 4]) << 16 | ch(8, px[i * 4 + 1]) << 8 | ch(0, px[i * 4 + 2])
@@ -189,11 +378,30 @@ fn main() {
         if let Some(l) = get("--lang") {
             settings.language = Language::from_code(&l);
         }
-        settings.original = get("--original").map(PathBuf::from).or(settings.original);
-        settings.warmonger = get("--warmonger").map(PathBuf::from).or(settings.warmonger);
-        let (w, h) = get("--size").and_then(|s| s.split_once('x').map(|(a, b)| (a.parse().unwrap_or(600), b.parse().unwrap_or(520)))).unwrap_or((600, 500));
-        let mut app = App::new(settings);
-        app.message = get("--message").unwrap_or_default();
+        // an empty value = not located
+        let dir = |name: &str, old: Option<PathBuf>| get(name).map_or(old, |d| (!d.is_empty()).then(|| PathBuf::from(d)));
+        settings.original = dir("--original", settings.original);
+        settings.warmonger = dir("--warmonger", settings.warmonger);
+        let (w, h) = get("--size").and_then(|s| s.split_once('x').map(|(a, b)| (a.parse().unwrap_or(1000), b.parse().unwrap_or(620)))).unwrap_or((1000, 620));
+        let mut app = App::new(settings, game, data_dir);
+        if let Some(u) = get("--update") {
+            app.update = demo_update(&u);
+        }
+        app.page = match get("--page").as_deref() {
+            Some("original") => Page::Game(Slot::Original),
+            Some("warmonger") => Page::Game(Slot::Warmonger),
+            Some("settings") => Page::Settings,
+            _ => Page::Home,
+        };
+        app.tab = match get("--tab").as_deref() {
+            Some("launcher") => Tab::Launcher,
+            Some("extras") => Tab::Extras,
+            _ => Tab::Game,
+        };
+        if let Some(m) = get("--message") {
+            app.message = text::Message::Raw(m);
+        }
+        app.resize(w, h);
         if let Some(p) = get("--hover").and_then(|s| s.split_once(',').map(|(a, b)| (a.parse().unwrap_or(0.0), b.parse().unwrap_or(0.0)))) {
             app.cursor = p;
         }
@@ -202,7 +410,13 @@ fn main() {
         write_png(&path, &buf, w, h);
         return;
     }
+    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())) {
+        update::remove_leftovers(&dir);
+    }
     let el = EventLoop::<UserEvent>::with_user_event().build().expect("event loop");
-    let mut l = Launcher { app: App::new(settings), window: None, surface: None, proxy: el.create_proxy() };
+    let mut l = Launcher { app: App::new(settings, game, data_dir), window: None, surface: None, proxy: el.create_proxy() };
+    if l.app.settings.check_updates {
+        l.check_update();
+    }
     el.run_app(&mut l).expect("run");
 }

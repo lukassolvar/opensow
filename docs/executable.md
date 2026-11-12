@@ -1,7 +1,7 @@
 # Executable analysis
 
 - `State of War.exe`: PE32 x86 GUI, ImageBase 0x400000, entry 0x47e7bc, timestamp 2019-04-03, .text 0x1000..0x84000 (~530 KB code).
-- Warmonger exe is ~100 KB smaller; same engine.
+- Warmonger exe is ~136 KB smaller (978944 vs 1114624 bytes); same engine (docs/warmonger.md).
 - Imports: DDRAW `DirectDrawCreate`; DINPUT `DirectInputCreateA`; DSOUND ordinal #1 (DirectSoundCreate); WINMM mmio* + timeGetTime;
   ijl15.dll ordinals 2,3,4 (Intel JPEG Library init/read/free); steam_api `SteamAPI_Init`/`RestartAppIfNecessary`; mfc140.dll (285 imports).
 - SFML 2 network DLLs ship next to the exe but are NOT in the import table (maybe loaded dynamically; unverified).
@@ -9,14 +9,14 @@
   font masks `extras\fonts\{big,medium,msg,small}_{i,o}.msk`, "Wrong map version!!!" (map tag VER7).
 - ~100 RTTI classes: CArray<T> templates, CBuilding, CBullet, CCloud, CControl, CDialog, CEditorScript, CGameFrame, CHuffcomp, CInfoBox,
   CMegaFile, CMenu*, CNetConnection/Session/Player, CNet_* commands, CPlayMapObject, CUnitChassis, CUnitFoot, Crater, Smoke, AnimSprite.
-- Next step: load in Ghidra (x86 32-bit, MSVC RTTI analyzer) and recover vtables from the RTTI names.
+- Tools: no Ghidra; disassembly with capstone/objdump, and exe functions run in a unicorn emulator against the Rust ports (`scripts/verify_against_exe.py` and the other `scripts/verify_*.py`, `scripts/gen_*_defaults.py`).
 
 ## Addresses (State of War.exe, ImageBase 0x400000)
 - `0x41da00` script (.edt/.net) loader: tags 0x7b objects, 0xe0 markers, footer 0x1de8; calls `0x43a420` for each marker.
-- `0x43a420` creates a unit in a per-player array (allocation 0xa0 bytes) -> ctor `0x46bd30(cellx, celly, player, slot, kind, ...)`.
+- `0x43a420` creates a unit in a per-player array (allocation 0xa0 bytes) -> ctor `0x46bd30(cellx, celly, player, kind, slot, handle)` (stdcall; order as run by `scripts/gen_unit_defaults.py`).
 - `0x46bd30` unit ctor: `kind-1` indexes HP via byte table `0x46c280`/jump table `0x46c23c`; "Unknown unit" error for others. Unit kinds: 1-15, 40-46, 109-113.
-- `0x46ff50` weapon init for kinds 1-46 (byte table `0x470408`, jump table `0x4703b4`); field `+0x1c` = weapon type 0..5.
-- `0x43a9b0` per-category synchronised random slot allocator (lockstep netplay); categories 1,3,4,5,6.
+- `0x46ff50` chassis init for kinds 1-46 (byte table `0x470408`, jump table `0x4703b4`); field `+0x1c` = chassis type 0..5 (see below).
+- `0x43a9b0` handle allocator `(class, type, player, slot)` -> `slot | generation << 10 | player << 16 | type << 19 | class << 22` with per-player generation counters: class 1 unit, 2 building, 4 aircraft squad, 5 bullet (bullets build theirs inline, `0x43a169`); class 3 has no counter. Types: docs/savegame.md "Handles". OpenSOW: `sim/savestate.rs` `handle` (save bridge only; the sim uses its own ids).
 - Building objects: kind in `[obj+0x94]`; kinds 101,102,103,108 are unit producers (`0x4167a1`, `0x455daa`).
 - Unit sprite load order (string table near file offset 0x8bc26): `1AA 1A 1C 1F 1S 2AA.. 3AA.. 1I tur_01 tur_02 tur_03 tur_05 5W1..5W5`, then chassis `chA chB chC chI1 chW chN`.
 - Helper scripts used (rewrite as needed; Python venv with capstone/pefile): string/xref scan, jump-table decode, annotated disassembly.
@@ -31,4 +31,5 @@
 ## Game clock (decoded)
 - `0x42e890` runs once per rendered frame: `GetTickCount` fps counter, then accumulator `[0x5ddfc0]` += elapsed*100 (`0x437500` = `timeGetTime` delta in ms x 100, scaled by float `[0x48e8dc]` = 1.0). While the accumulator exceeds `0x682` (1666) it emits a tick and subtracts 1666: **one tick = 16.66 ms = 60 ticks/s**; ticks per frame go to `[0x552494]`, the in-second tick index `[0x5ddfc4]` wraps at 60 (stored per tick at `0x517b10`), the second counter is `[0x70ef94]`.
 - With `[0x517aea]` != 0 (fixed-step mode, probably replay/network) the frame adds a constant 425 (1700 x 0.25) instead of measured time; not traced further.
+- OpenSOW: the same 60 ticks/s (`sim::TICKS_PER_SECOND`) from a frame-time accumulator in `Play::update`; F3/F4 change the game speed as in the exe. **Differs from the exe:** the dev tools' speed multiplier (x1/2/5/10, `devtools::SPEEDS`) is not in the exe.
 - The main message loop is `0x41a913`: `PeekMessage`, and when idle `0x42d020` (state dispatcher on `[0x5baa8c]`, jump table `0x42d624`, 30 states), so the game runs flat out and the accumulator makes it frame-rate independent.

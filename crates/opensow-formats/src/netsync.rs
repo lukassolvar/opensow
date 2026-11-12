@@ -10,13 +10,18 @@ use crate::Result;
 /// A building (`0x40a2d0`): kind `[+0x94]` 7 bits, `[+0x90]` 32 bits, cell x `[+4]` and y `[+8]` 8 bits, owner `[+0x8c]` 2 bits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuildingSync {
+    /// `[+0x94]`, 7 bits: the building's kind.
     pub kind: u32,
+    /// `[+0x90]`, 32 bits, kept raw.
     pub word90: u32,
+    /// `[+4]`, `[+8]`, 8 bits each: the building's cell.
     pub cell: (u32, u32),
+    /// `[+0x8c]`, 2 bits: the owner.
     pub owner: u32,
 }
 
 impl BuildingSync {
+    /// Encodes the record as the exe's writer does.
     pub fn write(&self) -> BitWriter {
         let mut w = BitWriter::default();
         w.lsb(self.kind, 7);
@@ -27,6 +32,7 @@ impl BuildingSync {
         w
     }
 
+    /// Decodes one record from the bit stream.
     pub fn parse(r: &mut Bits) -> Result<BuildingSync> {
         Ok(BuildingSync { kind: r.lsb(7)?, word90: r.lsb(32)?, cell: (r.lsb(8)?, r.lsb(8)?), owner: r.lsb(2)? })
     }
@@ -36,6 +42,7 @@ impl BuildingSync {
 /// `0x412a30`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BulletExtra {
+    /// Nothing follows (every type not listed below).
     None,
     /// `[+0x2688]`, 32 bits: the target handle (types 1, 10, 19, 20, 21, 31).
     Handle(u32),
@@ -52,7 +59,11 @@ pub enum BulletExtra {
 /// Which extra a bullet type carries: 0 handle, 1 delay, 2 speed, 3 variant, 4 variant 2, 5 none (the exe's byte table).
 pub fn bullet_extra_index(ty: u32) -> u32 {
     const TABLE: [u8; 31] = [0, 1, 5, 5, 5, 5, 5, 5, 5, 0, 5, 5, 2, 2, 3, 3, 5, 4, 0, 0, 0, 5, 5, 5, 5, 5, 5, 5, 5, 5, 0];
-    if (1..=31).contains(&ty) { TABLE[ty as usize - 1] as u32 } else { 5 }
+    if (1..=31).contains(&ty) {
+        TABLE[ty as usize - 1] as u32
+    } else {
+        5
+    }
 }
 
 /// A bullet (`0x4128f0`, once per bullet: the guard `[+0x26bc] > 0` makes a second call return false).
@@ -72,12 +83,14 @@ pub struct BulletSync {
     pub word26b0: u32,
     /// `[+0x26b4]`, 6 bits.
     pub word26b4: u32,
+    /// The type-dependent field after the fixed ones.
     pub extra: BulletExtra,
     /// Types 19 to 21 only (`[+0x26c0] != 0`): one more bit.
     pub flag: Option<bool>,
 }
 
 impl BulletSync {
+    /// Encodes the record as the exe's writer does.
     pub fn write(&self) -> BitWriter {
         let mut w = BitWriter::default();
         w.lsb(self.ty, 6);
@@ -103,6 +116,7 @@ impl BulletSync {
         w
     }
 
+    /// Decodes one record from the bit stream.
     pub fn parse(r: &mut Bits) -> Result<BulletSync> {
         let ty = r.lsb(6)?;
         let owner = r.lsb(2)?;
@@ -125,17 +139,26 @@ impl BulletSync {
 /// `[+0x20]` 2 bits, `[+0xa0]` 32 bits, `[+0xa4]` 6 bits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AirSync {
+    /// `[+0x28]`, 8 bits: the air force code.
     pub code: u32,
+    /// `[+0x1c]`, 16 bits: the aircraft's handle.
     pub handle: u32,
+    /// `[+0xc]`, `[+0x10]`, 16 bits each: the target point.
     pub target: (u32, u32),
+    /// `[+0x98]`, 16 bits, kept raw.
     pub word98: u32,
+    /// `[+0x9c]`, 16 bits, kept raw.
     pub word9c: u32,
+    /// `[+0x20]`, 2 bits, kept raw.
     pub word20: u32,
+    /// `[+0xa0]`, 32 bits, kept raw.
     pub worda0: u32,
+    /// `[+0xa4]`, 6 bits, kept raw.
     pub worda4: u32,
 }
 
 impl AirSync {
+    /// Encodes the record as the exe's writer does.
     pub fn write(&self) -> BitWriter {
         let mut w = BitWriter::default();
         w.lsb(self.code, 8);
@@ -150,8 +173,18 @@ impl AirSync {
         w
     }
 
+    /// Decodes one record from the bit stream.
     pub fn parse(r: &mut Bits) -> Result<AirSync> {
-        Ok(AirSync { code: r.lsb(8)?, handle: r.lsb(16)?, target: (r.lsb(16)?, r.lsb(16)?), word98: r.lsb(16)?, word9c: r.lsb(16)?, word20: r.lsb(2)?, worda0: r.lsb(32)?, worda4: r.lsb(6)? })
+        Ok(AirSync {
+            code: r.lsb(8)?,
+            handle: r.lsb(16)?,
+            target: (r.lsb(16)?, r.lsb(16)?),
+            word98: r.lsb(16)?,
+            word9c: r.lsb(16)?,
+            word20: r.lsb(2)?,
+            worda0: r.lsb(32)?,
+            worda4: r.lsb(6)?,
+        })
     }
 }
 
@@ -173,10 +206,15 @@ pub struct ChassisSync {
 /// `[+0x68]`, or the position `>> 5` without a chassis) and `[+0xc]`, `[+0x10]` 7 bits each, the chassis part, the top part.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnitSync {
+    /// `[+0x40]`, 16 bits: the unit kind.
     pub kind: u32,
+    /// `[+0x3c]`, 32 bits: the unit's handle.
     pub handle: u32,
+    /// `[+0x44]`, 2 bits: the player.
     pub player: u32,
+    /// The unit's cell, 7 bits each (from the chassis, or the position `>> 5` without one).
     pub cell: (u32, u32),
+    /// `[+0xc]`, `[+0x10]`, 7 bits each.
     pub home: (u32, u32),
     /// `None` = no chassis: a single 0 bit. `Some`: a 1 bit, the fields, then the `approaching` bit.
     pub chassis: Option<ChassisSync>,
@@ -190,6 +228,7 @@ pub fn is_turret_top(kind: u32) -> bool {
 }
 
 impl UnitSync {
+    /// Encodes the record as the exe's writer does.
     pub fn write(&self) -> BitWriter {
         let mut w = BitWriter::default();
         w.lsb(self.kind, 16);
@@ -226,6 +265,7 @@ impl UnitSync {
         w
     }
 
+    /// Decodes one record from the bit stream.
     pub fn parse(r: &mut Bits) -> Result<UnitSync> {
         let (kind, handle, player) = (r.lsb(16)?, r.lsb(32)?, r.lsb(2)?);
         let cell = (r.lsb(7)?, r.lsb(7)?);
@@ -266,7 +306,9 @@ pub struct Commands {
     pub unit_scatter: Vec<Vec<u32>>,
     /// HDestroy, HRepair, HUpgrade (the Advancer's building orders): Advancer handle 32, building handle 32.
     pub destroy: Vec<(u32, u32)>,
+    /// HRepair: Advancer handle 32, building handle 32.
     pub repair: Vec<(u32, u32)>,
+    /// HUpgrade: Advancer handle 32, building handle 32.
     pub upgrade: Vec<(u32, u32)>,
     /// UfoStrike: x 14, y 14, force code 8 bits.
     pub ufo_strike: Vec<(u32, u32, u32)>,
@@ -275,6 +317,7 @@ pub struct Commands {
 }
 
 impl Commands {
+    /// Whether every queue is empty (such a frame sends nothing).
     pub fn is_empty(&self) -> bool {
         *self == Commands::default()
     }
@@ -346,6 +389,7 @@ impl Commands {
         w.lsb(0, 1);
     }
 
+    /// Decodes the ten queues from the bit stream, in the order of the fields above.
     pub fn parse_payload(r: &mut Bits) -> Result<Commands> {
         let mut c = Commands::default();
         let handles = |r: &mut Bits| -> Result<Vec<u32>> {
@@ -399,17 +443,35 @@ impl Commands {
 /// aircraft (`0x4688d0`, field 6, 6 bits) and the bullets not yet sent except types 22, 32 and 33 (`0x4128f0`, field 5, 9 bits).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Snapshot {
+    /// The game clock: `[0x70ef94]` (18 bits) and `[0x70ef98]` (6 bits).
     pub clock: (u32, u32),
+    /// The player the message is about.
     pub player: u32,
+    /// Every living building.
     pub buildings: Vec<BuildingSync>,
+    /// Every unit with `[+0x2c] == 0`.
     pub units: Vec<UnitSync>,
+    /// The aircraft.
     pub aircraft: Vec<AirSync>,
+    /// The bullets not sent before (types 22, 32 and 33 are never sent).
     pub bullets: Vec<BulletSync>,
 }
 
 impl Snapshot {
+    /// Encodes the whole message: header, then the four record lists.
     pub fn write(&self) -> BitWriter {
-        let h = crate::net::Header { fields: [0, self.clock.0, self.clock.1, self.units.len() as u32, self.buildings.len() as u32, self.bullets.len() as u32, self.aircraft.len() as u32, self.player] };
+        let h = crate::net::Header {
+            fields: [
+                0,
+                self.clock.0,
+                self.clock.1,
+                self.units.len() as u32,
+                self.buildings.len() as u32,
+                self.bullets.len() as u32,
+                self.aircraft.len() as u32,
+                self.player,
+            ],
+        };
         let mut w = h.write();
         for b in &self.buildings {
             let r = b.write();
@@ -433,6 +495,7 @@ impl Snapshot {
         w
     }
 
+    /// Decodes a message of `len` bytes.
     pub fn parse(data: &[u8], len: usize) -> Result<Snapshot> {
         let h = crate::net::Header::parse(data, len)?;
         let mut r = Bits::new(data, len);
@@ -540,7 +603,20 @@ mod tests {
             buildings: vec![BuildingSync { kind: 100, word90: 5, cell: (1, 2), owner: 0 }; 3],
             units: vec![UnitSync { kind: 7, handle: 9, player: 1, cell: (1, 1), home: (2, 2), chassis: None, top: None }],
             aircraft: vec![AirSync { code: 30, handle: 1, target: (2, 3), word98: 0, word9c: 0, word20: 0, worda0: 0, worda4: 0 }],
-            bullets: vec![BulletSync { ty: 6, owner: 0, points: [1, 2, 3, 4], word2698: 0, strength: 20, word26b0: 0, word26b4: 0, extra: BulletExtra::None, flag: None }; 2],
+            bullets: vec![
+                BulletSync {
+                    ty: 6,
+                    owner: 0,
+                    points: [1, 2, 3, 4],
+                    word2698: 0,
+                    strength: 20,
+                    word26b0: 0,
+                    word26b4: 0,
+                    extra: BulletExtra::None,
+                    flag: None
+                };
+                2
+            ],
         };
         let w = s.write();
         assert_eq!(Snapshot::parse(&w.data, w.len).unwrap(), s);

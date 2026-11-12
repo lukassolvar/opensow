@@ -51,7 +51,8 @@ fn bilinear(rgb: &[u8], w: usize, h: usize) -> Vec<u8> {
             let (tx, ty) = (fx - x0, fy - y0);
             let at = |xx: f32, yy: f32, k: usize| rgb[((yy.clamp(0.0, h as f32 - 1.0) as usize) * w + xx.clamp(0.0, w as f32 - 1.0) as usize) * 3 + k] as f32;
             for k in 0..3 {
-                let v = (at(x0, y0, k) * (1.0 - tx) + at(x0 + 1.0, y0, k) * tx) * (1.0 - ty) + (at(x0, y0 + 1.0, k) * (1.0 - tx) + at(x0 + 1.0, y0 + 1.0, k) * tx) * ty;
+                let v = (at(x0, y0, k) * (1.0 - tx) + at(x0 + 1.0, y0, k) * tx) * (1.0 - ty)
+                    + (at(x0, y0 + 1.0, k) * (1.0 - tx) + at(x0 + 1.0, y0 + 1.0, k) * tx) * ty;
                 out[(y * w * 2 + x) * 3 + k] = v.round() as u8;
             }
         }

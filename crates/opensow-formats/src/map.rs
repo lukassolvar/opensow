@@ -31,11 +31,16 @@ use crate::{Error, Reader, Result};
 const TAG: &[u8] = b"VER7";
 const CELL_SIZE: usize = 17;
 
+/// One map cell's flags, from its 17-byte record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cell {
+    /// The cell's column as stored (the high byte of `coord`).
     pub x: u8,
+    /// The cell's row as stored (the low byte of `coord`).
     pub y: u8,
+    /// Ground units cannot enter (water, mountains).
     pub blocked: bool,
+    /// The air layer is blocked here: the outer ring of the map and no-fly areas.
     pub border: bool,
     /// `no_build` layer (`+0x300cc`, window byte 11): buildings and turrets cannot be placed here (shore and rock edges). The
     /// placement check (`0x408cfc`) refuses it; the footprint stamp (`0x40ad69`) sets it and a destroyed building clears it (`0x40b0e5`).
@@ -45,16 +50,23 @@ pub struct Cell {
     pub no_marks: bool,
 }
 
+/// A parsed `.map` file: the map size and one [`Cell`] per map cell.
 #[derive(Debug, Clone)]
 pub struct Map {
+    /// X of player 0's view in pixels (`[map+0x20]`).
     pub a: u32,
+    /// Y of player 0's view in pixels (`[map+0x2c]`).
     pub b: u32,
+    /// Width in cells.
     pub width: u32,
+    /// Height in cells.
     pub height: u32,
+    /// The cells, row by row.
     pub cells: Vec<Cell>,
 }
 
 impl Map {
+    /// Parses a `.map` file.
     pub fn parse(data: &[u8]) -> Result<Map> {
         let mut r = Reader::new(data);
         let tag_len = r.u8("tag length")? as usize;
@@ -79,19 +91,25 @@ impl Map {
         Ok(Map { a, b, width, height, cells })
     }
 
+    /// The cell at column `x`, row `y`; `None` outside the map.
     pub fn cell(&self, x: u32, y: u32) -> Option<&Cell> {
         (x < self.width && y < self.height).then(|| &self.cells[(y * self.width + x) as usize])
     }
 }
 
+/// A parsed `.tmi` file: which foreground tile (tree tops, rocks) covers each tile position.
 #[derive(Debug, Clone)]
 pub struct TileMap {
+    /// Width of the grid.
     pub width: u16,
+    /// Height of the grid.
     pub height: u16,
+    /// Row by row: an index into the level's `.til` frame list, 0 = no tile.
     pub tiles: Vec<u16>,
 }
 
 impl TileMap {
+    /// Parses a `.tmi` file.
     pub fn parse(data: &[u8]) -> Result<TileMap> {
         let mut r = Reader::new(data);
         let (width, height) = (r.u16("tmi width")?, r.u16("tmi height")?);

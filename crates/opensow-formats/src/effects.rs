@@ -14,10 +14,13 @@
 pub struct Extra {
     /// Loader name without extension; the file is `<name>.ps6` inside `sprites.data`.
     pub name: &'static str,
+    /// The frame cap the loader passes for this file.
     pub slots: u16,
+    /// Address of the exe's static array of frame pointers that the loader fills.
     pub addr: u32,
 }
 
+/// Every effect sprite file the loader reads, in load order.
 pub static EXTRAS: &[Extra] = &[
     Extra { name: "extras\\pasy_light", slots: 100, addr: 0x5e57e0 },
     Extra { name: "extras\\pasy_medium", slots: 100, addr: 0x5e5970 },
@@ -136,6 +139,7 @@ pub enum Blit {
 }
 
 impl Blit {
+    /// The blend a blit routine of the exe performs, by the routine's address.
     pub fn of_routine(addr: u32) -> Blit {
         match addr {
             0x45edf0 => Blit::Plain,
@@ -191,6 +195,7 @@ pub enum Frame {
 pub struct Layer {
     /// Sprite array address (element 0 of the array, or the element used when the frame is fixed).
     pub array: u32,
+    /// Which frame of the array is drawn.
     pub frame: Frame,
     /// The blit routine's address.
     pub routine: u32,
@@ -263,6 +268,7 @@ pub fn bullet_draw(ty: u8) -> &'static [Layer] {
 /// Types 17 and 18 take their frame from the flight progress instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BulletAnim {
+    /// The frame shown now.
     pub frame: i32,
     count: i32,
     countdown: i32,
@@ -275,6 +281,7 @@ impl BulletAnim {
         [self.frame, self.count, self.countdown, self.delay]
     }
 
+    /// Builds the animation state from a bullet type's four animation fields `[frame, count, countdown, delay]`.
     pub fn new(anim: [i32; 4]) -> BulletAnim {
         BulletAnim { frame: anim[0], count: anim[1], countdown: anim[2], delay: anim[3] }
     }
@@ -362,10 +369,15 @@ pub fn impact_blast(ty: u8) -> Option<u8> {
 /// reaches the list length `[+0x3c]`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AnimSpec {
+    /// Address of the sprite array the frames come from.
     pub array: u32,
+    /// First frame of the range.
     pub from: u16,
+    /// One past the last frame of the range.
     pub to: u16,
+    /// Logic steps each frame is shown for.
     pub period: u8,
+    /// How many times the range is played.
     pub repeat: u8,
     /// Draw mode `[obj+0x34]` ([`ANIM_DRAW_MODES`]): 6 for nearly everything, 8 for the smoke puffs, 9 and 14 for smoke trails.
     pub mode: u8,
@@ -387,6 +399,7 @@ impl AnimSpec {
         (self.to - self.from) as usize * self.repeat as usize
     }
 
+    /// Whether the animation has no frames.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -417,6 +430,7 @@ pub fn blast(size: u8) -> AnimSpec {
 pub struct Spawn {
     /// Address of the `call 0x4054a0`.
     pub site: u32,
+    /// The animation it creates.
     pub spec: AnimSpec,
     /// What triggers it (read from the surrounding code).
     pub what: &'static str,
@@ -499,6 +513,7 @@ pub fn corpse_blasts(variant: u32) -> &'static [u8] {
 /// the first for y and the second for x. Only the other kinds leave the [`UNIT_WRECK`] (after the second cloud, at `(x, y + 7)`)
 /// and make the puffs; every kind plays sound 27 (`explodes\unit`) at the unit (`0x4077e0`, `0x46aba9`).
 pub const UNIT_DEATH_CLOUDS: u8 = 4;
+/// Sound played when a unit dies (`explodes\unit`).
 pub const UNIT_DEATH_SOUND: u8 = 27;
 
 /// The flying pieces a destroyed unit throws (`0x46abae..0x46ae3c`): a bullet of type 15 (blue) or 16 (green) with the
@@ -523,13 +538,19 @@ pub struct Debris {
 /// When the animation counter reaches 0 instead, the animation ends (stats, then the capture or removal `0x43ab40`). So a building
 /// bursts four times (about 3 s), a turret once (about 0.75 s), and the building stays on the map, dead, until then.
 pub const DESTRUCTION_PASSES: i32 = 2;
+/// Passes between two bursts of a dying building, before the random part.
 pub const BURST_GAP: i32 = 90;
+/// The random part added to [`BURST_GAP`]: `rand(BURST_JITTER)` passes.
 pub const BURST_JITTER: u32 = 15;
 
 /// `[b+0x108]`, set by the building constructor `0x40a330`: 5 for the buildings (kinds 100..=108, default `0x40a381`), 2 for the turrets
 /// (kinds 25..=29, cases 0..=2 of the byte table `0x40af64`, `0x40a93f`). Bursts thrown = this minus 1.
 pub fn destruction_bursts(kind_id: i32) -> i32 {
-    if (25..=29).contains(&kind_id) { 2 } else { 5 }
+    if crate::kinds::TURRETS.contains(&kind_id) {
+        2
+    } else {
+        5
+    }
 }
 
 /// Strength of a flying piece (argument 2 of `0x411dc0`, pushed as `0x28` at `0x46ae04`). The generic impact tail (`0x410881`) calls
@@ -556,10 +577,10 @@ pub const ANIM_DRAW_MODES: [(u8, u32); 15] = [
     (3, 0x45edf0),
     (4, 0x45edf0),
     (5, 0x45edf0),
-    (6, 0x45cde0),  // additive: blasts, bodky sparks, most effects
-    (7, 0x45e560),  // 6 + (`[0x49a33a] == 0`): building / air-force destruction picks 6 or 7 by that flag
-    (8, 0x45b5e0),  // smoke puffs (additive under the screen mask)
-    (9, 0x45c220),  // half-strength additive: the fighter's smoke
+    (6, 0x45cde0), // additive: blasts, bodky sparks, most effects
+    (7, 0x45e560), // 6 + (`[0x49a33a] == 0`): building / air-force destruction picks 6 or 7 by that flag
+    (8, 0x45b5e0), // smoke puffs (additive under the screen mask)
+    (9, 0x45c220), // half-strength additive: the fighter's smoke
     (10, 0x4611f0),
     (11, 0x4611f0),
     (12, 0x45cde0), // a column (see [`ANIM_COLUMN`]); no creator ever sets it
@@ -581,7 +602,9 @@ pub const ANIM_COLUMN: (usize, i32, i32) = (14, 46, 23);
 /// from that handle's unit and makes no area damage, decal or sound; the Advancer is already dead, so the bullet is purely visual.
 /// The bullet itself draws nothing; its draw (`0x411100`, additive `0x45cde0`) puts a column at the *end* point (see [`satlaser_column`]).
 pub const SATLASER_STRENGTH: i32 = 1000;
+/// Y offset of the satellite laser bullet's start point.
 pub const SATLASER_START_DY: i32 = -15;
+/// Y offset of the satellite laser bullet's end point.
 pub const SATLASER_END_DY: i32 = 10;
 
 /// Sprites of the satellite laser column at the end point `(x, y_end)` for the animation counter `frame` (0..=3): one `satlaser` frame
@@ -601,8 +624,11 @@ pub fn satlaser_column(frame: i32, x: i32, y_end: i32) -> Vec<(i32, i32, i32)> {
 /// (the fighter-smoke sprite, speed 20, strength 0, owner 0) rises from the wreck to `(x + 80 + rand(80), y - 80 - rand(40))`, the two
 /// draws made in this order with the visual generator `0x437cd0`. The first column leaves after 5 steps, the last after 5 + 19 * 20 = 385.
 pub const WRECK_SMOKE_COLUMNS: i32 = 20;
+/// Logic steps until a wreck's first smoke column.
 pub const WRECK_SMOKE_FIRST: i32 = 5;
+/// Logic steps between a wreck's smoke columns.
 pub const WRECK_SMOKE_PERIOD: i32 = 20;
+/// Bullet type of a wreck's smoke column (the fighter-smoke sprite).
 pub const WRECK_SMOKE_TYPE: u8 = 22;
 
 /// Debris class of a unit kind (`0x46b110` byte table over kinds 1..=45 -> `0x46b100` cases): kinds 1 to 15 cycle through the
@@ -613,7 +639,13 @@ pub fn debris(kind: i32) -> Option<Debris> {
         41..=45 => 2,
         _ => return None,
     };
-    Some([Debris { spread: 30, bullet_param: 2, wreck_param: 2 }, Debris { spread: 40, bullet_param: 2, wreck_param: 3 }, Debris { spread: 60, bullet_param: 3, wreck_param: 4 }][tier as usize])
+    Some(
+        [
+            Debris { spread: 30, bullet_param: 2, wreck_param: 2 },
+            Debris { spread: 40, bullet_param: 2, wreck_param: 3 },
+            Debris { spread: 60, bullet_param: 3, wreck_param: 4 },
+        ][tier as usize],
+    )
 }
 
 /// Animation sprites a bullet type creates when it lands (impact function `0x40f590`): its blast ([`impact_blast`]) and
@@ -673,6 +705,7 @@ pub fn spark_trail(ty: u8) -> Option<AnimSpec> {
 pub const GUN_TRAIL_SITE: u32 = 0x411b8a;
 /// `extras\bodky_r`, the first of the four colour arrays (red, blue, yellow, green) that follow each other 80 bytes apart.
 pub const BODKY_ARRAYS: u32 = 0x5e6b80;
+/// Bytes between two of the four colour arrays that start at [`BODKY_ARRAYS`].
 pub const BODKY_STRIDE: u32 = 80;
 
 /// The spark the Advancer gun's bullet (type 31) of `owner` (0 = player 0, anything else = the other sides) drops every
@@ -692,12 +725,17 @@ pub fn gun_trail(ty: u8, owner: i32) -> Option<AnimSpec> {
 /// first). None on the landing step. The flamers' puff (types 8 and 9, no jitter) is [`flame_trail`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Trail {
+    /// Path steps between two puffs.
     pub reload: i32,
+    /// The puff's animation.
     pub spec: AnimSpec,
+    /// Each axis gets `rand(jitter)` added to `offset`.
     pub jitter: u32,
+    /// Fixed part of the puff's offset from the path point, on each axis.
     pub offset: i32,
 }
 
+/// The smoke trail of bullet type `ty`, `None` for types that leave none.
 pub fn trail(ty: u8) -> Option<Trail> {
     let find = |site: u32| SPAWNS.iter().find(|s| s.site == site).map(|s| s.spec);
     Some(match ty {
@@ -711,6 +749,7 @@ pub fn trail(ty: u8) -> Option<Trail> {
     })
 }
 
+/// Every call site that creates an animation sprite with constant arguments.
 pub static SPAWNS: &[Spawn] = &[
     sp(0x40887d, 0x5e96a8, 0, 16, 3, "walker teleport, leaving"),
     sp(0x408a85, 0x5e96a8, 0, 16, 3, "walker teleport, arriving"),
@@ -730,7 +769,11 @@ pub static SPAWNS: &[Spawn] = &[
     sp(0x411721, 0x5ea1c0, 0, 42, 1, "meteor_small trail: meteor_small_smoke"),
     spm(0x4117e3, 0x5e6788, 4, 32, 2, 14, "missile smoke, later frames"),
     spm(0x4118aa, 0x5e6788, 0, 32, 2, 14, "missile smoke, all frames"),
-    Spawn { site: SPARK_TRAIL_SITE, spec: AnimSpec { array: 0x5e6bd0, from: 4, to: 6, period: 1, repeat: 3, mode: 6 }, what: "bullet type 27 (1S, walker 5W1) trail: a bodky_b spark, every interval path steps" },
+    Spawn {
+        site: SPARK_TRAIL_SITE,
+        spec: AnimSpec { array: 0x5e6bd0, from: 4, to: 6, period: 1, repeat: 3, mode: 6 },
+        what: "bullet type 27 (1S, walker 5W1) trail: a bodky_b spark, every interval path steps",
+    },
     sp(0x411952, 0x5e6230, 16, 22, 5, "flamer bullet (types 8, 9) trail puff: blast_verysmall tail frames"),
     sp(0x411ada, 0x71c548, 0, 14, 1, "menu light flash (bullet type 32)"),
     Spawn { site: 0x411c2d, spec: AnimSpec { array: 0x5e6bd0, from: 4, to: 6, period: 1, repeat: 3, mode: 6 }, what: "bodky_b spark (three passes)" },
@@ -778,7 +821,6 @@ mod tests {
         assert_eq!(Blit::of_routine(0x45c220), Blit::AddHalf);
     }
 
-
     #[test]
     fn extras_sit_at_distinct_addresses() {
         // `slots` is the loader's frame cap, not the file's frame count, so neighbours may overlap (sizer / plasma); the
@@ -810,7 +852,12 @@ mod tests {
     #[test]
     fn timer_animations_loop_or_end() {
         let mut a = BulletAnim::new([0, 3, 1, 2]);
-        let frames: Vec<i32> = (0..8).map(|_| { a.step(11, 0); a.frame }).collect();
+        let frames: Vec<i32> = (0..8)
+            .map(|_| {
+                a.step(11, 0);
+                a.frame
+            })
+            .collect();
         assert_eq!(frames, [1, 1, 2, 2, 0, 0, 1, 1]);
         let mut a = BulletAnim::new([0, 2, 1, 1]);
         assert!(a.step(23, 0));

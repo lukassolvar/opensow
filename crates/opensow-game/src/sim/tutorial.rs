@@ -7,6 +7,7 @@
 //! except for steps 1 and 17.
 
 use super::*;
+use opensow_formats::kinds;
 
 /// What the instruction panel has to do (drained by the front end).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -38,6 +39,7 @@ pub struct Tutorial {
     pub advancer_replaced: bool,
     /// The click on the arrow button happened (`[0x6bed13]` over pointer 0x7a).
     pub arrow_click: bool,
+    /// Events for the instruction panel; the front end drains them.
     pub events: Vec<TutEvent>,
 }
 
@@ -83,9 +85,36 @@ impl World {
         let max_hp = building_max_hp(kind_id);
         let weapon = if let ObjectKind::Turret(n) = kind { turret_weapon(n as u32) } else { 0 };
         let aim = (weapon != 0).then(|| TopAim::new(weapon, 0)).flatten();
-        let slots: Vec<SlotState> = slots.iter().filter_map(|&(k, m)| slot_target(k).filter(|_| k != 0).map(|target| SlotState { kind: k, progress: 0, target, level: 0, max_level: m, waiting: 0 })).collect();
+        let slots: Vec<SlotState> = slots
+            .iter()
+            .filter_map(|&(k, m)| {
+                slot_target(k).filter(|_| k != 0).map(|target| SlotState { kind: k, progress: 0, target, level: 0, max_level: m, waiting: 0, unlock: 0 })
+            })
+            .collect();
         let active = 1.min(slots.len());
-        self.add_structure(Structure { object: usize::MAX, kind, owner, cell, hp: max_hp, max_hp, aim, weapon, target: None, slots, active, kind_id, tally: [0; 3], heal: 0, upgrade: 0, protected: kind_id == 100, attacked: false, sat_cd: 0, advancer: None, rally: None, dying: None });
+        self.add_structure(Structure {
+            object: usize::MAX,
+            kind,
+            owner,
+            cell,
+            hp: max_hp,
+            max_hp,
+            aim,
+            weapon,
+            target: None,
+            slots,
+            active,
+            kind_id,
+            tally: [0; 3],
+            heal: 0,
+            upgrade: 0,
+            protected: kind_id == kinds::HEADQUARTERS,
+            attacked: false,
+            sat_cd: 0,
+            advancer: None,
+            rally: None,
+            dying: None,
+        });
         self.structures.len() - 1
     }
 
@@ -137,7 +166,7 @@ impl World {
             t.events.push(TutEvent::Step(t.step));
         }
         let (before, al) = (t.step, t.entered);
-        let player_hq = |s: &Structure| s.kind_id == 100;
+        let player_hq = |s: &Structure| s.kind_id == kinds::HEADQUARTERS;
         match before {
             0 | 1 | 4 | 6 | 11 | 14 | 18 | 23 | 26 => t.step = before + 1,
             2 => {
@@ -157,7 +186,7 @@ impl World {
                     self.tutorial_camera(0x120, 0x5c0);
                 } else if t.advancer_moved {
                     // `step = index + 6` of the selected Advancer: it is the first unit, index 0
-                    let idx = self.units.iter().filter(|u| u.player == 0 && u.hp > 0).position(|u| u.kind == 40 && u.selected).unwrap_or(0);
+                    let idx = self.units.iter().filter(|u| u.player == 0 && u.hp > 0).position(|u| u.kind == kinds::ADVANCER && u.selected).unwrap_or(0);
                     t.step = 6 + idx as u32;
                 }
             }
@@ -180,7 +209,7 @@ impl World {
                 // the last unit of the player that is not the Advancer: step = index + 9
                 let units: Vec<&Unit> = self.units.iter().filter(|u| u.player == 0 && u.hp > 0).collect();
                 for (i, u) in units.iter().enumerate() {
-                    if u.kind != 40 {
+                    if u.kind != kinds::ADVANCER {
                         t.step = 9 + i as u32;
                     }
                 }
@@ -200,7 +229,11 @@ impl World {
                     let k = self.tutorial_building((46, 39), Owner::Player, 101, &[(7, 0), (4, 0)]);
                     self.structures[k].hp = self.structures[k].max_hp / 2 - 100;
                     self.tutorial_camera(0x500, 0x5c0);
-                } else if self.tut_buildings().iter().any(|&b| self.structures[b].kind_id == 101 && self.structures[b].hp >= self.structures[b].max_hp) {
+                } else if self
+                    .tut_buildings()
+                    .iter()
+                    .any(|&b| self.structures[b].kind_id == kinds::LIGHT_FACTORY && self.structures[b].hp >= self.structures[b].max_hp)
+                {
                     t.step = 11;
                 }
             }
@@ -236,7 +269,7 @@ impl World {
                     self.tutorial_camera(0x340, 0x6a0);
                 } else {
                     let fighter = HEADER_ORDER.iter().position(|&h| h == AirForce::Fighter).unwrap_or(4);
-                    if self.tut_buildings().iter().any(|&b| self.structures[b].kind_id == 104) && self.air_stock[0][fighter] > 0 {
+                    if self.tut_buildings().iter().any(|&b| self.structures[b].kind_id == kinds::AIR_BASE) && self.air_stock[0][fighter] > 0 {
                         t.step = 16;
                     }
                 }
@@ -266,7 +299,7 @@ impl World {
             }
             20 => {
                 for (i, &b) in self.tut_buildings().iter().enumerate() {
-                    if self.structures[b].kind_id == 106 {
+                    if self.structures[b].kind_id == kinds::RESEARCH_LAB {
                         t.step = 21 + i as u32;
                     }
                 }
@@ -279,7 +312,7 @@ impl World {
             22 => {
                 for (i, &b) in self.tut_buildings().iter().enumerate() {
                     let s = &self.structures[b];
-                    if s.kind_id == 102 && s.slots.first().is_some_and(|sl| sl.level == 1) {
+                    if s.kind_id == kinds::MEDIUM_FACTORY && s.slots.first().is_some_and(|sl| sl.level == 1) {
                         t.step = 23 + i as u32;
                     }
                 }
@@ -301,13 +334,13 @@ impl World {
                     if t.advancer_replaced {
                         t.step = 25;
                     }
-                    if !self.structures.iter().any(|s| s.alive() && s.owner == Owner::Enemy && s.kind_id == 100) {
+                    if !self.structures.iter().any(|s| s.alive() && s.owner == Owner::Enemy && s.kind_id == kinds::HEADQUARTERS) {
                         t.step = 26;
                     }
                 }
             }
             25 => {
-                if !self.structures.iter().any(|s| s.alive() && s.owner == Owner::Enemy && s.kind_id == 100) {
+                if !self.structures.iter().any(|s| s.alive() && s.owner == Owner::Enemy && s.kind_id == kinds::HEADQUARTERS) {
                     t.step = 26;
                 }
             }

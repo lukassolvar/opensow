@@ -1,11 +1,11 @@
 //! Resolves level objects to sprite frames from the game's `sprites.data` archive.
 
-use opensow_formats::level::{Marker, Object, ObjectKind, Owner};
 use opensow_formats::anim::{phase_after, walk_params, WalkParams};
+use opensow_formats::buildings::BuildingAnim;
 use opensow_formats::fire::FireTables;
+use opensow_formats::level::{Marker, Object, ObjectKind, Owner};
 use opensow_formats::megafile::MegaFile;
 use opensow_formats::recoil::{fire_sequence, FireSequence, FLASH_SETS};
-use opensow_formats::buildings::BuildingAnim;
 use opensow_formats::sprite::{self, Frame, Kind};
 use opensow_formats::units::{unit_art, SheetSizes};
 use opensow_formats::GameDir;
@@ -16,11 +16,14 @@ use std::rc::Rc;
 /// Walk-cycle parameters of a chassis sprite: `frame = phase * steps + facing` (`facing` already scaled to `steps`).
 #[derive(Clone, Copy)]
 pub struct Walk {
+    /// The chassis kind's walking values.
     pub params: WalkParams,
+    /// The facing, already scaled to the chassis' number of facings.
     pub facing: usize,
 }
 
 impl Walk {
+    /// The sprite frame after `ticks` game ticks of walking.
     pub fn frame_at(&self, ticks: u32) -> usize {
         phase_after(self.params, ticks) as usize * self.params.steps as usize + self.facing
     }
@@ -29,28 +32,39 @@ impl Walk {
 /// Fire/recoil animation of a weapon top.
 #[derive(Clone)]
 pub struct Recoil {
+    /// The top kind's fire sequence.
     pub seq: FireSequence,
     /// Facings per phase of the top's sprite set (32, or 16 for the walker tops).
     pub steps: usize,
     /// Facing already scaled to `steps`.
     pub facing: usize,
+    /// The muzzle-flash sprite set, for tops that have one.
     pub flash: Option<Rc<Vec<Frame>>>,
 }
 
-/// One sprite to draw: `frame` of `set`, anchored (hotspot) at map pixel `ax,ay`.
+/// What a placed sprite belongs to.
 pub enum Source {
+    /// Object `i` of the level (a building or turret).
     Object(usize),
+    /// Unit marker `i` of the level.
     Marker(usize),
 }
 
+/// One sprite to draw: `frame` of `set`, anchored (hotspot) at map pixel `ax,ay`.
 pub struct Placed {
+    /// The level object or marker the sprite belongs to.
     pub source: Source,
     /// Draw order within the same row: chassis before top.
     pub layer: u8,
+    /// The sprite file's frames.
     pub set: Rc<Vec<Frame>>,
+    /// Which frame of `set` is shown.
     pub frame: usize,
+    /// The shadow sprite's frames and the frame shown, when the sprite has a shadow.
     pub shadow: Option<(Rc<Vec<Frame>>, usize)>,
+    /// Map pixel x of the sprite's hotspot.
     pub ax: i32,
+    /// Map pixel y of the sprite's hotspot.
     pub ay: i32,
     /// Draw-order key (`scene` sorts by it, then by layer): the object's foot line; a turret's top sits above its base but is drawn after it.
     pub sort_y: i32,
@@ -58,6 +72,7 @@ pub struct Placed {
     pub muzzles: Vec<(i32, i32)>,
     /// Set for chassis that animate while walking.
     pub walk: Option<Walk>,
+    /// Set for weapon tops that have a fire sequence.
     pub recoil: Option<Recoil>,
     /// Set for buildings with state art (`buildings::anim`).
     pub anim: Option<BuildingAnim>,
@@ -67,8 +82,11 @@ pub struct Placed {
 
 /// Team art of a building and what it currently shows.
 pub struct BuildArt {
+    /// The blue team's frames.
     pub blue: Rc<Vec<Frame>>,
+    /// The green team's frames.
     pub green: Rc<Vec<Frame>>,
+    /// Whose colours the building shows now.
     pub owner: Owner,
     /// `builds\\mask\\{stem}.msk`: the part of each building frame that stands in front of units (the exe draws it with the
     /// sprite, `0x4092f0` / `0x40df80`); the front ramp of a factory is left out, so units come out over it.
@@ -106,7 +124,16 @@ impl Placed {
             let set = if owner == Owner::Enemy { art.green.clone() } else { art.blue.clone() };
             if art.up {
                 let third = max_hp / 3;
-                (set, if hp < third { 0 } else if hp < 2 * third { 1 } else { 2 })
+                (
+                    set,
+                    if hp < third {
+                        0
+                    } else if hp < 2 * third {
+                        1
+                    } else {
+                        2
+                    },
+                )
             } else {
                 (set, a.frame(hp, max_hp, tick))
             }
@@ -121,6 +148,7 @@ impl Placed {
     }
 }
 
+/// Loads sprites from the install's `sprites.data` archive.
 pub struct Art {
     mega: MegaFile,
     /// The language pack's own `sprites.data` (`Data\DiffData\<pack>`): its files (HUD frame, pause menu, money, shortcuts ...) replace the base ones.
@@ -144,6 +172,7 @@ fn building_stem(kind: ObjectKind) -> Option<&'static str> {
 }
 
 impl Art {
+    /// Opens the sprite archive of an install; `None` when it cannot be read.
     pub fn open(game: &GameDir) -> Option<Art> {
         let mega = MegaFile::open(&game.data().join("sprites.info"), &game.data().join("sprites.data")).ok()?;
         let local = game.language().diff_dir().and_then(|d| {
@@ -172,7 +201,7 @@ impl Art {
     /// The header words `extra[0]`, `extra[1]` of frame 0 of every unit sheet (`units\\{name}_blue.ps6`), read without decoding the pixels:
     /// the numbers the exe's unit initialiser turns into the sprite size fields of a saved unit (`formats::units::SheetSizes`).
     pub fn sheet_sizes(&mut self) -> SheetSizes {
-        let mut words = |name: &str| -> Option<(u16, u16)> {
+        let words = |name: &str| -> Option<(u16, u16)> {
             let e = self.mega.find(&format!("units\\{name}_blue.ps6"))?;
             let d = self.mega.read(e).ok()?;
             // u32 frame size, then width, height, hot x, hot y, extra[0], extra[1]
@@ -203,7 +232,21 @@ impl Art {
                 let shadow = self.load(&format!("units\\{}_{team}.sha", t.top)).map(|s| (s, 0));
                 // tops are created facing north (docs/art.md); the game then turns them (aim and idle look-around)
                 let frame = 0;
-                out.push(Placed { source: Source::Object(index), layer: 1, set, frame, shadow, ax: x, ay: y + t.top_dy, sort_y: sort_y + 1, muzzles: self.muzzles(t.top, frame, x, y + t.top_dy), walk: None, recoil: None, anim: None, art: None });
+                out.push(Placed {
+                    source: Source::Object(index),
+                    layer: 1,
+                    set,
+                    frame,
+                    shadow,
+                    ax: x,
+                    ay: y + t.top_dy,
+                    sort_y: sort_y + 1,
+                    muzzles: self.muzzles(t.top, frame, x, y + t.top_dy),
+                    walk: None,
+                    recoil: None,
+                    anim: None,
+                    art: None,
+                });
             }
         }
         out
@@ -227,7 +270,21 @@ impl Art {
         let owner = o.owner();
         let mask = self.load(&format!("builds\\mask\\{stem}.msk"));
         let art = BuildArt { blue: blue.clone(), green: green.clone(), owner, mask, mask_frame: 0, up: false };
-        let mut p = Placed { source: Source::Object(index), layer: 0, set: blue, frame: 0, shadow, ax: cx, ay: cy, sort_y: cy, muzzles: vec![], walk: None, recoil: None, anim, art: Some(Box::new(art)) };
+        let mut p = Placed {
+            source: Source::Object(index),
+            layer: 0,
+            set: blue,
+            frame: 0,
+            shadow,
+            ax: cx,
+            ay: cy,
+            sort_y: cy,
+            muzzles: vec![],
+            walk: None,
+            recoil: None,
+            anim,
+            art: Some(Box::new(art)),
+        };
         p.set_building_state(owner, 1, 1, 0, 0);
         Some(p)
     }
@@ -266,7 +323,21 @@ impl Art {
                 (s, i)
             });
             // Marker pixels are the unit centre (cell*32+16).
-            out.push(Placed { source: Source::Marker(index), layer: layer as u8, set, frame, shadow, ax: m.x, ay: m.y, sort_y: m.y, muzzles, walk, recoil, anim: None, art: None });
+            out.push(Placed {
+                source: Source::Marker(index),
+                layer: layer as u8,
+                set,
+                frame,
+                shadow,
+                ax: m.x,
+                ay: m.y,
+                sort_y: m.y,
+                muzzles,
+                walk,
+                recoil,
+                anim: None,
+                art: None,
+            });
         }
         out
     }
@@ -296,13 +367,31 @@ mod tests {
     use super::*;
 
     fn set(n: usize, tag: u16) -> Rc<Vec<Frame>> {
-        Rc::new((0..n).map(|_| Frame { width: 1, height: 1, hot_x: 0, hot_y: 0, extra: [0; 4], pixels: vec![tag], mask: vec![true], enhanced: Default::default() }).collect())
+        Rc::new(
+            (0..n)
+                .map(|_| Frame { width: 1, height: 1, hot_x: 0, hot_y: 0, extra: [0; 4], pixels: vec![tag], mask: vec![true], enhanced: Default::default() })
+                .collect(),
+        )
     }
 
     fn placed(owner: Owner) -> Placed {
         let (blue, green) = (set(18, 1), set(17, 2));
         let art = BuildArt { blue: blue.clone(), green, owner, mask: None, mask_frame: 0, up: false };
-        Placed { source: Source::Object(0), layer: 0, set: blue, frame: 0, shadow: None, ax: 0, ay: 0, sort_y: 0, muzzles: vec![], walk: None, recoil: None, anim: opensow_formats::buildings::anim(106), art: Some(Box::new(art)) }
+        Placed {
+            source: Source::Object(0),
+            layer: 0,
+            set: blue,
+            frame: 0,
+            shadow: None,
+            ax: 0,
+            ay: 0,
+            sort_y: 0,
+            muzzles: vec![],
+            walk: None,
+            recoil: None,
+            anim: opensow_formats::buildings::anim(106),
+            art: Some(Box::new(art)),
+        }
     }
 
     #[test]

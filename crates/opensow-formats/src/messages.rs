@@ -32,21 +32,34 @@ pub const MESSAGES: [(u8, usize, Option<&str>); 24] = [
     (24, 143, Some("06-building-repaired.wav")),
 ];
 
+/// Event 1: a building was captured.
 pub const BUILDING_CAPTURED: u8 = 1;
+/// Event 2: a turret was destroyed.
 pub const TURRET_DESTROYED: u8 = 2;
+/// Event 3: a building was lost.
 pub const BUILDING_LOST: u8 = 3;
+/// Event 4: a building was upgraded.
 pub const BUILDING_UPGRADED: u8 = 4;
+/// Event 5: no space for units at a factory's exits.
 pub const NO_SPACE: u8 = 5;
+/// Event 7: a new turret is available.
 pub const NEW_TURRET: u8 = 7;
+/// Event 8: a new tech-level is available.
 pub const NEW_TECH_LEVEL: u8 = 8;
+/// Event 9: an Advancer was destroyed.
 pub const ADVANCER_DESTROYED: u8 = 9;
+/// Event 10: an Advancer disengaged.
 pub const ADVANCER_DISENGAGED: u8 = 10;
+/// Event 11: credits arrived.
 pub const CREDITS_ARRIVED: u8 = 11;
+/// Event 13: reinforcements arrived.
 pub const REINFORCEMENTS: u8 = 13;
+/// Event 23: a turret was repaired.
 pub const TURRET_REPAIRED: u8 = 23;
+/// Event 24: a building was repaired.
 pub const BUILDING_REPAIRED: u8 = 24;
 
-/// The "<force> ready" event for an air force code 30..=34 (bomber 18, carryall 19, asteroid 20, fighter 21, tripler 22).
+/// The "(force) ready" event for an air force code 30..=34 (bomber 18, carryall 19, asteroid 20, fighter 21, tripler 22).
 pub fn force_ready(code: i32) -> Option<u8> {
     Some(match code {
         30 => 18,

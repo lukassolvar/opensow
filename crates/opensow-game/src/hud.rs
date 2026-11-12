@@ -20,11 +20,19 @@ use opensow_formats::level::Owner;
 use opensow_formats::rally;
 use opensow_formats::sprite::rgb565_to_rgb8;
 use opensow_viewer::render::{rect, View};
-use opensow_viewer::scene::Scene;
 
 /// `radar.ps6` uses frame 0 (76x76) for these missions' 64x64 maps and frame 1 (108x92) for the rest (`0x45463e`).
 pub const SMALL_RADAR: [u32; 9] = [1, 2, 6, 9, 11, 12, 14, 16, 20];
+/// Warmonger's exe tests its own list for the small frame (`0x44eb11`, `0x44f5d9`).
+pub const SMALL_RADAR_WARMONGER: [u32; 5] = [1, 4, 6, 11, 20];
 
+/// Warmonger's radar picture: frame of `radar2.tsp` for a mission (byte table `0x44efc0` -> jump table `0x44ef90`): its eleven
+/// missions in order, any other number falls through with frame 0.
+pub fn radar2_frame(mission: u32) -> usize {
+    [1, 2, 3, 4, 6, 7, 11, 12, 15, 20, 22].iter().position(|&m| m == mission).unwrap_or(0)
+}
+
+/// What a point of the HUD does when clicked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hit {
     /// Part of the HUD without an action (swallows the click).
@@ -42,9 +50,15 @@ pub enum Hit {
 
 /// What decides which HUD parts exist.
 pub struct Inputs {
+    /// The campaign mission number, `None` outside the campaign.
     pub mission: Option<u32>,
+    /// The Warmonger campaign is played (its own radar list and pictures).
+    pub warmonger: bool,
+    /// Map size in cells (for the radar).
     pub map_cells: (i32, i32),
+    /// Whether the credits readout exists.
     pub show_credits: bool,
+    /// Whether the research readout exists.
     pub show_research: bool,
     /// Turret tiers (1-5) the level allows, in tab order from the right.
     pub tiers: Vec<u32>,
@@ -60,14 +74,18 @@ pub struct Inputs {
     pub rally_button: bool,
 }
 
+/// Where every HUD part sits for one window size, in window pixels.
 #[derive(Clone, Debug)]
 pub struct Layout {
+    /// Window pixels per pixel of the original's HUD art.
     pub s: f32,
-    pub w: i32,
-    pub h: i32,
+    /// The campaign mission number, `None` outside the campaign.
     pub mission: Option<u32>,
+    /// Position of the credits readout, when it exists.
     pub credits: Option<(i32, i32)>,
+    /// Position of the research readout, when it exists.
     pub research: Option<(i32, i32)>,
+    /// Top-left corner of the radar frame.
     pub radar_frame: (i32, i32),
     /// Which `radar.ps6` frame is the radar frame (0 or 1).
     pub radar_frame_index: usize,
@@ -75,6 +93,7 @@ pub struct Layout {
     pub radar_on: bool,
     /// Map area inside the radar frame, 1 cell = `s` pixels.
     pub radar: Rect,
+    /// Map size in cells.
     pub map_cells: (i32, i32),
     /// Tabs from the right: (tier, click rect, sprite top-left).
     pub tabs: Vec<(u32, Rect, (i32, i32))>,
@@ -83,6 +102,7 @@ pub struct Layout {
     /// The pills are disabled (3 s after a launch, widget state 2, `0x454e4e`): drawn half-additive (`0x45c220`), no info box and
     /// no click (`0x454d02`), the hover glow and sound stay (`0x456350` updates the widget regardless of its state).
     pub pills_locked: bool,
+    /// The info box's area, when it is open.
     pub info: Option<Rect>,
     /// Slot icons: (click rect, centre x, centre y).
     pub slots: Vec<(Rect, i32, i32)>,
@@ -98,10 +118,12 @@ pub fn pill_frame(f: AirForce) -> usize {
 }
 
 impl Layout {
+    /// Lays the HUD out for a `w` x `h` window at scale `s`.
     pub fn new(w: usize, h: usize, s: f32, i: &Inputs) -> Layout {
         let u = |v: i32| (v as f32 * s).round() as i32;
         let (w, h) = (w as i32, h as i32);
-        let frame_idx = if i.mission.is_some_and(|m| SMALL_RADAR.contains(&m)) { 0 } else { 1 };
+        let small: &[u32] = if i.warmonger { &SMALL_RADAR_WARMONGER } else { &SMALL_RADAR };
+        let frame_idx = if i.mission.is_some_and(|m| small.contains(&m)) { 0 } else { 1 };
         let radar_frame = (w - u(11) - u(i.map_cells.0), -u(1));
         let radar = Rect { x: radar_frame.0 + u(6), y: radar_frame.1 + u(6), w: u(i.map_cells.0), h: u(i.map_cells.1) };
         let credits = i.show_credits.then_some((u(3), u(3)));
@@ -158,9 +180,27 @@ impl Layout {
             let (x0, y0, x1, y1) = rally::BUTTON_RECT;
             (Rect { x: px + u(x0) + 1, y: py + u(y0) + 1, w: u(x1 - x0) - 1, h: u(y1 - y0) - 1 }, px, py)
         });
-        Layout { radar_on: true, s, w, h, mission: i.mission, credits, research, radar_frame, radar_frame_index: frame_idx, radar, map_cells: i.map_cells, tabs, pills, info: i.info, slots, arrows, rally, pills_locked: false }
+        Layout {
+            radar_on: true,
+            s,
+            mission: i.mission,
+            credits,
+            research,
+            radar_frame,
+            radar_frame_index: frame_idx,
+            radar,
+            map_cells: i.map_cells,
+            tabs,
+            pills,
+            info: i.info,
+            slots,
+            arrows,
+            rally,
+            pills_locked: false,
+        }
     }
 
+    /// What lies at a window position; `None` outside the HUD.
     pub fn hit(&self, x: i32, y: i32) -> Option<Hit> {
         if self.rally.is_some_and(|(r, ..)| r.contains(x, y)) {
             return Some(Hit::Rally);
@@ -218,11 +258,13 @@ impl Layout {
 
 /// What the HUD needs to know about the play screen.
 pub struct State<'a> {
-    pub scene: &'a Scene,
+    /// The camera.
     pub view: &'a View,
+    /// The mission's state.
     pub world: &'a World,
-    pub placing: Option<u32>,
+    /// The air strike that is armed and waits for a target click.
     pub strike: Option<AirForce>,
+    /// What the pointer is over.
     pub hover: Option<Hit>,
     /// Selected building (index into `world.structures`).
     pub building: Option<usize>,
@@ -235,7 +277,9 @@ fn dim(buf: &mut [u32], w: usize, h: usize, r: Rect, alpha: u32) {
 }
 
 fn frame_box(buf: &mut [u32], w: usize, h: usize, r: Rect, c: (u8, u8, u8)) {
-    for (a, b, cc, d) in [(r.x, r.y, r.x + r.w, r.y + 1), (r.x, r.y + r.h - 1, r.x + r.w, r.y + r.h), (r.x, r.y, r.x + 1, r.y + r.h), (r.x + r.w - 1, r.y, r.x + r.w, r.y + r.h)] {
+    for (a, b, cc, d) in
+        [(r.x, r.y, r.x + r.w, r.y + 1), (r.x, r.y + r.h - 1, r.x + r.w, r.y + r.h), (r.x, r.y, r.x + 1, r.y + r.h), (r.x + r.w - 1, r.y, r.x + r.w, r.y + r.h)]
+    {
         rect(buf, w, h, a, b, cc, d, c, 255);
     }
 }
@@ -259,6 +303,7 @@ fn counter(assets: &mut Assets, buf: &mut [u32], w: usize, h: usize, pos: (i32, 
     }
 }
 
+/// Draws the HUD's fixed parts: readouts, radar, turret tabs and air pills.
 pub fn draw(l: &Layout, st: &State, assets: &mut Assets, buf: &mut [u32], w: usize, h: usize) {
     let s = l.s;
     let u = |v: i32| (v as f32 * s).round() as i32;
@@ -272,8 +317,14 @@ pub fn draw(l: &Layout, st: &State, assets: &mut Assets, buf: &mut [u32], w: usi
             if let Some(pic) = radar.as_ref().and_then(|set| set.get(plate)) {
                 ui::sprite(buf, w, h, pic, l.radar.x - u(1), l.radar.y - u(1), s);
             }
-        } else if let (Some(set), Some(m)) = (&radar, l.mission) {
-            if let Some(pic) = set.get(5 + m as usize).filter(|_| m >= 1) {
+        } else if let Some(m) = l.mission.filter(|&m| m >= 1) {
+            // Warmonger: its own `radar2.tsp` (`0x44ebb4`); the base game: `radar.ps6` frame 5 + mission
+            let (set, k) = if assets.game.edition == opensow_formats::Edition::Warmonger {
+                (assets.warmonger_radar(), radar2_frame(m))
+            } else {
+                (radar.clone(), 5 + m as usize)
+            };
+            if let Some(pic) = set.as_ref().and_then(|set| set.get(k)) {
                 // `0x454697`: additive over the world, plain when the level's weather word `[0x49a354]` is 2
                 ui::sprite_add_or_plain_mode(buf, w, h, pic, l.radar.x, l.radar.y, s, st.world.weather != 2);
             }
@@ -328,7 +379,7 @@ pub fn draw(l: &Layout, st: &State, assets: &mut Assets, buf: &mut [u32], w: usi
     let digits = assets.art.load("__extras\\panel2nu.ps6");
     let aura = assets.art.load("extras\\ikonyaura.ps6");
     // air pills: the force's pill, its stock in small digits (`0x4543a2`..`0x4544e9`)
-    for (f, r, cx, cy) in &l.pills {
+    for (f, _r, cx, cy) in &l.pills {
         let g = opensow_formats::air::HEADER_ORDER.iter().position(|x| x == f).unwrap_or(0);
         let stock = st.world.air_stock[0][g];
         if let Some(fr) = icons.as_ref().and_then(|set| set.get(pill_frame(*f))) {
@@ -419,7 +470,7 @@ pub fn draw_slots(l: &Layout, st: &State, assets: &mut Assets, buf: &mut [u32], 
             (true, (sl.progress as u64 * 33 / sl.target as u64) as i32)
         } else if !first_locked_done && sl.target > 0 {
             first_locked_done = true;
-            (false, (b.upgrade.max(0) as u64 * 33 / sl.target as u64) as i32)
+            (false, (b.upgrade.max(0) as u64 * 33 / sl.unlock_points().max(1) as u64) as i32)
         } else {
             continue;
         };
@@ -453,7 +504,19 @@ mod tests {
     use super::*;
 
     fn inputs() -> Inputs {
-        Inputs { mission: Some(12), map_cells: (64, 64), show_credits: true, show_research: true, tiers: vec![1, 2, 3], pills: vec![AirForce::Bomber, AirForce::Fighter], info: None, slots: 0, buy: Vec::new(), rally_button: false }
+        Inputs {
+            mission: Some(12),
+            warmonger: false,
+            map_cells: (64, 64),
+            show_credits: true,
+            show_research: true,
+            tiers: vec![1, 2, 3],
+            pills: vec![AirForce::Bomber, AirForce::Fighter],
+            info: None,
+            slots: 0,
+            buy: Vec::new(),
+            rally_button: false,
+        }
     }
 
     #[test]
@@ -476,7 +539,7 @@ mod tests {
         assert_eq!((l.radar.x, l.radar.y), (640 - 11 - 64 + 6, 5));
         // tab 0 is the rightmost, centred 11 px from the right edge and 21 px above the bottom
         assert_eq!(l.tabs[0].2, (640 - 11 - 46, 480 - 21 - 21));
-        assert_eq!(l.tabs[1].2.0, 640 - 11 - 57 - 46);
+        assert_eq!(l.tabs[1].2 .0, 640 - 11 - 57 - 46);
         // pills: centre x 31, y 60 + 51 n
         assert_eq!((l.pills[0].2, l.pills[0].3), (31, 60));
         assert_eq!(l.pills[1].3, 111);
@@ -547,6 +610,15 @@ mod tests {
         let l = Layout::new(1024, 768, 1.0, &i);
         assert_eq!(l.credits, None);
         assert_eq!(l.research, Some((3, 3)));
+    }
+
+    #[test]
+    fn warmonger_uses_its_own_small_radar_list_and_pictures() {
+        let at = |m: u32, warmonger: bool| Layout::new(640, 480, 1.0, &Inputs { mission: Some(m), warmonger, ..inputs() }).radar_frame_index;
+        assert_eq!([2, 4, 12].map(|m| at(m, false)), [0, 1, 0], "the base game's list");
+        assert_eq!([2, 4, 12].map(|m| at(m, true)), [1, 0, 1], "Warmonger's list (0x44eb11)");
+        assert_eq!([1, 2, 3, 4, 6, 7, 11, 12, 15, 20, 22].map(radar2_frame), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(radar2_frame(5), 0, "other numbers fall through with frame 0");
     }
 
     #[test]

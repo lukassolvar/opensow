@@ -18,6 +18,7 @@
 //!
 //! Pure: the caller describes the Advancers, the buildings and the anti-air threats; no random numbers are drawn.
 
+use opensow_formats::kinds;
 use serde::{Deserialize, Serialize};
 
 /// Flight speed: 30 px/s (`anim::walk_params(40)`) = one cell per 64 ticks.
@@ -47,6 +48,7 @@ pub enum Rel {
     Neutral,
 }
 
+/// What an Advancer can be sent to do at a building or turret.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Job {
     Destroy,
@@ -59,9 +61,13 @@ pub enum Job {
 pub struct Site {
     /// Index in the world's structure list.
     pub index: usize,
+    /// Object kind number.
     pub kind_id: i32,
+    /// Whose it is, seen from the side that plans.
     pub rel: Rel,
+    /// Hit points now.
     pub hp: i32,
+    /// Hit points when undamaged.
     pub max_hp: i32,
     /// Upgrade points still missing for the next slot (0 when it cannot be upgraded).
     pub upgrade_left: i32,
@@ -75,21 +81,21 @@ pub struct Site {
 
 impl Site {
     fn is_turret(&self) -> bool {
-        (25..=29).contains(&self.kind_id)
+        kinds::TURRETS.contains(&self.kind_id)
     }
 
     /// What the building is worth to own (capture) or to improve.
     pub fn worth(&self) -> f32 {
         match self.kind_id {
-            100 => 10.0,              // HQ (own: repair; enemy HQs are satellite-protected)
-            105 => 9.0,               // gold mine: credits
-            103 | 108 => 8.0,         // heavy and walker factories
-            102 => 7.0,               // medium factory
-            106 => 6.0,               // research lab
-            101 | 104 => 5.0,         // light factory, air base
-            107 => 4.0,               // windtrap
-            26 => 4.0,                // anti-air turret: opens the sky
-            25 | 27..=29 => 3.0,      // other turrets
+            100 => 10.0,         // HQ (own: repair; enemy HQs are satellite-protected)
+            105 => 9.0,          // gold mine: credits
+            103 | 108 => 8.0,    // heavy and walker factories
+            102 => 7.0,          // medium factory
+            106 => 6.0,          // research lab
+            101 | 104 => 5.0,    // light factory, air base
+            107 => 4.0,          // windtrap
+            26 => 4.0,           // anti-air turret: opens the sky
+            25 | 27..=29 => 3.0, // other turrets
             _ => 2.0,
         }
     }
@@ -98,6 +104,7 @@ impl Site {
 /// Something that shoots the Advancer: an anti-air turret or unit, or an enemy Advancer.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Threat {
+    /// Where it stands.
     pub cell: (i32, i32),
     /// Reach in cells.
     pub range: f32,
@@ -108,9 +115,13 @@ pub struct Threat {
 /// One of the computer's Advancers.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Adv {
+    /// The unit's id.
     pub id: u32,
+    /// The cell it is over.
     pub cell: (i32, i32),
+    /// Hit points now.
     pub hp: i32,
+    /// Hit points when undamaged.
     pub max_hp: i32,
     /// Hovering over its job's cell (beaming).
     pub working: bool,
@@ -124,13 +135,19 @@ pub struct Adv {
 /// A job in progress.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Task {
+    /// The Advancer's unit id.
     pub unit: u32,
+    /// The site (structure index) it works on.
     pub target: usize,
+    /// What it does there.
     pub job: Job,
+    /// The Advancer's hit points when it took the job (to notice a losing fight).
     pub start_hp: i32,
     /// The nearest it came to the job's cell (cells) and when.
     pub best: f32,
+    /// The tick when it last came nearer (see `best`).
     pub best_tick: u64,
+    /// The planner's score of the job when it was chosen.
     pub score: f32,
     /// Taken although too risky, because nothing safe was left ([`forced_job`]): it is not broken off under fire.
     #[serde(default)]
@@ -140,16 +157,22 @@ pub struct Task {
 /// A target to stay away from until `until`; `danger` is the fire there when it was given up.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Denied {
+    /// The site (structure index) to avoid.
     pub target: usize,
+    /// The tick the ban ends.
     pub until: u64,
+    /// How many times this target has been given up.
     pub strikes: u32,
+    /// The fire there when it was given up.
     pub danger: f32,
 }
 
 /// The computer's memory about its Advancers (per side, it survives their death).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Mind {
+    /// The jobs in progress.
     pub tasks: Vec<Task>,
+    /// The targets to stay away from for now.
     pub denied: Vec<Denied>,
     /// Strict priorities (Easy and Normal, [`ranked`]) instead of weighing gain against time.
     #[serde(default)]
@@ -233,7 +256,17 @@ pub fn score(a: &Adv, s: &Site, job: Job, threats: &[Threat], rate: i32, home: O
     let value = match job {
         // capturing takes the building from the enemy as well; a turret is only removed
         // a captured building is a whole building (with its levels if it was neutral): worth 3 upgrade levels
-        Job::Destroy => s.worth() * if s.is_turret() { 0.7 } else if s.rel == Rel::Foe { 4.2 } else { 3.0 } * nearness(a, s, home),
+        Job::Destroy => {
+            s.worth()
+                * if s.is_turret() {
+                    0.7
+                } else if s.rel == Rel::Foe {
+                    4.2
+                } else {
+                    3.0
+                }
+                * nearness(a, s, home)
+        }
         Job::Repair => s.worth() * (1.0 - s.hp as f32 / s.max_hp.max(1) as f32),
         Job::Upgrade => s.worth() * 1.5,
     };
@@ -264,7 +297,16 @@ fn rank(a: &Adv, s: &Site, job: Job) -> u8 {
 }
 
 /// The best job for Advancer `a`; `busy` are targets other Advancers of the side already work on.
-pub fn best_job(mind: &Mind, a: &Adv, sites: &[Site], threats: &[Threat], rate: i32, tick: u64, busy: &[usize], home: Option<(i32, i32)>) -> Option<(usize, Job, f32)> {
+pub fn best_job(
+    mind: &Mind,
+    a: &Adv,
+    sites: &[Site],
+    threats: &[Threat],
+    rate: i32,
+    tick: u64,
+    busy: &[usize],
+    home: Option<(i32, i32)>,
+) -> Option<(usize, Job, f32)> {
     let mut best: Option<(usize, Job, f32)> = None;
     for s in sites {
         let Some(job) = job_for(s) else { continue };
@@ -278,7 +320,7 @@ pub fn best_job(mind: &Mind, a: &Adv, sites: &[Site], threats: &[Threat], rate: 
         }
         let Some(v) = score(a, s, job, threats, rate, home) else { continue };
         let v = ranked(a, s, job, v, mind, home);
-        if best.map_or(true, |(_, _, b)| v > b + 1e-4) {
+        if best.is_none_or(|(_, _, b)| v > b + 1e-4) {
             best = Some((s.index, job, v));
         }
     }
@@ -313,7 +355,16 @@ pub fn ranked(a: &Adv, s: &Site, job: Job, v: f32, mind: &Mind, home: Option<(i3
 /// the Advancer is shot down and a new one comes for free, so a player keeps pushing the best target: per job the share of
 /// the work that can be done before the hit points run out (after the flight there), times its worth; a target it cannot
 /// even reach alive, a satellite-protected one and one remembered as unreachable (no route) are left out.
-pub fn forced_job(mind: &Mind, a: &Adv, sites: &[Site], threats: &[Threat], rate: i32, tick: u64, busy: &[usize], home: Option<(i32, i32)>) -> Option<(usize, Job, f32)> {
+pub fn forced_job(
+    mind: &Mind,
+    a: &Adv,
+    sites: &[Site],
+    threats: &[Threat],
+    rate: i32,
+    tick: u64,
+    busy: &[usize],
+    home: Option<(i32, i32)>,
+) -> Option<(usize, Job, f32)> {
     let mut best: Option<(usize, Job, f32)> = None;
     for s in sites {
         let Some(job) = job_for(s) else { continue };
@@ -332,7 +383,7 @@ pub fn forced_job(mind: &Mind, a: &Adv, sites: &[Site], threats: &[Threat], rate
         let strikes = mind.denied.iter().find(|d| d.target == s.index && d.until > tick).map_or(0, |d| d.strikes);
         let near = if job == Job::Destroy { nearness(a, s, home) } else { 1.0 };
         let v = s.worth() * near * done * 60.0 / ((fly + work.min(left / fire.max(1e-6))) / 60.0 + 20.0) / (1.0 + 0.5 * strikes as f32);
-        if best.map_or(true, |(_, _, b)| v > b + 1e-4) {
+        if best.is_none_or(|(_, _, b)| v > b + 1e-4) {
             best = Some((s.index, job, v));
         }
     }
@@ -357,7 +408,7 @@ fn deny(mind: &mut Mind, target: usize, tick: u64, danger: f32) {
 /// One look at every Advancer of the side. Returns the orders to give; Advancers not listed keep what they do.
 pub fn think(mind: &mut Mind, advs: &[Adv], sites: &[Site], threats: &[Threat], rate: i32, tick: u64) -> Vec<(u32, Order)> {
     let site = |k: usize| sites.iter().find(|s| s.index == k);
-    let home = sites.iter().find(|s| s.rel == Rel::Own && s.kind_id == 100).map(|s| s.action_cell);
+    let home = sites.iter().find(|s| s.rel == Rel::Own && s.kind_id == kinds::HEADQUARTERS).map(|s| s.action_cell);
     // shot down on the job: remember the place
     let lost: Vec<Task> = mind.tasks.iter().copied().filter(|t| !advs.iter().any(|a| a.id == t.unit)).collect();
     for t in lost {
@@ -381,52 +432,53 @@ pub fn think(mind: &mut Mind, advs: &[Adv], sites: &[Site], threats: &[Threat], 
                 mind.tasks[n].best = d;
                 mind.tasks[n].best_tick = tick;
             }
-            if target.is_none() {
-                mind.tasks.remove(n); // done or gone: choose again below
-            } else if !t.forced && here > 0.0 && (t.start_hp - a.hp) as f32 > BREAK_OFF * a.max_hp as f32 {
-                // losing the fight: break off, remember, go home
-                let s = target.unwrap();
-                deny(mind, t.target, tick, danger(threats, s.action_cell).max(here));
-                mind.tasks.remove(n);
-                if let Some(c) = shelter(a, sites, threats) {
-                    orders.push((a.id, Order::Retreat(c)));
+            match target {
+                None => {
+                    mind.tasks.remove(n); // done or gone: choose again below
                 }
-                continue;
-            } else if !a.working && tick.saturating_sub(mind.tasks[n].best_tick) > STUCK {
-                // no step closer for a long time: unreachable for now
-                deny(mind, t.target, tick, 0.0);
-                mind.tasks.remove(n);
-            } else if a.working {
-                continue; // never switch in the middle of the beam work
-            } else if t.forced {
-                // a forced push gives way to any safe job that turned up
-                let busy: Vec<usize> = mind.tasks.iter().filter(|o| o.unit != a.id).map(|o| o.target).collect();
-                match best_job(mind, a, sites, threats, rate, tick, &busy, home) {
-                    Some((k, job, b)) => {
+                Some(s) => {
+                    if !t.forced && here > 0.0 && (t.start_hp - a.hp) as f32 > BREAK_OFF * a.max_hp as f32 {
+                        // losing the fight: break off, remember, go home
+                        deny(mind, t.target, tick, danger(threats, s.action_cell).max(here));
                         mind.tasks.remove(n);
-                        mind.tasks.push(Task { unit: a.id, target: k, job, start_hp: a.hp, best: f32::MAX, best_tick: tick, score: b, forced: false });
-                        orders.push((a.id, Order::Go { target: k, job }));
-                    }
-                    None => {}
-                }
-                continue;
-            } else {
-                // still flying: switch only to a clearly better job
-                let busy: Vec<usize> = mind.tasks.iter().filter(|o| o.unit != a.id).map(|o| o.target).collect();
-                let now = score(a, target.unwrap(), t.job, threats, rate, home).map(|v| ranked(a, target.unwrap(), t.job, v, mind, home));
-                match (now, best_job(mind, a, sites, threats, rate, tick, &busy, home)) {
-                    (None, _) => {
-                        // the way got too dangerous: give it up
-                        deny(mind, t.target, tick, danger(threats, target.unwrap().action_cell).max(0.01));
-                        mind.tasks.remove(n);
-                    }
-                    (Some(v), Some((k, job, b))) if k != t.target && b > 2.0 * v => {
-                        mind.tasks.remove(n);
-                        mind.tasks.push(Task { unit: a.id, target: k, job, start_hp: a.hp, best: f32::MAX, best_tick: tick, score: b, forced: false });
-                        orders.push((a.id, Order::Go { target: k, job }));
+                        if let Some(c) = shelter(a, sites, threats) {
+                            orders.push((a.id, Order::Retreat(c)));
+                        }
                         continue;
+                    } else if !a.working && tick.saturating_sub(mind.tasks[n].best_tick) > STUCK {
+                        // no step closer for a long time: unreachable for now
+                        deny(mind, t.target, tick, 0.0);
+                        mind.tasks.remove(n);
+                    } else if a.working {
+                        continue; // never switch in the middle of the beam work
+                    } else if t.forced {
+                        // a forced push gives way to any safe job that turned up
+                        let busy: Vec<usize> = mind.tasks.iter().filter(|o| o.unit != a.id).map(|o| o.target).collect();
+                        if let Some((k, job, b)) = best_job(mind, a, sites, threats, rate, tick, &busy, home) {
+                            mind.tasks.remove(n);
+                            mind.tasks.push(Task { unit: a.id, target: k, job, start_hp: a.hp, best: f32::MAX, best_tick: tick, score: b, forced: false });
+                            orders.push((a.id, Order::Go { target: k, job }));
+                        }
+                        continue;
+                    } else {
+                        // still flying: switch only to a clearly better job
+                        let busy: Vec<usize> = mind.tasks.iter().filter(|o| o.unit != a.id).map(|o| o.target).collect();
+                        let now = score(a, s, t.job, threats, rate, home).map(|v| ranked(a, s, t.job, v, mind, home));
+                        match (now, best_job(mind, a, sites, threats, rate, tick, &busy, home)) {
+                            (None, _) => {
+                                // the way got too dangerous: give it up
+                                deny(mind, t.target, tick, danger(threats, s.action_cell).max(0.01));
+                                mind.tasks.remove(n);
+                            }
+                            (Some(v), Some((k, job, b))) if k != t.target && b > 2.0 * v => {
+                                mind.tasks.remove(n);
+                                mind.tasks.push(Task { unit: a.id, target: k, job, start_hp: a.hp, best: f32::MAX, best_tick: tick, score: b, forced: false });
+                                orders.push((a.id, Order::Go { target: k, job }));
+                                continue;
+                            }
+                            _ => continue,
+                        }
                     }
-                    _ => continue,
                 }
             }
         }
@@ -453,9 +505,9 @@ mod tests {
     use super::*;
 
     fn site(index: usize, kind_id: i32, rel: Rel, cell: (i32, i32)) -> Site {
-        let max_hp = if (25..=29).contains(&kind_id) { 900 } else { 13536 };
+        let max_hp = if kinds::TURRETS.contains(&kind_id) { 900 } else { 13536 };
         let hp = if rel == Rel::Neutral { max_hp / 2 } else { max_hp };
-        Site { index, kind_id, rel, hp, max_hp, upgrade_left: 0, protected: kind_id == 100, action_cell: cell, healing: false }
+        Site { index, kind_id, rel, hp, max_hp, upgrade_left: 0, protected: kind_id == kinds::HEADQUARTERS, action_cell: cell, healing: false }
     }
 
     fn adv(cell: (i32, i32)) -> Adv {
@@ -665,7 +717,7 @@ mod tests {
         assert_eq!(go(&think(&mut m, &[adv((11, 11))], &sites, &[], 10, 0)), Some(1));
         // it never gets closer than where it started
         for t in (30..=STUCK + 60).step_by(30) {
-            let o = think(&mut m, &[adv((11, 11))], &sites, &[], 10, t as u64);
+            let o = think(&mut m, &[adv((11, 11))], &sites, &[], 10, t);
             if let Some(k) = go(&o) {
                 assert_eq!(k, 2, "it gives up the unreachable one");
                 return;

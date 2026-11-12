@@ -13,14 +13,18 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+/// The first word of an index file.
 pub const MAGIC: u32 = 0x0101_0101;
 const NAME_SHIFT: u8 = 10;
 
+/// One file of the archive, as the index lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     /// Original Windows-style path, e.g. `units\tur_05_blue.ps6`.
     pub name: String,
+    /// Where the file starts in the `.data` file.
     pub offset: u32,
+    /// Its length in bytes.
     pub size: u32,
 }
 
@@ -39,6 +43,7 @@ pub fn build(files: &[(String, Vec<u8>)]) -> (Vec<u8>, Vec<u8>) {
     (info, data)
 }
 
+/// Parses an index file (`sprites.info`).
 pub fn parse_index(info: &[u8]) -> Result<Vec<Entry>> {
     let mut r = Reader::new(info);
     let magic = r.u32("megafile magic")?;
@@ -56,11 +61,13 @@ pub fn parse_index(info: &[u8]) -> Result<Vec<Entry>> {
 
 /// An opened archive; reads entries lazily from the data file.
 pub struct MegaFile {
+    /// Every file of the archive, in index order.
     pub entries: Vec<Entry>,
     data_path: PathBuf,
 }
 
 impl MegaFile {
+    /// Opens an archive: reads the whole index, and remembers where the data file is.
     pub fn open(info_path: &Path, data_path: &Path) -> Result<MegaFile> {
         let entries = parse_index(&std::fs::read(info_path)?)?;
         let data_len = std::fs::metadata(data_path)?.len();
@@ -77,6 +84,7 @@ impl MegaFile {
         self.entries.iter().find(|e| norm(&e.name) == want)
     }
 
+    /// Reads one file's bytes from the data file.
     pub fn read(&self, entry: &Entry) -> Result<Vec<u8>> {
         let mut f = File::open(&self.data_path)?;
         f.seek(SeekFrom::Start(entry.offset as u64))?;

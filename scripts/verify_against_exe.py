@@ -13,6 +13,7 @@ The exe is only read, never modified or copied. Checks (random inputs, exact com
   * 0x46a190  one turn step                vs `opensow turn`
   * 0x467ee0  aircraft launch (fields)     vs `opensow launch`    (all five air forces, random targets)
   * 0x468960  carryall squad unload        vs `opensow squad`     (indices 0..17; unit-creation call recorded)
+  * 0x4378d0  scatter line (key X)       vs `opensow scatter`   (3000 random cases)
   * 0x46bc70  Advancer hover table       vs `opensow hover`     (42 phases)
   * 0x4753a0  wave pathfinder              vs `opensow wave`      (random grids, 300 searches incl. failures; every second
                                            search runs the air layer 0x474b30)
@@ -291,6 +292,23 @@ for _ in range(1500):
     c, s_ = struct.unpack("<i", mu.mem_read(BULLET + 0x1C, 4))[0], struct.unpack("<i", mu.mem_read(BULLET + 0x40, 4))[0]
     bad += f"{s_} {c}" != sh("beamtick", st, cnt, rl)
 report("beam cooldown tick (0x47c6b0)", 1500, bad)
+
+# 0a. scatter line (0x4378d0(&x, &y, cx, cy, n), key X) vs `opensow scatter` (batched, five numbers per case)
+bad, cases, outs = 0, [], []
+for i in range(3000):
+    r = 4 if i % 3 == 0 else 140
+    px, py = random.randint(0, r), random.randint(0, r)
+    cx, cy = (px, py) if i % 50 == 0 else (random.randint(0, r), random.randint(0, r))
+    n = random.choice([-2, 0, 1, 2, 4, 6, 6, 6, 10, 11])
+    mu.mem_write(BULLET, struct.pack("<ii", px, py))
+    call(0x4378D0, [BULLET, BULLET + 4, cx, cy, n])
+    outs.append("%d,%d" % struct.unpack("<ii", mu.mem_read(BULLET, 8)))
+    cases += [px, py, cx, cy, n]
+rust = []
+for k in range(0, len(cases), 500):
+    rust += sh("scatter", *cases[k : k + 500]).split()
+bad = sum(a != b for a, b in zip(outs, rust)) + abs(len(outs) - len(rust))
+report("scatter line (0x4378d0)", len(outs), bad)
 
 # 0b. frame effects of the pause (0x45d3a0) and of the mission-end banner (0x45d400; globals: width [0x49a340], height [0x49a344],
 #     pixel format [0x517aec] == 2 is RGB565, anything else the 555 branch)

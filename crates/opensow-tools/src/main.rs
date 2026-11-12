@@ -1,6 +1,6 @@
 //! `opensow` - inspect and extract assets from a State of War installation.
 
-use opensow_formats::{aim, font, lang, level, projectile, recoil, map, megafile::MegaFile, sprite, srf, GameDir};
+use opensow_formats::{aim, font, lang, level, map, megafile::MegaFile, projectile, recoil, sprite, srf, GameDir};
 mod art;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -107,7 +107,10 @@ fn run(args: &[String]) -> Res<()> {
             let again = st.to_bytes();
             println!("rewrite {}", if again.as_deref() == Some(&bytes[..]) { "ok" } else { "DIFFERS" });
             let h = &st.head;
-            println!("head {} {} {} {} {} {} {} {} {} {}", h.level, h.rng_index, h.v_5baafc, h.flag_49a339 as u8, h.v_5baad8, h.v_5baadc, h.v_5baac4, h.v_5baac8, h.flag_5baa99 as u8, h.v_89cf50);
+            println!(
+                "head {} {} {} {} {} {} {} {} {} {}",
+                h.level, h.rng_index, h.v_5baafc, h.flag_49a339 as u8, h.v_5baad8, h.v_5baadc, h.v_5baac4, h.v_5baac8, h.flag_5baa99 as u8, h.v_89cf50
+            );
             let hex = |v: &[u8]| v.iter().map(|b| format!("{b:02x}")).collect::<String>();
             for p in 0..3 {
                 println!("pw {p} {} {} {}", st.player_words[p][0], st.player_words[p][1], st.player_words[p][2]);
@@ -134,14 +137,25 @@ fn run(args: &[String]) -> Res<()> {
                 }
             }
             println!("decalflags {}", hex(&st.decal_flags));
-            println!("decals {} clouds {} speech {} players {} stocks {} params {}", st.decals.len(), st.clouds.len(), st.speech.len(), st.players.len(), st.stocks.len(), st.params.len());
+            println!(
+                "decals {} clouds {} speech {} players {} stocks {} params {}",
+                st.decals.len(),
+                st.clouds.len(),
+                st.speech.len(),
+                st.players.len(),
+                st.stocks.len(),
+                st.params.len()
+            );
             for (i, sp) in st.speech.iter().enumerate() {
                 println!("speechitems {i} {}", sp.orders.iter().map(|o| o.strings[0].clone()).collect::<Vec<_>>().join("|"));
             }
         }
         ["saverec", class, hexfile] => {
             // parse one record (hex text file), print every field as `path offset value` and whether write(parse(x)) == x
-            use opensow_formats::{saveobj::{Class, Object}, Reader};
+            use opensow_formats::{
+                saveobj::{Class, Object},
+                Reader,
+            };
             let text = std::fs::read_to_string(hexfile)?;
             let t = text.trim();
             let bytes: Vec<u8> = (0..t.len() / 2).map(|i| u8::from_str_radix(&t[2 * i..2 * i + 2], 16)).collect::<Result<_, _>>()?;
@@ -159,7 +173,25 @@ fn run(args: &[String]) -> Res<()> {
         }
         ["savelayout"] => {
             use opensow_formats::saveobj::Class;
-            for c in [Class::Unit, Class::Top, Class::Chassis, Class::Order, Class::Weapon, Class::Building, Class::BuildingPart, Class::Bullet, Class::Aircraft, Class::Decal, Class::Cloud, Class::PlayerState, Class::Stock, Class::Params, Class::Speech, Class::SpeechItem, Class::MapItem] {
+            for c in [
+                Class::Unit,
+                Class::Top,
+                Class::Chassis,
+                Class::Order,
+                Class::Weapon,
+                Class::Building,
+                Class::BuildingPart,
+                Class::Bullet,
+                Class::Aircraft,
+                Class::Decal,
+                Class::Cloud,
+                Class::PlayerState,
+                Class::Stock,
+                Class::Params,
+                Class::Speech,
+                Class::SpeechItem,
+                Class::MapItem,
+            ] {
                 let (v, m) = c.header();
                 let f: Vec<String> = c.scalars().iter().map(|&(o, b)| format!("{}{:#x}", if b { "b" } else { "u" }, o)).collect();
                 println!("{c:?} {v} {m:#x} {}", f.join(" "));
@@ -190,7 +222,20 @@ fn run(args: &[String]) -> Res<()> {
                         BulletExtra::Variant(v) => (3, v),
                         BulletExtra::Variant2(v) => (4, v),
                     };
-                    println!("{} {} {} {} {} {} {} {} {} {} {xi} {xv} {}", b.ty, b.owner, b.points[0], b.points[1], b.points[2], b.points[3], b.word2698, b.strength, b.word26b0, b.word26b4, b.flag.map_or(-1, |f| f as i32));
+                    println!(
+                        "{} {} {} {} {} {} {} {} {} {} {xi} {xv} {}",
+                        b.ty,
+                        b.owner,
+                        b.points[0],
+                        b.points[1],
+                        b.points[2],
+                        b.points[3],
+                        b.word2698,
+                        b.strength,
+                        b.word26b0,
+                        b.word26b4,
+                        b.flag.map_or(-1, |f| f as i32)
+                    );
                 }
                 "air" => {
                     let a = AirSync::parse(&mut r)?;
@@ -200,7 +245,12 @@ fn run(args: &[String]) -> Res<()> {
                     let u = UnitSync::parse(&mut r)?;
                     let mut line = format!("{} {} {} {} {} {} {}", u.kind, u.handle, u.player, u.cell.0, u.cell.1, u.home.0, u.home.1);
                     match u.chassis {
-                        Some(c) => line += &format!(" C {} {} {} {} {} {} {} {} {}", c.steps[0], c.steps[1], c.steps[2], c.steps[3], c.goal.0, c.goal.1, c.words.0, c.words.1, c.approaching as u8),
+                        Some(c) => {
+                            line += &format!(
+                                " C {} {} {} {} {} {} {} {} {}",
+                                c.steps[0], c.steps[1], c.steps[2], c.steps[3], c.goal.0, c.goal.1, c.words.0, c.words.1, c.approaching as u8
+                            )
+                        }
                         None => line += " N",
                     }
                     match u.top {
@@ -215,7 +265,10 @@ fn run(args: &[String]) -> Res<()> {
         }
         ["netmsg", hex, bits] => {
             // decode a whole frame message (docs/network.md): a client's command queues (type bit 0 = 1) or the host's snapshot
-            use opensow_formats::{net::{Bits, Header}, netsync::*};
+            use opensow_formats::{
+                net::{Bits, Header},
+                netsync::*,
+            };
             let bytes: Vec<u8> = (0..hex.len() / 2).map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16)).collect::<Result<_, _>>()?;
             let n: usize = bits.parse()?;
             let h = Header::parse(&bytes, n)?;
@@ -254,7 +307,7 @@ fn run(args: &[String]) -> Res<()> {
             };
             let out: Vec<String> = rest
                 .chunks(2)
-                .map(|c| Ok(format!("{:04x}", mode.apply565(u16::from_str_radix(&c[0], 16)?, u16::from_str_radix(c.get(1).map_or("0", |s| &s[..]), 16)?))))
+                .map(|c| Ok(format!("{:04x}", mode.apply565(u16::from_str_radix(c[0], 16)?, u16::from_str_radix(c.get(1).map_or("0", |s| &s[..]), 16)?))))
                 .collect::<Result<_, std::num::ParseIntError>>()?;
             println!("{}", out.join(" "));
         }
@@ -338,6 +391,13 @@ fn run(args: &[String]) -> Res<()> {
         }
         ["cfglayout"] => println!("Options 1 0x1d6c u0xc u0x14 u0x18 u0x1c u0x20 b0x8 b0x9 b0x10 b0x11 u0x24"),
         ["weapons"] => print_weapons(),
+        // scatter line (0x4378d0): `scatter PX PY CX CY N` prints where it stops; several cases may follow, five numbers each
+        ["scatter", nums @ ..] if !nums.is_empty() && nums.len().is_multiple_of(5) => {
+            let v: Vec<i32> = nums.iter().map(|s| s.parse()).collect::<Result<_, _>>()?;
+            let out: Vec<String> =
+                v.chunks(5).map(|c| opensow_formats::scatter::extend((c[0], c[1]), (c[2], c[3]), c[4])).map(|(x, y)| format!("{x},{y}")).collect();
+            println!("{}", out.join(" "));
+        }
         ["hover"] => println!("{}", opensow_formats::anim::HOVER_TABLE.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" ")),
         ["beamtick", state, counter, reload] => {
             let mut t = opensow_formats::advancer::BeamTimer { enabled: true, state: state.parse()?, counter: counter.parse()?, reload: reload.parse()? };
@@ -380,8 +440,26 @@ fn run(args: &[String]) -> Res<()> {
             let force = AirForce::from_code(code.parse()?).ok_or("unknown air force code (30..=34)")?;
             let a = Aircraft::launch(force, tx.parse()?, ty.parse()?, side.parse()?, cells.parse()?, counter.parse()?);
             let v = [
-                a.x, a.y, a.target.0, a.target.1, a.altitude, a.speed, force.code(), a.hp, a.right as i32, a.death_timer, a.frame, a.frames,
-                a.anim_count, a.anim_reload, a.counter, a.state, a.reach, a.off_x, a.off_y, a.squad as i32,
+                a.x,
+                a.y,
+                a.target.0,
+                a.target.1,
+                a.altitude,
+                a.speed,
+                force.code(),
+                a.hp,
+                a.right as i32,
+                a.death_timer,
+                a.frame,
+                a.frames,
+                a.anim_count,
+                a.anim_reload,
+                a.counter,
+                a.state,
+                a.reach,
+                a.off_x,
+                a.off_y,
+                a.squad as i32,
             ];
             println!("{}", v.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(" "));
         }
@@ -435,7 +513,15 @@ fn run(args: &[String]) -> Res<()> {
             w.cells = bytes.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).take(16384).collect();
             w.base = base.parse()?;
             let rings = opensow_formats::rings::Rings::generate();
-            let r = opensow_formats::freecell::free_cell_near(&mut w, &rings, own.parse()?, (dx.parse()?, dy.parse()?), (ax.parse()?, ay.parse()?), *layer == "air", (mw.parse()?, mh.parse()?));
+            let r = opensow_formats::freecell::free_cell_near(
+                &mut w,
+                &rings,
+                own.parse()?,
+                (dx.parse()?, dy.parse()?),
+                (ax.parse()?, ay.parse()?),
+                *layer == "air",
+                (mw.parse()?, mh.parse()?),
+            );
             let sum = w.cells.iter().enumerate().fold(0u32, |a, (i, &v)| a.wrapping_add((i as u32 + 1).wrapping_mul(v)));
             let d = r.destination.map_or("none".to_string(), |(x, y)| format!("{x} {y}"));
             println!("{} {} {} {}", u8::from(r.found), w.base, d, sum);
@@ -450,7 +536,8 @@ fn run(args: &[String]) -> Res<()> {
             let mut cells: Vec<u32> = bytes.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
             let mut b: u32 = base.parse()?;
             let chase = if layer.first().is_some_and(|l| *l == "air") { opensow_formats::wave::approach_air } else { opensow_formats::wave::approach };
-            let r = chase(&mut cells, &mut b, (w.parse()?, h.parse()?), (ux.parse()?, uy.parse()?), (tx.parse()?, ty.parse()?), handle.parse()?, range.parse()?);
+            let r =
+                chase(&mut cells, &mut b, (w.parse()?, h.parse()?), (ux.parse()?, uy.parse()?), (tx.parse()?, ty.parse()?), handle.parse()?, range.parse()?);
             match r {
                 Some((x, y)) => println!("ok {x} {y} {b}"),
                 None => println!("fail {b}"),
@@ -555,8 +642,25 @@ fn check(game: &GameDir) -> Res<()> {
         let Some(kind) = sprite::Kind::from_extension(Path::new(&e.name)) else { continue };
         report(format!("sprites.data:{}", e.name), mega.read(e).and_then(|d| sprite::parse(&d, kind)).map(drop));
     }
+    // the players' own skirmish maps (docs/map-editor-ingame.md): `maps` in the per-user data folder
+    let maps = std::env::var_os("OPENSOW_MAPS_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| opensow_formats::launcher::data_dir().join("maps"));
+    let mut custom: Vec<_> = std::fs::read_dir(&maps)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case(opensow_formats::custommap::EXTENSION)))
+        .collect();
+    custom.sort();
+    for p in custom {
+        report(p.display().to_string(), std::fs::read(&p).map_err(Into::into).and_then(|d| opensow_formats::custommap::CustomMap::parse(&d)).map(drop));
+    }
     println!("{ok} ok, {bad} failed");
-    if bad > 0 { Err("some assets failed to parse".into()) } else { Ok(()) }
+    if bad > 0 {
+        Err("some assets failed to parse".into())
+    } else {
+        Ok(())
+    }
 }
 
 fn sprite_sheet(src: &Path, dst: &Path, cols: Option<usize>) -> Res<()> {
@@ -609,7 +713,26 @@ fn map_image(src: &Path, dst: &Path) -> Res<()> {
 }
 
 fn print_level(src: &Path) -> Res<()> {
-    let l = level::Level::parse(&std::fs::read(src)?)?;
+    let data = std::fs::read(src)?;
+    // a custom map (docs/map-editor-ingame.md): its level part, then the port's block
+    let l = match level::Level::parse(&data) {
+        Ok(l) => l,
+        Err(_) => {
+            let m = opensow_formats::custommap::CustomMap::parse(&data)?;
+            println!("custom map \"{}\" on {} mission {}", m.name, if m.warmonger { "Warmonger" } else { "State of War" }, m.level.level_id());
+            println!("  mission: win rule {:?}, countdown {:?}", m.mission.win, m.timer());
+            if !m.escort.is_empty() {
+                println!("  escort: {:?}, pods {}", m.escort, opensow_formats::custommap::pods(&m.level, 0));
+            }
+            if !m.reinforcement.is_empty() {
+                println!("  reinforcement: {:?}", m.reinforcement);
+            }
+            for (i, e) in m.ext.iter().enumerate().filter(|(_, e)| !e.is_default()) {
+                println!("  object {i}: unlock points {:?}{}", e.unlock, if e.no_advancer { ", no Advancer" } else { "" });
+            }
+            m.level
+        }
+    };
     println!("version {} id {} resources {:?}", l.version, l.level_id(), l.start_resources());
     let nz: Vec<_> = l.header.iter().enumerate().skip(2).filter(|(_, &v)| v != 0).map(|(i, v)| format!("@{}={v}", i * 4)).collect();
     println!("header: {}", nz.join(" "));
@@ -621,7 +744,14 @@ fn print_level(src: &Path) -> Res<()> {
         println!("{:<14} {:<8?} cell ({:3},{:3}) hp {:5} kind {}{}", o.object_kind().name(), o.owner(), o.cell_x, o.cell_y, o.hp(), o.kind, extra);
     }
     for m in &l.markers {
-        println!("unit {:<26} player {} cell {:?} hp {:?} kind {}", level::UnitKind::describe(m.kind), m.player, m.cell(), level::UnitKind::max_hp(m.kind), m.kind);
+        println!(
+            "unit {:<26} player {} cell {:?} hp {:?} kind {}",
+            level::UnitKind::describe(m.kind),
+            m.player,
+            m.cell(),
+            level::UnitKind::max_hp(m.kind),
+            m.kind
+        );
     }
     Ok(())
 }
@@ -731,7 +861,7 @@ fn print_lang(game: &GameDir, code: &str, index: Option<usize>) -> Res<()> {
     let path = game.resolve(&format!("Data\\Language\\{}", l.file_name())).ok_or("language file not found")?;
     let f = lang::LangFile::parse(&std::fs::read(path)?)?;
     let damaged = f.damaged();
-    for (i, s) in f.strings.iter().enumerate().filter(|(i, _)| index.map_or(true, |n| n == *i)) {
+    for (i, s) in f.strings.iter().enumerate().filter(|(i, _)| index.is_none_or(|n| n == *i)) {
         println!("{i:3}{} {}", if damaged.contains(&i) { "!" } else { " " }, s.replace("\r\n", " / "));
     }
     if index.is_none() {
@@ -741,9 +871,7 @@ fn print_lang(game: &GameDir, code: &str, index: Option<usize>) -> Res<()> {
 }
 
 fn print_weapons() {
-    let units = [
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 41, 42, 43, 44, 45,
-    ];
+    let units = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 41, 42, 43, 44, 45];
     println!("kind  weapon              range  reload(+-jitter)  volley ticks  shots  bullet  speed/60t  strength  damage/volley");
     for kind in units {
         let (Some(a), Some(seq), Some((bt, strength)), Some(art)) =
@@ -845,8 +973,16 @@ fn print_path(t: u8, x1: i32, y1: i32, x2: i32, y2: i32, delay: u32) -> Res<()> 
 
 /// `opensow local|local2`: file = 16384 little-endian `u32` unit grid, the static grid (and for `local2` the first step grid);
 /// route = x y pairs (the unit's cell first). Prints `stop new-base | next | local route`.
-#[allow(clippy::too_many_arguments)]
-fn local_cmd(file: &str, ubase: &str, sbase: &str, fbase: Option<(&str, bool)>, own: &str, ax: &str, ay: &str, route: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+fn local_cmd(
+    file: &str,
+    ubase: &str,
+    sbase: &str,
+    fbase: Option<(&str, bool)>,
+    own: &str,
+    ax: &str,
+    ay: &str,
+    route: &[&str],
+) -> Result<(), Box<dyn std::error::Error>> {
     let bytes = std::fs::read(file)?;
     let words: Vec<u32> = bytes.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
     let mut w = opensow_formats::wave::Wave::new(|_, _| false);
@@ -898,11 +1034,13 @@ fn netstep_cmd(kv: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
         route_len: get("routelen").parse()?,
         ..Default::default()
     };
+    /// What the planner answers: the first step cell, the second step cell and the pixel line.
+    type Plan = ((i32, i32), (i32, i32), Vec<(i32, i32)>);
     struct Rec {
         calls: Vec<String>,
         guest: bool,
         route_ok: bool,
-        plan: ((i32, i32), (i32, i32), Vec<(i32, i32)>),
+        plan: Plan,
     }
     impl NetHost for Rec {
         fn is_guest(&self) -> bool {
@@ -941,7 +1079,26 @@ fn netstep_cmd(kv: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
     let line = c.line.iter().map(|(x, y)| format!("{x},{y}")).collect::<Vec<_>>().join(";");
     println!(
         "pos={},{} since={},{} line=[{}] prev={},{} step1={},{} step2={},{} facing={} want={} frame={} cd={} anim={},{} routelen={} stat={} calls={}",
-        c.pos.0, c.pos.1, c.since.0, c.since.1, line, c.prev.0, c.prev.1, c.step1.0, c.step1.1, c.step2.0, c.step2.1, c.facing, c.want, c.frame, c.cooldown, c.anim_count, c.phase, c.route_len, sum, host.calls.join(" ")
+        c.pos.0,
+        c.pos.1,
+        c.since.0,
+        c.since.1,
+        line,
+        c.prev.0,
+        c.prev.1,
+        c.step1.0,
+        c.step1.1,
+        c.step2.0,
+        c.step2.1,
+        c.facing,
+        c.want,
+        c.frame,
+        c.cooldown,
+        c.anim_count,
+        c.phase,
+        c.route_len,
+        sum,
+        host.calls.join(" ")
     );
     Ok(())
 }
@@ -976,10 +1133,19 @@ fn print_turret_ai(file: &Path) -> Res<()> {
     }
     let mut next = rng.into_iter();
     let mut tries = Vec::new();
-    let res = plan(&buildings, &slots, me, credits, &flags, |c| aa.contains(&c), |n| next.next().unwrap_or(0) % n, |x, y, w, h| {
-        tries.push(format!("try {x} {y} {w} {h}"));
-        ((x * 31 + y * 17) & 7) < 3
-    });
+    let res = plan(
+        &buildings,
+        &slots,
+        me,
+        credits,
+        &flags,
+        |c| aa.contains(&c),
+        |n| next.next().unwrap_or(0) % n,
+        |x, y, w, h| {
+            tries.push(format!("try {x} {y} {w} {h}"));
+            ((x * 31 + y * 17) & 7) < 3
+        },
+    );
     for t in tries {
         println!("{t}");
     }

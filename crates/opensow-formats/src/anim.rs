@@ -15,7 +15,9 @@
 //! The chassis initialiser sets `[obj+8] = 16` explicitly for kinds 41-46 (kinds 1-15 and 40 keep the default 32).
 
 use crate::facing::turn_step;
+use crate::kinds;
 
+/// A chassis kind's walking values: animation phases and speed, turn speed, facings, pixels per second.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WalkParams {
     /// Number of animation phases (0 = not animated).
@@ -36,8 +38,11 @@ pub struct WalkParams {
 /// 4th tick (`0x46e069`, tick-in-second % 4 == 0) and wraps to 0 after [`HOVER_PHASES`] - 1; the sprite is drawn
 /// `HOVER_TABLE[phase] + HOVER_ALTITUDE` pixels below the unit's ground position (`[obj+0x88]` = -64 for every unit,
 /// but only air-flagged units add it), with the shadow on the ground.
-pub const HOVER_TABLE: [i32; 42] = [-6, -6, -6, -6, -5, -5, -5, -4, -4, -3, -2, -1, 0, 1, 2, 3, 4, 4, 5, 5, 5, 6, 6, 6, 6, 5, 5, 5, 4, 4, 3, 2, 1, 0, -1, -2, -3, -4, -4, -5, -5, -5];
+pub const HOVER_TABLE: [i32; 42] =
+    [-6, -6, -6, -6, -5, -5, -5, -4, -4, -3, -2, -1, 0, 1, 2, 3, 4, 4, 5, 5, 5, 6, 6, 6, 6, 5, 5, 5, 4, 4, 3, 2, 1, 0, -1, -2, -3, -4, -4, -5, -5, -5];
+/// Number of entries of [`HOVER_TABLE`].
 pub const HOVER_PHASES: u32 = 42;
+/// `[obj+0x88]`: how far above its ground position a flying unit is drawn, in pixels (negative = up).
 pub const HOVER_ALTITUDE: i32 = -64;
 /// Ticks between hover phase steps.
 pub const HOVER_PERIOD: u64 = 4;
@@ -55,7 +60,9 @@ pub fn walk_params(kind: i32) -> Option<WalkParams> {
     Some(match kind {
         1..=15 => WalkParams { phases: 3, period: GROUND_PERIODS[(kind - 1) as usize], turn_delay: 4, steps: 32, speed: GROUND_SPEEDS[(kind - 1) as usize] },
         40 => WalkParams { phases: 0, period: 0x3e8, turn_delay: 0, steps: 32, speed: 30 },
-        41..=45 => WalkParams { phases: 10, period: WALKER_PERIODS[(kind - 41) as usize], turn_delay: 4, steps: 16, speed: WALKER_SPEEDS[(kind - 41) as usize] },
+        41..=45 => {
+            WalkParams { phases: 10, period: WALKER_PERIODS[(kind - 41) as usize], turn_delay: 4, steps: 16, speed: WALKER_SPEEDS[(kind - 41) as usize] }
+        }
         46 => WalkParams { phases: 3, period: 3, turn_delay: 4, steps: 16, speed: 30 },
         _ => return None,
     })
@@ -66,7 +73,7 @@ pub fn walk_params(kind: i32) -> Option<WalkParams> {
 /// What those modes are was not traced.
 pub fn walk_params_for_mode(kind: i32, mode: u32) -> Option<WalkParams> {
     let p = walk_params(kind)?;
-    Some(if kind == 46 && (mode == 3 || mode == 8) { WalkParams { period: 13, speed: 7, ..p } } else { p })
+    Some(if kind == kinds::POD && (mode == 3 || mode == 8) { WalkParams { period: 13, speed: 7, ..p } } else { p })
 }
 
 /// Facings per phase for a sprite set with `frames` frames.
@@ -83,22 +90,28 @@ pub fn phase_after(params: WalkParams, ticks: u32) -> u32 {
     ((ticks + params.period) / (params.period + 1)) % params.phases
 }
 
+/// A chassis' animation state: the facing it turns through and the walk phase.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChassisAnim {
     params: WalkParams,
     steps: u32,
+    /// The facing shown now.
     pub facing: u32,
+    /// The facing the chassis is turning to.
     pub target: u32,
+    /// The walk animation phase shown now.
     pub phase: u32,
     turn_counter: i32,
     anim_counter: i32,
 }
 
 impl ChassisAnim {
+    /// A chassis with `steps` facings that stands still and points at `facing`.
     pub fn new(params: WalkParams, steps: u32, facing: u32) -> ChassisAnim {
         ChassisAnim { params, steps, facing, target: facing, phase: 0, turn_counter: params.turn_delay as i32, anim_counter: 0 }
     }
 
+    /// Sets the facing to turn to (taken modulo the number of facings).
     pub fn set_target(&mut self, facing: u32) {
         self.target = facing % self.steps;
     }
@@ -159,6 +172,7 @@ impl ChassisAnim {
         f == self.target
     }
 
+    /// The sprite frame to draw: `phase * steps + facing`.
     pub fn frame(&self) -> u32 {
         crate::facing::frame(self.phase, self.facing, self.steps)
     }

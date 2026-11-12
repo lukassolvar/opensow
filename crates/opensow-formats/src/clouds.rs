@@ -27,15 +27,19 @@ pub fn count_for_detail(detail: u32) -> usize {
 /// One cloud (`+4` x, `+8` y, `+0xc` speed, `+0x10` picture).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cloud {
+    /// `+4`: x position.
     pub x: i32,
+    /// `+8`: y position.
     pub y: i32,
+    /// `+0xc`: speed.
     pub speed: u32,
+    /// `+0x10`: which cloud picture is drawn.
     pub picture: u32,
 }
 
 impl Cloud {
-    /// Constructor `0x4145a0` / re-roll `0x414770` (same four draws in this order): `x = rand(400) - 800`, `y = rand(height * 32 - 200)
-    /// + 100`, `speed = rand(30) + 10`, `picture = rand(5)`. `height` is the map height in cells (`[0x71cec4]`).
+    /// Constructor `0x4145a0` / re-roll `0x414770` (same four draws in this order): `x = rand(400) - 800`, `y =
+    /// rand(height * 32 - 200) + 100`, `speed = rand(30) + 10`, `picture = rand(5)`. `height` is the map height in cells (`[0x71cec4]`).
     pub fn roll(height: i32, rand: &mut impl FnMut(u32) -> u32) -> Cloud {
         let x = rand(400) as i32 - 800;
         let y = rand((height * 32 - 200).max(0) as u32) as i32 + 100;
@@ -76,6 +80,7 @@ impl Cloud {
 /// The cloud list.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Sky {
+    /// The clouds, in list order.
     pub clouds: Vec<Cloud>,
 }
 

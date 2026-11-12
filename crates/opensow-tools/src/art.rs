@@ -215,7 +215,8 @@ fn jpeg_from_png(path: &Path, quality: u8) -> Res<Vec<u8>> {
 pub fn import(game: &GameDir, src: &Path, out: &Path, quality: u8, alpha: u8) -> Res<()> {
     let text = std::fs::read_to_string(src.join("manifest.csv")).map_err(|e| format!("{}/manifest.csv: {e}", src.display()))?;
     // one entry per original file: its targets and the edited images present for it
-    let mut entries: BTreeMap<String, (Vec<Target>, Vec<(usize, String)>, Option<String>)> = BTreeMap::new();
+    type Entry = (Vec<Target>, Vec<(usize, String)>, Option<String>);
+    let mut entries: BTreeMap<String, Entry> = BTreeMap::new();
     for line in text.lines().skip(1) {
         let c: Vec<&str> = line.splitn(7, ',').collect();
         if c.len() < 7 {

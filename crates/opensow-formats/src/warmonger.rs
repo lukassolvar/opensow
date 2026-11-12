@@ -14,7 +14,9 @@ pub struct LandText {
     pub heading: String,
     /// `Coordinate: X8A3`
     pub coordinate: String,
+    /// The briefing text.
     pub briefing: String,
+    /// The objective text.
     pub objective: String,
 }
 
@@ -69,7 +71,15 @@ mod tests {
     fn parses_eleven_land_texts() {
         let t = parse_texts(&fake()).unwrap();
         assert_eq!(t.len(), 11);
-        assert_eq!(t[3], LandText { heading: "TERRITORY : 04   DIFFICULTY : 2 / 10".into(), coordinate: "Coordinate: A4".into(), briefing: "Brief 4.".into(), objective: "Objective: 4".into() });
+        assert_eq!(
+            t[3],
+            LandText {
+                heading: "TERRITORY : 04   DIFFICULTY : 2 / 10".into(),
+                coordinate: "Coordinate: A4".into(),
+                briefing: "Brief 4.".into(),
+                objective: "Objective: 4".into()
+            }
+        );
         assert_eq!(case_of(22), Some(10));
         assert_eq!(case_of(5), None);
     }

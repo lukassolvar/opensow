@@ -123,7 +123,8 @@ mod tests {
         let mut level = Level { version: 4, header: [0; opensow_formats::level::HEADER_WORDS], objects: Vec::new(), markers: Vec::new() };
         let mk = |raw: [i32; 19]| opensow_formats::level::Object { kind: raw[1], cell_x: raw[16], cell_y: raw[17], raw };
         level.objects = vec![mk(raw), mk(hq1), mk(neutral)];
-        level.markers = vec![opensow_formats::level::Marker { kind: 40, player: 0, x: 1, y: 2 }, opensow_formats::level::Marker { kind: 1, player: 1, x: 3, y: 4 }];
+        level.markers =
+            vec![opensow_formats::level::Marker { kind: 40, player: 0, x: 1, y: 2 }, opensow_formats::level::Marker { kind: 1, player: 1, x: 3, y: 4 }];
         level
     }
 
@@ -175,7 +176,11 @@ mod tests {
 
     #[test]
     fn every_tweak_names_an_object_and_puts_it_on_free_buildable_ground_of_the_real_map() {
-        use opensow_formats::{buildings::footprint, map::Map, maptweak::{apply, Tweaks}};
+        use opensow_formats::{
+            buildings::footprint,
+            map::Map,
+            maptweak::{apply, Tweaks},
+        };
         let Some(game) = opensow_formats::GameDir::locate() else { return };
         let tweaks = Tweaks::parse(TWEAKS).unwrap();
         for (name, edits) in &tweaks.maps {
@@ -188,29 +193,43 @@ mod tests {
             let (tg, mission) = game.net_terrain(stem, level.level_id());
             let map = Map::parse(&std::fs::read(tg.resolve(&format!("Data\\Levels\\{mission}.map")).unwrap()).unwrap()).unwrap();
             for (i, o) in level.objects.iter().enumerate() {
-                let moved = tracked.object_origin[i].map_or(true, |j| (raw.objects[j].cell_x, raw.objects[j].cell_y) != (o.cell_x, o.cell_y));
+                let moved = tracked.object_origin[i].is_none_or(|j| (raw.objects[j].cell_x, raw.objects[j].cell_y) != (o.cell_x, o.cell_y));
                 if !moved {
                     continue;
                 }
                 let (w, h, _) = footprint(o.kind).unwrap_or((1, 1, 0));
                 for y in o.cell_y..o.cell_y + h {
                     for x in o.cell_x..o.cell_x + w {
-                        let c = map.cell(x as u32, y as u32).unwrap_or_else(|| panic!("{name}: {} at ({},{}) leaves the map", o.object_kind().name(), o.cell_x, o.cell_y));
+                        let c = map
+                            .cell(x as u32, y as u32)
+                            .unwrap_or_else(|| panic!("{name}: {} at ({},{}) leaves the map", o.object_kind().name(), o.cell_x, o.cell_y));
                         assert!(!c.blocked && !c.no_build, "{name}: ({x},{y}) under {} is not buildable", o.object_kind().name());
                     }
                 }
                 for (j, p) in level.objects.iter().enumerate().filter(|&(j, _)| j != i) {
                     let (pw, ph, _) = footprint(p.kind).unwrap_or((1, 1, 0));
                     let overlap = p.cell_x < o.cell_x + w && o.cell_x < p.cell_x + pw && p.cell_y < o.cell_y + h && o.cell_y < p.cell_y + ph;
-                    assert!(!overlap, "{name}: {} at ({},{}) overlaps object {j} {} at ({},{})", o.object_kind().name(), o.cell_x, o.cell_y, p.object_kind().name(), p.cell_x, p.cell_y);
+                    assert!(
+                        !overlap,
+                        "{name}: {} at ({},{}) overlaps object {j} {} at ({},{})",
+                        o.object_kind().name(),
+                        o.cell_x,
+                        o.cell_y,
+                        p.object_kind().name(),
+                        p.cell_x,
+                        p.cell_y
+                    );
                 }
             }
             for (side, label) in [(0, "blue"), (1, "green")] {
-                assert!(level.objects.iter().any(|o| o.kind == 100 && o.raw[14] == side), "{name}: {label} keeps a headquarters");
+                assert!(
+                    level.objects.iter().any(|o| o.kind == opensow_formats::kinds::HEADQUARTERS && o.raw[14] == side),
+                    "{name}: {label} keeps a headquarters"
+                );
             }
             // a building that a tweak made blue or green (added, or neutral before) starts at full hit points, not the neutral half
             for (i, o) in level.objects.iter().enumerate().filter(|(_, o)| o.raw[14] != 2) {
-                let was_neutral = tracked.object_origin[i].map_or(true, |j| raw.objects[j].raw[14] == 2);
+                let was_neutral = tracked.object_origin[i].is_none_or(|j| raw.objects[j].raw[14] == 2);
                 if was_neutral {
                     assert_eq!(o.raw[18], 100, "{name}: {} at ({},{}) would start damaged", o.object_kind().name(), o.cell_x, o.cell_y);
                 }
@@ -222,7 +241,7 @@ mod tests {
     fn only_goldmine_valley_gets_start_units() {
         let u = start_units("01-goldmine valley");
         assert_eq!(u.len(), 12);
-        assert!(u.iter().all(|&k| (1..=15).contains(&k) && (k - 1) % 3 == 0), "tier 1 only: {u:?}");
+        assert!(u.iter().all(|&k| opensow_formats::kinds::GROUND_UNITS.contains(&k) && (k - 1) % 3 == 0), "tier 1 only: {u:?}");
         assert!(!u.contains(&1), "no anti-air units");
         assert!(start_units("02-Ice Blizzard").is_empty() && start_units("03-Gold Rush").is_empty());
     }

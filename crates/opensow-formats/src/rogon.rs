@@ -12,7 +12,7 @@
 //!   bullet type 35, an explosion sprite, and when `k % 17 == 1` a sound (67 if `random(4) == 1`, else 19).
 
 /// Unit kind of the bomb.
-pub const KIND: i32 = 46;
+pub const KIND: i32 = crate::kinds::POD;
 /// Bullet type of the explosion (HQs are immune).
 pub const BULLET_TYPE: u8 = 35;
 /// Starting value of the event counter (`0x411e86`).
@@ -26,7 +26,7 @@ pub const LAST_RING: usize = 7;
 
 /// Walkers keep their handle in the second grid, which the touch test does not read.
 pub fn can_touch(target_kind: i32) -> bool {
-    !(41..=45).contains(&target_kind)
+    !crate::kinds::WALKERS.contains(&target_kind)
 }
 
 /// `0x46df40`: the bomb at cell `bomb` touches a target whose handle sits on any of `target_cells` when one of them lies in the
@@ -41,7 +41,9 @@ pub fn touches(bomb: (i32, i32), target_cells: impl IntoIterator<Item = (i32, i3
 pub struct Blast {
     /// Offset of the blast centre from `(x + 16, y + 16)` in cells.
     pub dx: i32,
+    /// Y offset of the blast centre, in cells (see `dx`).
     pub dy: i32,
+    /// The blast's area damage strength.
     pub strength: i32,
     /// Whether this blast rumbles (`k % 17 == 1`).
     pub sound: bool,
@@ -66,6 +68,7 @@ impl Explosion {
         (self.counter, self.k)
     }
 
+    /// An explosion with the given countdown `counter` and blast index `k`.
     pub fn from_parts(counter: i32, k: usize) -> Explosion {
         Explosion { counter, k }
     }
@@ -116,7 +119,7 @@ mod tests {
         assert_eq!(b.len(), 20, "counter 21 -> 20 steps in the first tick");
         assert_eq!(b[0], Blast { dx: 1, dy: 2, strength: 369, sound: true });
         assert_eq!(b[17], Blast { dx: 18, dy: 19, strength: 352, sound: true });
-        assert_eq!(b[1].sound, false);
+        assert!(!b[1].sound);
         let (b, _) = e.step(&words, 100);
         assert_eq!(b.len(), 1);
         assert_eq!(b[0].strength, 349);

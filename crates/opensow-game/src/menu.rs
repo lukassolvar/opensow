@@ -3,18 +3,20 @@
 use crate::assets::Assets;
 use crate::ui::{self, Rect};
 
+/// What a menu button does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     NewGame,
     /// Main menu TUTORIAL: mission M00 straight away (no briefing movie), `0x4460a0` case 2 -> state 5 (docs/tutorial.md).
     Tutorial,
-    Unavailable(&'static str),
     Options,
     /// The load page (state `0x11`).
     LoadGame,
     Multiplayer,
     /// Main menu SKIRMISH: a match on a multiplayer map against the computer (not in the original, docs/skirmish.md).
     Skirmish,
+    /// Main menu MAP EDITOR: the players' own skirmish maps (not in the original, docs/map-editor-ingame.md).
+    MapEditor,
     /// The prototype's own settings (game speed, health bars ...), key `P`.
     Prototype,
     Exit,
@@ -29,6 +31,7 @@ pub enum Action {
     ToMain,
 }
 
+/// The screens the game can show on top of or instead of a mission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Screen {
     Main,
@@ -39,33 +42,59 @@ pub enum Screen {
     Message(String),
 }
 
+/// The prototype's own settings and the option values the mission screen needs.
 #[derive(Debug, Clone)]
 pub struct Settings {
+    /// Game speed in ticks per second (60 is the original's).
     pub ticks_per_second: u32,
+    /// Draw health bars over units.
     pub hp_bars: bool,
+    /// Draw weapon ranges of the selection.
     pub show_range: bool,
     /// Production is not implemented, so missions that start with few units get a free squad next to the Advancer.
     pub starter_squad: bool,
     /// Options menu "KEYS SCROLL" / "MOUSE SCROLL" (0..=10): the map moves `2 * ticks * speed` px per step (docs/options.md).
     pub scroll_keys: u32,
+    /// Options "MOUSE SCROLL", 0..=10.
     pub scroll_mouse: u32,
     /// Options RADAR / QUAKE switches (`+8` / `+9`).
     pub radar_on: bool,
+    /// Options QUAKE switch (`+9`).
     pub quake_on: bool,
     /// Options CLOUDS detail 0..=4 (0 = no clouds, the first-run default).
     pub cloud_detail: u32,
+    /// Options page 2 "Turret range": tint the cells a turret being placed would reach (not in the original).
+    pub turret_range: bool,
+    /// Options page 2 "Map zoom": the mouse wheel zooms the mission map; off = the original fixed scale (not in the original).
+    pub zoom: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { ticks_per_second: crate::sim::TICKS_PER_SECOND, hp_bars: true, show_range: false, starter_squad: false, scroll_keys: 5, scroll_mouse: 3, radar_on: true, quake_on: true, cloud_detail: 0 }
+        Settings {
+            ticks_per_second: crate::sim::TICKS_PER_SECOND,
+            hp_bars: true,
+            show_range: false,
+            starter_squad: false,
+            scroll_keys: 5,
+            scroll_mouse: 3,
+            radar_on: true,
+            quake_on: true,
+            cloud_detail: 0,
+            turret_range: true,
+            zoom: true,
+        }
     }
 }
 
+/// One button of a menu screen.
 #[derive(Debug, Clone)]
 pub struct Button {
+    /// Where it is, in window pixels.
     pub rect: Rect,
+    /// What it does.
     pub action: Action,
+    /// Its text.
     pub label: String,
     /// Index of the main-menu button sprite (0..6), when drawn from the game's art.
     pub sprite: Option<usize>,
@@ -73,19 +102,21 @@ pub struct Button {
 
 /// Main menu rows: label, action and the index of the original's art button / language string (`None` = the port's own SKIRMISH row,
 /// which has no art and no translation and is drawn as text).
-const MAIN: [(&str, Action, Option<usize>); 7] = [
+const MAIN: [(&str, Action, Option<usize>); 8] = [
     ("New game", Action::NewGame, Some(0)),
     ("Load game", Action::LoadGame, Some(1)),
     ("Tutorial", Action::Tutorial, Some(2)),
     ("Multiplayer", Action::Multiplayer, Some(3)),
     ("Skirmish", Action::Skirmish, None),
+    ("Map editor", Action::MapEditor, None),
     ("Options", Action::Options, Some(4)),
     ("Exit game", Action::Exit, Some(5)),
 ];
 
-/// Distance between main menu rows in 1080p pixels (the original's six art buttons sat 65 apart; seven rows need a little less).
-const MAIN_PITCH: f32 = 58.0;
+/// Distance between main menu rows in 1080p pixels (the original's six art buttons sat 65 apart; eight rows need less).
+const MAIN_PITCH: f32 = 52.0;
 
+/// The game speeds the speed setting cycles through, in ticks per second.
 pub const SPEEDS: [u32; 4] = [20, 40, 60, 120];
 
 /// Buttons of a screen for a window of `w` x `h` pixels.
@@ -109,9 +140,19 @@ pub fn layout(screen: &Screen, assets: &mut Assets, levels: &[String], settings:
                     Some(a) => {
                         let f = &assets.buttons[6 + a];
                         let (bw, bh) = ((f.width as f32 * s) as i32, (f.height as f32 * s) as i32);
-                        out.push(Button { rect: Rect { x: cx - bw / 2, y, w: bw, h: bh.max(pitch * 3 / 4) }, action: action.clone(), label: (*label).into(), sprite: Some(*a) });
+                        out.push(Button {
+                            rect: Rect { x: cx - bw / 2, y, w: bw, h: bh.max(pitch * 3 / 4) },
+                            action: action.clone(),
+                            label: (*label).into(),
+                            sprite: Some(*a),
+                        });
                     }
-                    None => out.push(Button { rect: Rect { x: cx - 160, y, w: 320, h: pitch * 3 / 4 }, action: action.clone(), label: (*label).into(), sprite: None }),
+                    None => out.push(Button {
+                        rect: Rect { x: cx - 160, y, w: 320, h: pitch * 3 / 4 },
+                        action: action.clone(),
+                        label: (*label).into(),
+                        sprite: None,
+                    }),
                 }
             }
         }
@@ -125,8 +166,20 @@ pub fn layout(screen: &Screen, assets: &mut Assets, levels: &[String], settings:
                 let cx = (iw * cover * 0.206) as i32;
                 let (top, pitch) = ((h as f32 * 0.58) as i32, (MAIN_PITCH * s) as i32);
                 for (i, (name, action, art)) in MAIN.iter().enumerate() {
-                    let label = art.map_or_else(|| if *name == "Skirmish" { tr.menu_row().to_owned() } else { (*name).to_owned() }, |a| labels[a].clone());
-                    out.push(Button { rect: Rect { x: cx - 160, y: top + i as i32 * pitch, w: 320, h: pitch.max(24) * 3 / 4 }, action: action.clone(), label, sprite: None });
+                    let label = art.map_or_else(
+                        || match *name {
+                            "Skirmish" => tr.menu_row().to_owned(),
+                            "Map editor" => tr.editor_row().to_owned(),
+                            _ => (*name).to_owned(),
+                        },
+                        |a| labels[a].clone(),
+                    );
+                    out.push(Button {
+                        rect: Rect { x: cx - 160, y: top + i as i32 * pitch, w: 320, h: pitch.max(24) * 3 / 4 },
+                        action: action.clone(),
+                        label,
+                        sprite: None,
+                    });
                 }
             } else {
                 for (i, (label, action, _)) in MAIN.iter().enumerate() {
@@ -138,7 +191,12 @@ pub fn layout(screen: &Screen, assets: &mut Assets, levels: &[String], settings:
             let cols = 3;
             for (i, l) in levels.iter().enumerate() {
                 let (col, row) = ((i % cols) as i32, (i / cols) as i32);
-                out.push(Button { rect: Rect { x: wi / 2 - 330 + col * 220, y: hi / 5 + row * 54, w: 200, h: 44 }, action: Action::Level(l.clone()), label: format!("Mission {}", l.trim_start_matches(['M', 'm'])), sprite: None });
+                out.push(Button {
+                    rect: Rect { x: wi / 2 - 330 + col * 220, y: hi / 5 + row * 54, w: 200, h: 44 },
+                    action: Action::Level(l.clone()),
+                    label: format!("Mission {}", l.trim_start_matches(['M', 'm'])),
+                    sprite: None,
+                });
             }
             out.push(text_button(wi / 2 - 100, hi - 90, "Back", Action::Back));
         }
@@ -150,7 +208,11 @@ pub fn layout(screen: &Screen, assets: &mut Assets, levels: &[String], settings:
             out.push(text_button(wi / 2 - 100, hi - 90, "Back", Action::Back));
         }
         Screen::Pause => {
-            for (i, (label, a)) in [("Resume", Action::Resume), ("Restart mission", Action::Restart), ("Options", Action::Options), ("Main menu", Action::ToMain)].into_iter().enumerate() {
+            for (i, (label, a)) in
+                [("Resume", Action::Resume), ("Restart mission", Action::Restart), ("Options", Action::Options), ("Main menu", Action::ToMain)]
+                    .into_iter()
+                    .enumerate()
+            {
                 out.push(text_button(wi / 2 - 160, hi / 3 + i as i32 * 70, label, a));
             }
         }
@@ -222,7 +284,12 @@ pub fn draw(screen: &Screen, buttons: &[Button], hover: Option<usize>, assets: &
             } else {
                 ui::sprite_lit(buf, w, h, frame, fx, fy, sc, lift);
             }
-        } else if let (Screen::Main, Some(g)) = (screen, (b.sprite.is_none() && assets.backdrop.is_some() && !over_game && matches!(screen, Screen::Main)).then(|| crate::gdi::Gdi::load_sized((44.0 * h as f32 / 1080.0).max(16.0), 1.0)).flatten()) {
+        } else if let (Screen::Main, Some(g)) = (
+            screen,
+            (b.sprite.is_none() && assets.backdrop.is_some() && !over_game && matches!(screen, Screen::Main))
+                .then(|| crate::gdi::Gdi::load_sized((44.0 * h as f32 / 1080.0).max(16.0), 1.0))
+                .flatten(),
+        ) {
             // localized main menu: GDI text, white when hovered, grey otherwise (`0x445620`), centred on the button
             let tw = g.width(&b.label);
             let c = if hot { 255 } else { 0xb4 };
@@ -241,6 +308,7 @@ pub fn draw(screen: &Screen, buttons: &[Button], hover: Option<usize>, assets: &
     }
 }
 
+/// Index of the button at a window position.
 pub fn hit(buttons: &[Button], x: i32, y: i32) -> Option<usize> {
     buttons.iter().position(|b| b.rect.contains(x, y))
 }

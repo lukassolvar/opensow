@@ -18,6 +18,7 @@ pub enum Event {
     MainMenu,
 }
 
+/// The pages of the pause menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Items,
@@ -25,6 +26,7 @@ pub enum Page {
     ConfirmMain,
 }
 
+/// What the pointer is over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
     /// Items 0..=5: continue, load, save, options, restart, main menu.
@@ -33,8 +35,10 @@ pub enum Hit {
     No,
 }
 
+/// The in-game pause menu (Esc): the oval of items and its confirmations.
 pub struct InGameMenu {
     frames: Vec<Frame>,
+    /// The page shown.
     pub page: Page,
     hover: Option<Hit>,
     /// Load and save do nothing in the tutorial (`[0x70f2cc] != -1`).
@@ -44,11 +48,13 @@ pub struct InGameMenu {
 }
 
 impl InGameMenu {
+    /// Opens the menu; in the tutorial some items are not offered.
     pub fn new(assets: &mut Assets, tutorial: bool) -> InGameMenu {
         let frames = assets.art.load("menu\\ingame.ps6").map(|f| (*f).clone()).unwrap_or_default();
         InGameMenu::with_frames(frames, tutorial)
     }
 
+    /// The same from ready-made frames (tests use it).
     pub fn with_frames(frames: Vec<Frame>, tutorial: bool) -> InGameMenu {
         InGameMenu { frames, page: Page::Items, hover: None, tutorial, sounds: vec![35] }
     }
@@ -100,6 +106,7 @@ impl InGameMenu {
         self.rect(frame, w, h).map_or((0, 0), |r| (r.x + r.w / 2, r.y + r.h / 2))
     }
 
+    /// Updates what the pointer is over.
     pub fn mouse_moved(&mut self, x: i32, y: i32, w: usize, h: usize) {
         let hover = self.hit_at(x, y, w, h);
         if hover.is_some() && hover != self.hover {
@@ -108,10 +115,7 @@ impl InGameMenu {
         self.hover = hover;
     }
 
-    pub fn hovered(&self) -> Option<Hit> {
-        self.hover
-    }
-
+    /// A click at a window position.
     pub fn click(&mut self, x: i32, y: i32, w: usize, h: usize) -> Event {
         match self.hit_at(x, y, w, h) {
             Some(hit) => self.press(hit),
@@ -158,6 +162,7 @@ impl InGameMenu {
         }
     }
 
+    /// Draws the menu over the frame.
     pub fn draw(&self, buf: &mut [u32], w: usize, h: usize) {
         let s = Self::scale(h);
         let put = |buf: &mut [u32], frame: usize| {

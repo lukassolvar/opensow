@@ -14,17 +14,20 @@
 
 use crate::{Error, Result};
 
+/// Points per table: one for each facing of the top sprite.
 pub const FACINGS: usize = 32;
 const TABLE_BYTES: usize = FACINGS * 4;
 
+/// The tables of one `.po1` or `.po2` file (see the module docs).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FireTables {
     tables: Vec<[(i16, i16); FACINGS]>,
 }
 
 impl FireTables {
+    /// Parses a `.po1` / `.po2` file; its size must be a whole number of 128-byte tables.
     pub fn parse(data: &[u8]) -> Result<FireTables> {
-        if data.is_empty() || data.len() % TABLE_BYTES != 0 {
+        if data.is_empty() || !data.len().is_multiple_of(TABLE_BYTES) {
             return Err(Error::Invalid(format!("offset file size {} is not a multiple of {TABLE_BYTES}", data.len())));
         }
         let tables = data
@@ -60,7 +63,12 @@ mod tests {
     use super::*;
 
     fn table(f: impl Fn(usize) -> (i16, i16)) -> Vec<u8> {
-        (0..FACINGS).flat_map(|i| { let (x, y) = f(i); [x.to_le_bytes(), y.to_le_bytes()].concat() }).collect()
+        (0..FACINGS)
+            .flat_map(|i| {
+                let (x, y) = f(i);
+                [x.to_le_bytes(), y.to_le_bytes()].concat()
+            })
+            .collect()
     }
 
     #[test]

@@ -14,4 +14,8 @@ the mission number `[0x49a33c]` (33 sites) and the two dispatchers:
 
 So M02, 4, 5, 6, 9-11, 13-16 and 18-22 differ from a skirmish only by level data, the destroy-everything win rule
 (M04, 08, 13, 16, 21, 22), the countdown modes (header words 65-67) and, for M06, the hint box. All of this is already ported
-(`World::check_outcome`, `step_mission`, `reinforcements`, `update_hint`, `step_convoy`); see docs/ai.md and docs/tutorial.md.
+(`World::check_outcome`, `step_mission`, `reinforcements`, `update_hint`, `step_convoy` in `sim/mission.rs`; the radar frame `hud::SMALL_RADAR`;
+the M01 carryalls `sim/air_strikes.rs`); see docs/ai.md and docs/tutorial.md. OpenSOW: same rules by mission number.
+Warmonger's exe has the same 33 references with the same sets except the radar frame (docs/warmonger.md "Mission rules").
+Custom skirmish maps add their own win rule, escort and reinforcements (`step_custom_convoy`, `custom_reinforcements`; not in the exe,
+docs/map-editor-ingame.md).

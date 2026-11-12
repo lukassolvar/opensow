@@ -1,6 +1,6 @@
 //! Stand-in for the exe's GDI text on the menus (`0x467060`: white text with a black shadow).
 //!
-//! The campaign map's text is `CreateFontA(13, 6, 0, 0, 400, ..., "Times New Roman")` (`0x422740`, font `[0x5ddf30]`): a cell height of 13 px and a
+//! The campaign map's text is `CreateFontA(13, 6, 0, 0, 400, ..., "Times New Roman")` (`0x422747`, font `[0x5ddf34]`): a cell height of 13 px and a
 //! requested average character width of 6 px, which GDI reaches by widening the face. The game cannot ship the font, so it is read from the
 //! system when it exists (macOS, Windows, Liberation on Linux); otherwise callers fall back to the bitmap fonts.
 
@@ -39,6 +39,7 @@ const FALLBACKS: &[&str] = &[
     "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
 ];
 
+/// Text drawn with a system font, for strings the game's bitmap fonts cannot show (the original uses GDI for these).
 pub struct Gdi {
     font: FontVec,
     fallback: Option<FontVec>,
@@ -47,6 +48,7 @@ pub struct Gdi {
 }
 
 impl Gdi {
+    /// Loads the font at the default size; `None` when no usable font is found.
     pub fn load() -> Option<Gdi> {
         Self::load_sized(HEIGHT, XSCALE)
     }
@@ -99,7 +101,6 @@ impl Gdi {
 
     /// [`Gdi::draw_flat`] squeezed horizontally (down to 60 %) so that `whole` (the full line, of which `shown` may be only the typed
     /// part) is at most `max_w` natural pixels wide: translated lines are longer than the box the English ones were laid out for.
-    #[allow(clippy::too_many_arguments)]
     pub fn draw_fit(&self, buf: &mut [u32], w: usize, h: usize, whole: &str, shown: &str, x: f32, y: f32, z: f32, rgb: (u8, u8, u8), max_w: i32) {
         let base = self.xscale.get();
         let natural = self.width(whole).max(1);
@@ -111,7 +112,6 @@ impl Gdi {
     }
 
     /// Text without a shadow, top-left at `(x, y)` window pixels, zoom `z`.
-    #[allow(clippy::too_many_arguments)]
     pub fn draw_flat(&self, buf: &mut [u32], w: usize, h: usize, text: &str, x: f32, y: f32, z: f32, rgb: (u8, u8, u8)) {
         self.blit(buf, w, h, text, x, y, rgb, z);
     }
@@ -122,6 +122,7 @@ impl Gdi {
         (l != opensow_formats::lang::Language::English).then(|| Gdi::load_sized(height, 1.0)).flatten()
     }
 
+    /// Width of `text` in pixels.
     pub fn width(&self, text: &str) -> i32 {
         text.chars().map(|c| self.advance(c)).sum()
     }
@@ -173,13 +174,11 @@ impl Gdi {
     }
 
     /// [`Gdi::draw_px`] in another text colour (the shadow stays black).
-    #[allow(clippy::too_many_arguments)]
     pub fn draw_rgb(&self, buf: &mut [u32], w: usize, h: usize, text: &str, fx: f32, fy: f32, z: f32, rgb: (u8, u8, u8)) {
         self.draw_shadowed(buf, w, h, text, fx, fy, z, rgb, (0, 0, 0));
     }
 
     /// [`Gdi::draw_rgb`] with a shadow colour of its own (the HUD messages use a dark red one).
-    #[allow(clippy::too_many_arguments)]
     pub fn draw_shadowed(&self, buf: &mut [u32], w: usize, h: usize, text: &str, fx: f32, fy: f32, z: f32, rgb: (u8, u8, u8), shadow: (u8, u8, u8)) {
         self.blit(buf, w, h, text, fx + 2.0 * z, fy + 2.0 * z, shadow, z);
         self.blit(buf, w, h, text, fx, fy, rgb, z);

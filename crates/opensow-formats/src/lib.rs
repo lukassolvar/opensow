@@ -3,59 +3,62 @@
 //! OpenSOW ships no game data: everything here reads files from a
 //! legitimately installed copy of the game (see [`GameDir`]).
 
+pub mod advancer;
 pub mod aim;
 pub mod air;
 pub mod aircraft;
 pub mod anim;
+pub mod buildings;
+pub mod cheats;
+pub mod clouds;
+pub mod config;
+pub mod cursor;
+pub mod curves;
+pub mod custommap;
+pub mod effects;
+pub mod endscreen;
 pub mod facing;
 pub mod fire;
 pub mod font;
+pub mod freecell;
+pub mod indeo5;
+pub mod infobox;
+pub mod kinds;
 pub mod lang;
 pub mod launcher;
-pub mod indeo5;
 pub mod level;
-pub mod advancer;
-pub mod effects;
-pub mod buildings;
-pub mod clouds;
-pub mod config;
-pub mod endscreen;
-pub mod cursor;
-pub mod curves;
-pub mod sparks;
-pub mod infobox;
-pub mod cheats;
-pub mod messages;
-pub mod production;
-pub mod rally;
-pub mod rng;
-pub mod save;
-pub mod savespark;
-pub mod saveobj;
-pub mod sfx;
-pub mod projectile;
-pub mod recoil;
-pub mod freecell;
-pub mod netwalk;
-pub mod rings;
-pub mod rogon;
 pub mod map;
 pub mod maptweak;
-pub mod net;
-pub mod netsync;
 pub mod megafile;
+pub mod messages;
 pub mod mp2;
 pub mod mpeg1;
 pub mod msvideo1;
+pub mod net;
+pub mod netsync;
+pub mod netwalk;
+pub mod production;
+pub mod projectile;
+pub mod rally;
+pub mod recoil;
+pub mod rings;
+pub mod rng;
+pub mod rogon;
+pub mod save;
+pub mod saveobj;
+pub mod savespark;
+pub mod scatter;
+pub mod sfx;
+pub mod sparks;
 pub mod sprite;
 pub mod srf;
 pub mod strings;
+pub mod turretai;
 pub mod units;
 pub mod video;
 pub mod walk;
 pub mod warmonger;
 pub mod wav;
-pub mod turretai;
 pub mod wave;
 
 mod reader;
@@ -65,15 +68,23 @@ use std::path::{Path, PathBuf};
 
 pub use reader::Reader;
 
+/// Why a file could not be read or parsed.
 #[derive(Debug)]
 pub enum Error {
+    /// The file could not be opened or read.
     Io(std::io::Error),
     /// The file ended before a structure was complete.
-    Truncated { what: &'static str, offset: usize },
+    Truncated {
+        /// The structure that was being read.
+        what: &'static str,
+        /// Byte offset in the file where the read started.
+        offset: usize,
+    },
     /// The file contents do not match the expected format.
     Invalid(String),
 }
 
+/// The result of reading or parsing a game file.
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl fmt::Display for Error {
@@ -99,7 +110,8 @@ impl From<std::io::Error> for Error {
 pub const GAME_DIR_ENV: &str = "OPENSOW_GAME_DIR";
 
 /// Default Steam install location on macOS (depot downloaded via the Steam console).
-pub const DEFAULT_MAC_STEAM_DIR: &str = "Library/Application Support/Steam/Steam.AppBundle/Steam/Contents/MacOS/steamapps/content/app_748040/depot_748041/State of War";
+pub const DEFAULT_MAC_STEAM_DIR: &str =
+    "Library/Application Support/Steam/Steam.AppBundle/Steam/Contents/MacOS/steamapps/content/app_748040/depot_748041/State of War";
 
 /// Environment variable pointing at the Warmonger install (the folder containing `State of War Warmonger.exe` and `Data`).
 pub const WARMONGER_DIR_ENV: &str = "OPENSOW_WARMONGER_DIR";
@@ -108,14 +120,17 @@ pub const WARMONGER_DIR_ENV: &str = "OPENSOW_WARMONGER_DIR";
 /// only its mission files `M01..M22` (map, tiles, picture, level script, briefing movie) and its skirmish maps (`*.net`) differ.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Edition {
+    /// The base game, `State of War`.
     #[default]
     Original,
+    /// The expansion, `State of War Warmonger`.
     Warmonger,
 }
 
 /// A located game installation, optionally with the Warmonger install next to it.
 #[derive(Debug, Clone)]
 pub struct GameDir {
+    /// The install folder of the base game (the one that holds `Data`).
     pub root: PathBuf,
     /// The Warmonger install, when found; only its mission data is used.
     pub warmonger: Option<PathBuf>,
@@ -129,7 +144,11 @@ pub struct GameDir {
 /// `m01`..`m22` (any case): a campaign mission file stem.
 fn is_mission_stem(stem: &str) -> bool {
     let b = stem.as_bytes();
-    b.len() == 3 && b[0].eq_ignore_ascii_case(&b'm') && b[1].is_ascii_digit() && b[2].is_ascii_digit() && (1..=22).contains(&((b[1] - b'0') * 10 + (b[2] - b'0')))
+    b.len() == 3
+        && b[0].eq_ignore_ascii_case(&b'm')
+        && b[1].is_ascii_digit()
+        && b[2].is_ascii_digit()
+        && (1..=22).contains(&((b[1] - b'0') * 10 + (b[2] - b'0')))
 }
 
 /// Resolve `game_path` below `root`, ignoring case.
@@ -140,11 +159,7 @@ fn resolve_in(root: &Path, game_path: &str) -> Option<PathBuf> {
         cur = if exact.exists() {
             exact
         } else {
-            std::fs::read_dir(&cur)
-                .ok()?
-                .filter_map(|e| e.ok())
-                .find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(part))?
-                .path()
+            std::fs::read_dir(&cur).ok()?.filter_map(|e| e.ok()).find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(part))?.path()
         };
     }
     Some(cur)
@@ -182,9 +197,11 @@ impl GameDir {
     /// Find the game via `OPENSOW_GAME_DIR`, falling back to the default Steam path; the Warmonger install is looked up too.
     pub fn locate() -> Option<GameDir> {
         let saved = launcher::load();
-        let candidates = std::env::var_os(GAME_DIR_ENV).map(PathBuf::from).into_iter().chain(saved.original.clone()).chain(
-            std::env::var_os("HOME").map(|h| Path::new(&h).join(DEFAULT_MAC_STEAM_DIR)),
-        );
+        let candidates = std::env::var_os(GAME_DIR_ENV)
+            .map(PathBuf::from)
+            .into_iter()
+            .chain(saved.original.clone())
+            .chain(std::env::var_os("HOME").map(|h| Path::new(&h).join(DEFAULT_MAC_STEAM_DIR)));
         let mut game = candidates.filter(|p| p.join("Data").is_dir()).map(GameDir::new).next()?;
         // the environment wins over the launcher's saved folder
         for w in std::env::var_os(WARMONGER_DIR_ENV).map(PathBuf::from).into_iter().chain(saved.warmonger) {
@@ -203,8 +220,15 @@ impl GameDir {
     /// Is `dir` a Warmonger install (a `Data\Levels` folder with `M01` files and an exe)?
     pub fn is_warmonger_dir(dir: &Path) -> bool {
         let levels = resolve_in(dir, "Data\\Levels");
-        let has_m01 = levels.and_then(|l| std::fs::read_dir(l).ok()).is_some_and(|d| d.flatten().any(|e| e.file_name().to_string_lossy().to_ascii_lowercase().starts_with("m01.")));
-        let has_exe = std::fs::read_dir(dir).is_ok_and(|d| d.flatten().any(|e| e.file_name().to_string_lossy().to_ascii_lowercase().contains("warmonger") && e.file_name().to_string_lossy().to_ascii_lowercase().ends_with(".exe")));
+        let has_m01 = levels
+            .and_then(|l| std::fs::read_dir(l).ok())
+            .is_some_and(|d| d.flatten().any(|e| e.file_name().to_string_lossy().to_ascii_lowercase().starts_with("m01.")));
+        let has_exe = std::fs::read_dir(dir).is_ok_and(|d| {
+            d.flatten().any(|e| {
+                e.file_name().to_string_lossy().to_ascii_lowercase().contains("warmonger")
+                    && e.file_name().to_string_lossy().to_ascii_lowercase().ends_with(".exe")
+            })
+        });
         has_m01 && has_exe
     }
 
@@ -225,6 +249,12 @@ impl GameDir {
             self.warmonger = Some(dir.to_path_buf());
         }
         ok
+    }
+
+    /// A file of the Warmonger install itself, without the redirect to the base game (e.g. its loose
+    /// `Data\Sprites2\extras\radar2.tsp`); `None` when the install is unknown or lacks the file.
+    pub fn warmonger_file(&self, game_path: &str) -> Option<PathBuf> {
+        resolve_in(self.warmonger.as_ref()?, game_path).filter(|p| p.exists())
     }
 
     /// Warmonger's executable (its land texts live there), when the install is known.
@@ -255,12 +285,14 @@ impl GameDir {
     fn localized(&self, game_path: &str) -> Option<PathBuf> {
         let dir = self.chosen.filter(|l| l.supported())?.diff_dir()?;
         let parts: Vec<&str> = game_path.split(['\\', '/']).filter(|s| !s.is_empty()).collect();
-        if parts.len() < 3 || !parts[0].eq_ignore_ascii_case("data") || !(parts[1].eq_ignore_ascii_case("sounds") || parts[1].eq_ignore_ascii_case("sprites2")) {
+        if parts.len() < 3 || !parts[0].eq_ignore_ascii_case("data") || !(parts[1].eq_ignore_ascii_case("sounds") || parts[1].eq_ignore_ascii_case("sprites2"))
+        {
             return None;
         }
         resolve_in(&self.root, &format!("Data\\DiffData\\{dir}\\{}", parts[1..].join("\\"))).filter(|p| p.exists())
     }
 
+    /// The base game's `Data` folder.
     pub fn data(&self) -> PathBuf {
         self.root.join("Data")
     }
@@ -309,7 +341,8 @@ impl GameDir {
         let is_net = |n: &str| n.rsplit_once('.').is_some_and(|(_, e)| e.eq_ignore_ascii_case("net"));
         let warm = self.warmonger.as_ref().map(|w| names(resolve_in(w, "Data\\Levels")));
         let wm_edition = self.edition == Edition::Warmonger;
-        let mut out: Vec<String> = names(resolve_in(&self.root, "Data\\Levels")).into_iter().filter(|n| !(wm_edition && warm.is_some() && is_mission(n))).collect();
+        let mut out: Vec<String> =
+            names(resolve_in(&self.root, "Data\\Levels")).into_iter().filter(|n| !(wm_edition && warm.is_some() && is_mission(n))).collect();
         for n in warm.into_iter().flatten() {
             if (is_net(&n) && !out.iter().any(|o| o.eq_ignore_ascii_case(&n))) || (wm_edition && is_mission(&n)) {
                 out.push(n);
@@ -333,10 +366,25 @@ mod edition_tests {
         let base = std::env::temp_dir().join(format!("opensow-edition-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let (b, w) = (base.join("State of War"), base.join("State of War Warmonger"));
-        for f in ["Data/Levels/M01.map", "Data/Levels/M05.map", "Data/Levels/M00.map", "Data/Levels/mO.sgv", "Data/Levels/mI.sgv", "Data/Levels/01-First Spark.net", "Data/Sprites2/Menu/x.tsp"] {
+        for f in [
+            "Data/Levels/M01.map",
+            "Data/Levels/M05.map",
+            "Data/Levels/M00.map",
+            "Data/Levels/mO.sgv",
+            "Data/Levels/mI.sgv",
+            "Data/Levels/01-First Spark.net",
+            "Data/Sprites2/Menu/x.tsp",
+        ] {
             touch(&b, f);
         }
-        for f in ["Data/Levels/m01.map", "Data/Levels/M02.map", "Data/Levels/00-the first step.net", "Data/Levels/M00.map", "Data/Levels/mO.sgv", "State of War Warmonger.exe"] {
+        for f in [
+            "Data/Levels/m01.map",
+            "Data/Levels/M02.map",
+            "Data/Levels/00-the first step.net",
+            "Data/Levels/M00.map",
+            "Data/Levels/mO.sgv",
+            "State of War Warmonger.exe",
+        ] {
             touch(&w, f);
         }
         (base, GameDir::new(b))

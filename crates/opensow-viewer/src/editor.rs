@@ -5,7 +5,9 @@
 use crate::render::{blend, pack, rect, View};
 use crate::scene::CELL;
 use opensow_formats::buildings::footprint;
+use opensow_formats::custommap::ObjectExt;
 use opensow_formats::font::Font;
+use opensow_formats::kinds;
 use opensow_formats::level::Level;
 use opensow_formats::map::Map;
 use opensow_formats::maptweak::{self, object_name, unit_name, Edit, Production, Side, Thing, Tracked, MAX_LINES};
@@ -13,7 +15,9 @@ use opensow_formats::maptweak::{self, object_name, unit_name, Edit, Production, 
 /// What is selected: an object (building or turret) or a unit marker, by index in the edited level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sel {
+    /// Object `i` of the edited level.
     Object(usize),
+    /// Unit marker `i` of the edited level.
     Unit(usize),
 }
 
@@ -26,6 +30,7 @@ pub fn palette() -> Vec<Thing> {
     v
 }
 
+/// The name shown for a building, turret or unit.
 pub fn thing_name(t: Thing) -> String {
     match t {
         Thing::Object(k) => object_name(k),
@@ -74,6 +79,7 @@ pub enum Lines {
     Levels(i32),
 }
 
+/// What kind of production lines a building kind has; `None` for buildings without production.
 pub fn lines_of(kind: i32) -> Option<Lines> {
     match kind {
         101..=103 => Some(Lines::Ground),
@@ -95,7 +101,11 @@ pub fn line_label(kind: i32, rise: i32) -> String {
         1..=15 => {
             let (class, tier) = ((kind - 1) / 3, (kind - 1) % 3 + 1);
             let name = ["Anti-air", "Artillery", "Cannon", "Flamer", "Special"][class as usize];
-            if rise > 0 { format!("{name} T{tier}-{}", (tier + rise).min(3)) } else { format!("{name} T{tier}") }
+            if rise > 0 {
+                format!("{name} T{tier}-{}", (tier + rise).min(3))
+            } else {
+                format!("{name} T{tier}")
+            }
         }
         16..=24 => format!("{} {}", ["Gold", "Research", "Energy"][((kind - 16) / 3) as usize], (kind - 16) % 3 + 1),
         30..=34 => ["Bomber", "Carryall", "Fighter", "Tripler", "Asteroid"][(kind - 30) as usize].to_string(),
@@ -114,20 +124,29 @@ pub enum LineChange {
     Kind(usize, bool),
     /// Next tier range of ground line `i` (T1, T1-2, T1-3, T2, T2-3, T3).
     Tiers(usize),
+    /// Remove line `i`.
     Remove(usize),
+    /// Add a line.
     Add,
     /// One upgrade level more / less (gold mine, lab, windtrap).
     Levels(bool),
     /// A click on level slot `i` (0-2) of a mine, lab or windtrap: a missing level is added (with the ones before it); an
     /// existing one becomes the last unlocked at the start, or, when it already is, locked.
     LevelSlot(usize),
+    /// The lock of line `i`: an unlocked line becomes the first locked one (with the lines after it), a locked one the last
+    /// unlocked at the start (with the lines before it). Lines unlock in order, so the unlocked ones always come first.
+    Lock(usize),
 }
 
+/// The map editor's state: the shipped level, the edited copy, the selection and the undo history.
 pub struct Editor {
     /// The `.net` file stem (`08-Island of Fate`).
     pub map: String,
+    /// The level as shipped, before any edit.
     pub original: Level,
+    /// The edited level, with where each object and marker came from.
     pub t: Tracked,
+    /// What is selected.
     pub sel: Option<Sel>,
     /// Index into [`palette`] of what a click on the map places while [`Editor::placing`].
     pub palette: usize,
@@ -137,14 +156,19 @@ pub struct Editor {
     pub side: Side,
     /// A short note on the last action (refusals, saves).
     pub message: String,
+    /// Per object (same index as `level().objects`): what a custom map adds (docs/map-editor-ingame.md); defaults for the shipped
+    /// maps' tweaks, which do not use it.
+    pub ext: Vec<ObjectExt>,
     width: i32,
     height: i32,
     blocked: Vec<bool>,
     no_build: Vec<bool>,
-    undo: Vec<(Tracked, Option<Sel>)>,
-    redo: Vec<(Tracked, Option<Sel>)>,
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
     saved: Vec<Edit>,
 }
+
+type Snapshot = (Tracked, Option<Sel>, Vec<ObjectExt>);
 
 impl Editor {
     /// `edits` = what the tweaks file holds for the map now (they count as saved).
@@ -161,6 +185,7 @@ impl Editor {
             placing: false,
             side: Side::Neutral,
             message,
+            ext: Vec::new(),
             width: terrain.width as i32,
             height: terrain.height as i32,
             blocked: terrain.cells.iter().map(|c| c.blocked).collect(),
@@ -169,8 +194,22 @@ impl Editor {
             redo: Vec::new(),
             saved,
         }
+        .with_ext_len()
     }
 
+    /// The editor on a custom map: `level` is its own starting point (no shipped original), `ext` its additions.
+    pub fn custom(name: &str, level: Level, ext: Vec<ObjectExt>, terrain: &Map) -> Editor {
+        let mut e = Editor::new(name, level, &[], terrain);
+        e.ext = ext;
+        e.with_ext_len()
+    }
+
+    fn with_ext_len(mut self) -> Editor {
+        self.ext.resize(self.t.level.objects.len(), ObjectExt::default());
+        self
+    }
+
+    /// The edited level.
     pub fn level(&self) -> &Level {
         &self.t.level
     }
@@ -180,6 +219,7 @@ impl Editor {
         maptweak::diff(&self.original, &self.t)
     }
 
+    /// Whether there are edits that are not saved.
     pub fn dirty(&self) -> bool {
         self.edits() != self.saved
     }
@@ -190,21 +230,99 @@ impl Editor {
     }
 
     fn snapshot(&mut self) {
-        self.undo.push((self.t.clone(), self.sel));
+        self.undo.push((self.t.clone(), self.sel, self.ext.clone()));
         self.redo.clear();
     }
 
+    /// Takes back the last edit; false when there is none.
     pub fn undo(&mut self) -> bool {
-        let Some((t, sel)) = self.undo.pop() else { return false };
-        self.redo.push((std::mem::replace(&mut self.t, t), self.sel));
+        let Some((t, sel, ext)) = self.undo.pop() else { return false };
+        self.redo.push((std::mem::replace(&mut self.t, t), self.sel, std::mem::replace(&mut self.ext, ext)));
         self.sel = sel;
         true
     }
 
+    /// Repeats the edit that was last taken back; false when there is none.
     pub fn redo(&mut self) -> bool {
-        let Some((t, sel)) = self.redo.pop() else { return false };
-        self.undo.push((std::mem::replace(&mut self.t, t), self.sel));
+        let Some((t, sel, ext)) = self.redo.pop() else { return false };
+        self.undo.push((std::mem::replace(&mut self.t, t), self.sel, std::mem::replace(&mut self.ext, ext)));
         self.sel = sel;
+        true
+    }
+
+    /// Replaces the level header (starting resources of the sides, `custommap::Sides`); undoable.
+    pub fn set_header(&mut self, header: [i32; opensow_formats::level::HEADER_WORDS]) -> bool {
+        if header == self.t.level.header {
+            return false;
+        }
+        self.snapshot();
+        self.t.level.header = header;
+        true
+    }
+
+    /// Replaces every object's extension at once (the Advancer switches of a side); undoable.
+    pub fn set_ext(&mut self, ext: Vec<ObjectExt>) -> bool {
+        let mut ext = ext;
+        ext.resize(self.t.level.objects.len(), ObjectExt::default());
+        if ext == self.ext {
+            return false;
+        }
+        self.snapshot();
+        self.ext = ext;
+        true
+    }
+
+    /// The start hit points of object `i` in percent (object word 18), 5..=100; undoable.
+    pub fn set_start_hp(&mut self, i: usize, pct: i32) -> bool {
+        let pct = pct.clamp(5, 100);
+        if self.t.level.objects.get(i).is_none_or(|o| o.raw[18] == pct) {
+            return false;
+        }
+        self.snapshot();
+        self.t.level.objects[i].raw[18] = pct;
+        true
+    }
+
+    /// Satellite protection of object `i` (object word 15, `[b+0x114]`: the exe loads it for every building and turret,
+    /// `0x41dffc`, and its satellite check `0x409f50` kills foreign Advancers attacking it); undoable. A headquarters is always
+    /// protected (its constructor sets the flag, `0x40a47a`), so it is not changed.
+    pub fn set_protected(&mut self, i: usize, on: bool) -> bool {
+        if self.t.level.objects.get(i).is_none_or(|o| o.kind == kinds::HEADQUARTERS || (o.raw[15] != 0) == on) {
+            return false;
+        }
+        self.snapshot();
+        self.t.level.objects[i].raw[15] = i32::from(on);
+        true
+    }
+
+    /// Makes the selected turret one of type `tier` (1-5, kinds 25-29) when the new type's footprint fits; undoable.
+    pub fn set_turret_type(&mut self, tier: i32) -> bool {
+        let Some(Sel::Object(i)) = self.sel else { return false };
+        let o = &self.t.level.objects[i];
+        let kind = 24 + tier.clamp(1, 5);
+        if !kinds::TURRETS.contains(&o.kind) || o.kind == kind {
+            return false;
+        }
+        if let Err(e) = self.can_place(Thing::Object(kind), (o.cell_x, o.cell_y), Some(Sel::Object(i))) {
+            self.message = format!("Cannot change the turret: {e}");
+            return false;
+        }
+        self.snapshot();
+        let o = &mut self.t.level.objects[i];
+        o.kind = kind;
+        o.raw[1] = kind;
+        o.raw[13] = [900, 1250, 1540, 2100, 2600][(kind - 25) as usize];
+        true
+    }
+
+    /// Sets the upgrade points of line `k` of the selected building (0 = the game's own); undoable.
+    pub fn set_unlock(&mut self, k: usize, points: i32) -> bool {
+        let Some(Sel::Object(i)) = self.sel else { return false };
+        if k >= opensow_formats::custommap::LINES || self.ext.get(i).is_none_or(|e| e.unlock[k] == points.max(0)) {
+            return false;
+        }
+        self.snapshot();
+        self.ext[i].unlock[k] = points.max(0);
         true
     }
 
@@ -215,13 +333,17 @@ impl Editor {
             return Some(Sel::Unit(i));
         }
         let (cx, cy) = ((mx / CELL as f32).floor() as i32, (my / CELL as f32).floor() as i32);
-        (0..l.objects.len()).rev().find(|&i| {
-            let o = &l.objects[i];
-            let (w, h, _) = footprint(o.kind).unwrap_or((1, 1, 0));
-            (o.cell_x..o.cell_x + w).contains(&cx) && (o.cell_y..o.cell_y + h).contains(&cy)
-        }).map(Sel::Object)
+        (0..l.objects.len())
+            .rev()
+            .find(|&i| {
+                let o = &l.objects[i];
+                let (w, h, _) = footprint(o.kind).unwrap_or((1, 1, 0));
+                (o.cell_x..o.cell_x + w).contains(&cx) && (o.cell_y..o.cell_y + h).contains(&cy)
+            })
+            .map(Sel::Object)
     }
 
+    /// The kind of thing a selection is.
     pub fn thing_of(&self, s: Sel) -> Thing {
         match s {
             Sel::Object(i) => Thing::Object(self.t.level.objects[i].kind),
@@ -229,6 +351,7 @@ impl Editor {
         }
     }
 
+    /// The cell a selected object or marker stands on.
     pub fn cell_of(&self, s: Sel) -> (i32, i32) {
         match s {
             Sel::Object(i) => (self.t.level.objects[i].cell_x, self.t.level.objects[i].cell_y),
@@ -236,6 +359,7 @@ impl Editor {
         }
     }
 
+    /// The owner of a selected object or marker.
     pub fn side_of(&self, s: Sel) -> Side {
         let code = match s {
             Sel::Object(i) => self.t.level.objects[i].raw[14],
@@ -295,6 +419,48 @@ impl Editor {
         Ok(())
     }
 
+    /// Whether a carryall can land a whole squad at `cell` (`custommap::landing_block`, 4x2 cells): every cell inside the map,
+    /// on passable ground and off every building's and turret's footprint.
+    pub fn can_land(&self, cell: (i32, i32)) -> Result<(), String> {
+        for (x, y) in opensow_formats::custommap::landing_block(cell) {
+            match self.terrain(x, y) {
+                None => return Err("outside the map".into()),
+                Some((true, _)) => return Err("blocked terrain".into()),
+                _ => {}
+            }
+            for o in &self.t.level.objects {
+                let (ow, oh, _) = footprint(o.kind).unwrap_or((1, 1, 0));
+                if (o.cell_x..o.cell_x + ow).contains(&x) && (o.cell_y..o.cell_y + oh).contains(&y) {
+                    return Err(format!("on the {} at {},{}", object_name(o.kind), o.cell_x, o.cell_y));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The map's size in cells.
+    pub fn grid_size(&self) -> (i32, i32) {
+        (self.width, self.height)
+    }
+
+    /// Where a ground unit can stand (row-major, [`Editor::grid_size`]): passable terrain off every building's footprint
+    /// (their open top row aside) and every turret's (the rule of [`Editor::can_place`] for units).
+    pub fn walkable(&self) -> Vec<bool> {
+        let mut g: Vec<bool> = self.blocked.iter().map(|b| !b).collect();
+        for o in &self.t.level.objects {
+            let (ow, oh, _) = footprint(o.kind).unwrap_or((1, 1, 0));
+            let top = i32::from(o.kind >= 100);
+            for y in o.cell_y + top..o.cell_y + oh {
+                for x in o.cell_x..o.cell_x + ow {
+                    if x >= 0 && y >= 0 && x < self.width && y < self.height {
+                        g[(y * self.width + x) as usize] = false;
+                    }
+                }
+            }
+        }
+        g
+    }
+
     /// Moves the selection to `cell`; a refusal leaves everything as it was and says why in `message`.
     pub fn move_sel(&mut self, cell: (i32, i32)) -> bool {
         let Some(s) = self.sel else { return false };
@@ -324,10 +490,19 @@ impl Editor {
 
     /// Removes the selection (never a side's last headquarters).
     pub fn remove_sel(&mut self) -> bool {
+        self.remove_sel_keeping(&[0, 1])
+    }
+
+    /// Removes the selection; the last headquarters of the sides (owner codes) in `keep` stays (a custom escort map lets blue
+    /// do without one).
+    pub fn remove_sel_keeping(&mut self, keep: &[i32]) -> bool {
         let Some(s) = self.sel else { return false };
         if let Sel::Object(i) = s {
             let o = &self.t.level.objects[i];
-            if o.kind == 100 && self.t.level.objects.iter().filter(|p| p.kind == 100 && p.raw[14] == o.raw[14]).count() == 1 {
+            if o.kind == kinds::HEADQUARTERS
+                && keep.contains(&o.raw[14])
+                && self.t.level.objects.iter().filter(|p| p.kind == kinds::HEADQUARTERS && p.raw[14] == o.raw[14]).count() == 1
+            {
                 self.message = "Cannot remove a side's last headquarters".into();
                 return false;
             }
@@ -338,6 +513,9 @@ impl Editor {
             Sel::Object(i) => {
                 self.t.level.objects.remove(i);
                 self.t.object_origin.remove(i);
+                if i < self.ext.len() {
+                    self.ext.remove(i);
+                }
             }
             Sel::Unit(i) => {
                 self.t.level.markers.remove(i);
@@ -359,7 +537,19 @@ impl Editor {
     /// Changes the selected building's production lines; `false` (and nothing done) when the change does not apply.
     pub fn change_lines(&mut self, c: LineChange) -> bool {
         let (Some(Sel::Object(i)), Some((family, mut p))) = (self.sel, self.lines()) else { return false };
-        let cycle = |v: i32, lo: i32, hi: i32, up: bool| if up { if v >= hi { lo } else { v + 1 } } else if v <= lo { hi } else { v - 1 };
+        let cycle = |v: i32, lo: i32, hi: i32, up: bool| {
+            if up {
+                if v >= hi {
+                    lo
+                } else {
+                    v + 1
+                }
+            } else if v <= lo {
+                hi
+            } else {
+                v - 1
+            }
+        };
         match (c, family) {
             (LineChange::Active(up), _) => {
                 let n = (p.active + if up { 1 } else { -1 }).clamp(0, p.lines.len() as i32);
@@ -384,10 +574,13 @@ impl Editor {
                     p.active = if p.active == k as i32 + 1 { k as i32 } else { k as i32 + 1 };
                 }
             }
+            (LineChange::Lock(k), _) if k < p.lines.len() => {
+                p.active = if (k as i32) < p.active { k as i32 } else { k as i32 + 1 };
+            }
             (LineChange::Kind(k, up), _) if k < p.lines.len() => {
                 let (kind, rise) = p.lines[k];
                 p.lines[k].0 = match family {
-                    Lines::Ground if (1..=15).contains(&kind) => {
+                    Lines::Ground if kinds::GROUND_UNITS.contains(&kind) => {
                         let (class, tier) = ((kind - 1) / 3, (kind - 1) % 3);
                         cycle(class, 0, 4, up) * 3 + tier + 1
                     }
@@ -397,7 +590,7 @@ impl Editor {
                 };
                 let _ = rise;
             }
-            (LineChange::Tiers(k), Lines::Ground) if k < p.lines.len() && (1..=15).contains(&p.lines[k].0) => {
+            (LineChange::Tiers(k), Lines::Ground) if k < p.lines.len() && kinds::GROUND_UNITS.contains(&p.lines[k].0) => {
                 let (kind, rise) = p.lines[k];
                 let (class, start) = ((kind - 1) / 3, (kind - 1) % 3 + 1);
                 let now = TIER_RANGES.iter().position(|&r| r == (start, (start + rise).min(3))).unwrap_or(0);
@@ -407,6 +600,14 @@ impl Editor {
             (LineChange::Remove(k), Lines::Ground | Lines::Air | Lines::Walkers) if k < p.lines.len() && p.lines.len() > 1 => {
                 p.lines.remove(k);
                 p.active = p.active.min(p.lines.len() as i32);
+                self.snapshot();
+                if let Some(e) = self.ext.get_mut(i) {
+                    e.unlock.copy_within(k + 1.., k);
+                    e.unlock[opensow_formats::custommap::LINES - 1] = 0;
+                }
+                p.write(&mut self.t.level.objects[i]);
+                self.message.clear();
+                return true;
             }
             (LineChange::Add, Lines::Ground | Lines::Air | Lines::Walkers) if p.lines.len() < MAX_LINES => {
                 let line = match family {
@@ -437,7 +638,7 @@ impl Editor {
         }
         if let Sel::Object(i) = s {
             let o = &self.t.level.objects[i];
-            if o.kind == 100 && self.t.level.objects.iter().filter(|p| p.kind == 100 && p.raw[14] == o.raw[14]).count() == 1 {
+            if o.kind == kinds::HEADQUARTERS && self.t.level.objects.iter().filter(|p| p.kind == kinds::HEADQUARTERS && p.raw[14] == o.raw[14]).count() == 1 {
                 self.message = "Each side needs a headquarters".into();
                 return false;
             }
@@ -472,6 +673,7 @@ impl Editor {
             Thing::Object(_) => {
                 self.t.level.objects.push(one.level.objects.last().unwrap().clone());
                 self.t.object_origin.push(None);
+                self.ext.resize(self.t.level.objects.len(), ObjectExt::default());
                 self.sel = Some(Sel::Object(self.t.level.objects.len() - 1));
             }
             Thing::Unit(_) => {
@@ -496,7 +698,7 @@ impl Editor {
         };
         if let Sel::Object(i) = s {
             let o = &self.t.level.objects[i];
-            if o.kind == 100 && self.t.level.objects.iter().filter(|p| p.kind == 100 && p.raw[14] == o.raw[14]).count() == 1 {
+            if o.kind == kinds::HEADQUARTERS && self.t.level.objects.iter().filter(|p| p.kind == kinds::HEADQUARTERS && p.raw[14] == o.raw[14]).count() == 1 {
                 self.message = "Each side needs a headquarters".into();
                 return false;
             }
@@ -513,7 +715,12 @@ impl Editor {
     /// Centre cell of each side's first headquarters (blue, green).
     pub fn hq_centres(&self) -> [Option<(f32, f32)>; 2] {
         std::array::from_fn(|side| {
-            self.t.level.objects.iter().find(|o| o.kind == 100 && o.raw[14] == side as i32).map(|o| (o.cell_x as f32 + 2.0, o.cell_y as f32 + 2.0))
+            self.t
+                .level
+                .objects
+                .iter()
+                .find(|o| o.kind == kinds::HEADQUARTERS && o.raw[14] == side as i32)
+                .map(|o| (o.cell_x as f32 + 2.0, o.cell_y as f32 + 2.0))
         })
     }
 
@@ -549,6 +756,7 @@ impl Editor {
         !self.undo.is_empty()
     }
 
+    /// Whether there is an edit to repeat.
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
     }
@@ -700,8 +908,24 @@ mod tests {
 
     fn terrain() -> Map {
         let (w, h) = (40u32, 30u32);
-        let cells = (0..w * h).map(|i| Cell { x: (i % w) as u8, y: (i / w) as u8, blocked: i % w == 20 && i / w < 10, border: false, no_build: i % w == 25 && i / w == 5, no_marks: false }).collect();
+        let cells = (0..w * h)
+            .map(|i| Cell {
+                x: (i % w) as u8,
+                y: (i / w) as u8,
+                blocked: i % w == 20 && i / w < 10,
+                border: false,
+                no_build: i % w == 25 && i / w == 5,
+                no_marks: false,
+            })
+            .collect();
         Map { a: 0, b: 0, width: w, height: h, cells }
+    }
+
+    impl Editor {
+        /// Cells a unit may be placed on (the walkable grid's count, the slow way).
+        fn can_place_count(&self) -> i32 {
+            (0..self.height).flat_map(|y| (0..self.width).map(move |x| (x, y))).filter(|&c| self.can_place(Thing::Unit(1), c, None).is_ok()).count() as i32
+        }
     }
 
     fn editor() -> Editor {
@@ -712,6 +936,29 @@ mod tests {
             markers: vec![Marker { kind: 40, player: 0, x: 6 * 32 + 16, y: 2 * 32 + 16 }],
         };
         Editor::new("Test", level, &[], &terrain())
+    }
+
+    #[test]
+    fn walkable_cells_leave_out_blocked_ground_and_building_bodies() {
+        let e = editor();
+        let g = e.walkable();
+        let at = |x: i32, y: i32| g[(y * 40 + x) as usize];
+        assert!(!at(20, 3) && at(20, 12), "the blocked column ends at row 9");
+        assert!(at(11, 10) && !at(11, 11) && !at(12, 12) && at(13, 11), "the mine: top row open, the rest not");
+        assert_eq!(g.iter().filter(|&&w| w).count() as i32, e.can_place_count());
+    }
+
+    #[test]
+    fn a_landing_needs_its_four_by_two_cells_open_and_inside() {
+        let e = editor();
+        assert!(e.can_land((5, 15)).is_ok());
+        assert!(e.can_land((18, 3)).is_err(), "x 17..=20 reaches the blocked column 20");
+        assert!(e.can_land((16, 3)).is_ok(), "x 15..=18");
+        assert!(e.can_land((10, 9)).is_err(), "row 10 is the mine's top row");
+        assert!(e.can_land((13, 11)).is_err(), "x 12 is the mine's last column");
+        assert!(e.can_land((14, 11)).is_ok(), "x 13..=16 clears it");
+        assert!(e.can_land((0, 5)).is_err() && e.can_land((38, 5)).is_err() && e.can_land((5, 29)).is_err(), "outside the 40x30 map");
+        assert!(e.can_land((1, 5)).is_ok() && e.can_land((37, 28)).is_ok(), "the edges themselves");
     }
 
     #[test]
@@ -811,6 +1058,45 @@ mod tests {
     }
 
     #[test]
+    fn custom_map_extensions_follow_the_objects_through_edits_and_undo() {
+        let mut level = editor().level().clone();
+        let mut f = obj(102, 15, 20, 2);
+        maptweak::Production { active: 1, lines: vec![(7, 0), (13, 0), (4, 0)] }.write(&mut f);
+        level.objects.push(f);
+        let mut ext = vec![ObjectExt::default(); 4];
+        ext[3].unlock = [0, 2500, 3500, 0, 0];
+        let mut e = Editor::custom("t", level, ext, &terrain());
+        e.sel = Some(Sel::Object(2));
+        assert!(e.remove_sel());
+        assert_eq!(e.ext.len(), 3);
+        assert_eq!(e.ext[2].unlock[1], 2500, "the factory's extension moved with it");
+        e.sel = Some(Sel::Object(2));
+        assert!(e.change_lines(LineChange::Remove(1)));
+        assert_eq!(e.ext[2].unlock[..3], [0, 3500, 0], "the removed line's points went with it");
+        assert!(e.change_lines(LineChange::Lock(1)));
+        assert_eq!(e.lines().unwrap().1.active, 2, "a locked line unlocks with the lines before it");
+        assert!(e.change_lines(LineChange::Lock(0)));
+        assert_eq!(e.lines().unwrap().1.active, 0);
+        assert!(e.set_unlock(0, 900) && !e.set_unlock(0, 900));
+        assert!(e.set_start_hp(2, 70) && e.level().objects[2].raw[18] == 70);
+        let mut h = e.level().header;
+        h[2] = 7000;
+        assert!(e.set_header(h));
+        e.palette = palette().iter().position(|&t| t == Thing::Object(25)).unwrap();
+        e.side = Side::Blue;
+        assert!(e.add((5, 25)));
+        assert_eq!(e.ext.len(), 4);
+        assert!(e.set_turret_type(5));
+        assert_eq!(e.level().objects[3].kind, 29);
+        for _ in 0..9 {
+            assert!(e.undo());
+        }
+        assert!(!e.undo());
+        assert_eq!((e.ext.len(), e.ext[3].unlock[1]), (4, 2500), "undo restores the objects and their extensions together");
+        assert_eq!(e.level().header[2], 0);
+    }
+
+    #[test]
     fn reach_weighs_neutral_buildings_by_flight_from_each_headquarters() {
         let e = editor();
         let r = e.reach();
@@ -823,7 +1109,18 @@ mod tests {
 
     #[test]
     fn long_status_lines_wrap() {
-        let glyphs = (0..94).map(|_| opensow_formats::sprite::Frame { width: 6, height: 8, hot_x: 0, hot_y: 0, extra: [0; 4], pixels: vec![0; 48], mask: vec![true; 48], enhanced: Default::default() }).collect();
+        let glyphs = (0..94)
+            .map(|_| opensow_formats::sprite::Frame {
+                width: 6,
+                height: 8,
+                hot_x: 0,
+                hot_y: 0,
+                extra: [0; 4],
+                pixels: vec![0; 48],
+                mask: vec![true; 48],
+                enhanced: Default::default(),
+            })
+            .collect();
         let f = Font::new(glyphs);
         let lines = wrap(&f, "aaaa bbbb cccc dddd", 60);
         assert!(lines.len() > 1 && lines.iter().all(|l| f.measure(l, 1) <= 60 || !l.contains(' ')), "{lines:?}");

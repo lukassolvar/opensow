@@ -10,6 +10,7 @@
 //!   `hp <= 0` is removed after `death_timer` ticks. Engine sounds and the fighter's smoke are ported; bullet damage is in `projectile`.
 
 use crate::air::AirForce;
+use crate::kinds;
 use crate::projectile::steps_at;
 
 /// Distance beyond the map edge where aircraft enter and leave.
@@ -27,15 +28,19 @@ pub enum Event {
     Fireball { x: i32, y: i32, period: u8 },
 }
 
+/// One aircraft of a launched strike, with the exe's per-object state (see the module docs for the field naming).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Aircraft {
     /// Handle of the aircraft for targeted hits (`[+0x1c]` in the exe, a number with side and class bits); here a number the
     /// simulation hands out (0 until it does).
     pub id: u32,
+    /// Which air force this is (bomber, meteor storm, carryall, tripler, fighter).
     pub force: AirForce,
+    /// The side that launched it (0 or 1).
     pub side: i32,
     /// `[+4]`, `[+8]`: position of the flight line (map pixels).
     pub x: i32,
+    /// `[+8]`: y of the flight line (map pixels).
     pub y: i32,
     /// `[+0xc]`, `[+0x10]`: the strike's target point.
     pub target: (i32, i32),
@@ -57,15 +62,21 @@ pub struct Aircraft {
     pub cloud_timer: i32,
     /// `[+0x40]`, `[+0x44]`, `[+0x48]`, `[+0x4c]`: frame, frame count, countdown, reload of the main animation.
     pub frame: i32,
+    /// `[+0x44]`: number of frames of the main animation.
     pub frames: i32,
+    /// `[+0x48]`: ticks until the main animation's next frame.
     pub anim_count: i32,
+    /// `[+0x4c]`: the value `anim_count` restarts from.
     pub anim_reload: i32,
     /// `[+0x70]`, `[+0x74]`: per-type counters (bomb timer / unload cooldown / shot cooldown, tripler firing state, ...).
     pub counter: i32,
+    /// `[+0x74]`: the second per-type counter (see `counter`).
     pub state: i32,
     /// `[+0x78]`, `[+0x7c]`, `[+0x80]`: bomb travel, x and y offsets of the spawn point.
     pub reach: i32,
+    /// `[+0x7c]`: x offset of the spawn point.
     pub off_x: i32,
+    /// `[+0x80]`: y offset of the spawn point.
     pub off_y: i32,
     /// `[+0x84]`: the tripler has reached its target and may fire.
     pub armed: bool,
@@ -75,6 +86,7 @@ pub struct Aircraft {
     /// `[+0x60]` frame of 2, `[+0x68]` countdown, reload 4); both advance once per step (`0x467450`).
     pub rear_frame: i32,
     rear_count: i32,
+    /// `[+0x60]`: frame of the landing glow (see `rear_frame`).
     pub down_frame: i32,
     down_count: i32,
     map_width_px: i32,
@@ -86,8 +98,7 @@ pub struct Aircraft {
     pub sounds: Vec<(u8, i32, i32)>,
 }
 
-/// Launches a strike. `map_cells` is the map width in cells (`[0x71cec0]`), `carry_counter` the exe's global carryall
-/// counter (`[0x89cf50]`, 0..9) which selects the squad: the returned aircraft's `squad` is the incremented value.
+/// The exe's global carryall counter (`[0x89cf50]`) after one more launch: it counts 0..9 and wraps to 0.
 pub fn launch_counter(carry_counter: usize) -> usize {
     let n = carry_counter + 1;
     if n >= 10 {
@@ -98,6 +109,8 @@ pub fn launch_counter(carry_counter: usize) -> usize {
 }
 
 impl Aircraft {
+    /// Launches a strike. `map_cells` is the map width in cells (`[0x71cec0]`), `carry_counter` the exe's global carryall
+    /// counter (`[0x89cf50]`, 0..9) which selects the squad: the returned aircraft's `squad` is the incremented value.
     pub fn launch(force: AirForce, target_x: i32, target_y: i32, side: i32, map_cells: i32, carry_counter: usize) -> Aircraft {
         let map_width_px = map_cells * 32;
         let right = target_x <= 0x400;
@@ -184,11 +197,13 @@ impl Aircraft {
         (self.rear_count, self.down_count)
     }
 
+    /// Sets the two countdowns of the carryall's exhaust and landing glow (used when a savegame is loaded).
     pub fn set_glow_counts(&mut self, rear: i32, down: i32) {
         self.rear_count = rear;
         self.down_count = down;
     }
 
+    /// Whether the aircraft is still in the world: false once it is destroyed and has finished falling.
     pub fn alive(&self) -> bool {
         if self.hp <= 0 && self.death_timer <= 0 {
             return false;
@@ -411,11 +426,9 @@ impl Aircraft {
                 7..=13 => 2,
                 _ => 2,
             };
-            if d < 7 {
-                if self.state < 100 {
-                    step = 0;
-                    self.armed = true;
-                }
+            if d < 7 && self.state < 100 {
+                step = 0;
+                self.armed = true;
             }
             self.x += if self.right { step } else { -step };
             self.frame += 1;
@@ -435,23 +448,12 @@ impl Aircraft {
     /// One pod of the six-shot strafe (`0x468240`, tripler case): each state fires on a fixed frame of the animation.
     fn tripler_fire(&mut self, events: &mut Vec<Event>) {
         // (state, required frame, y offset, x offset, next state, cooldown multiplier of the reload)
-        const SHOTS: [(i32, i32, i32, i32, i32, i32); 6] = [
-            (0, 0, -55, -80, 2, 3),
-            (2, 0, 83, -23, 4, 3),
-            (4, 0, -30, 96, 1, 13),
-            (1, 6, 9, -109, 3, 3),
-            (3, 6, 66, 69, 5, 3),
-            (5, 6, -72, 41, 0x457, 0),
-        ];
+        const SHOTS: [(i32, i32, i32, i32, i32, i32); 6] =
+            [(0, 0, -55, -80, 2, 3), (2, 0, 83, -23, 4, 3), (4, 0, -30, 96, 1, 13), (1, 6, 9, -109, 3, 3), (3, 6, 66, 69, 5, 3), (5, 6, -72, 41, 0x457, 0)];
         let Some(&(_, _, oy, ox, next, cool)) = SHOTS.iter().find(|s| s.0 == self.state && s.1 == self.frame) else { return };
         let x = self.x + self.off_x + ox;
         self.sounds.push((69, x, self.y - self.altitude + self.off_y + oy)); // `0x46843a`
-        events.push(Event::Shot {
-            bullet_type: 17,
-            strength: 0,
-            from: (x, self.y - self.altitude + 20 + self.off_y + oy),
-            to: (x, self.y + self.off_y + oy),
-        });
+        events.push(Event::Shot { bullet_type: 17, strength: 0, from: (x, self.y - self.altitude + 20 + self.off_y + oy), to: (x, self.y + self.off_y + oy) });
         self.state = next;
         if next == 0x457 {
             self.armed = false;
@@ -500,8 +502,11 @@ pub const MODE1_SQUAD: [i32; 6] = [7, 7, 7, 7, 10, 10];
 /// One unit as the computer opponent's strike pick (`0x435ad0`) sees it.
 #[derive(Debug, Clone, Copy)]
 pub struct StrikeUnit {
+    /// X position in map pixels.
     pub x: i32,
+    /// Y position in map pixels.
     pub y: i32,
+    /// Unit kind number.
     pub kind: i32,
     /// Belongs to the side that picks the target.
     pub own: bool,
@@ -518,13 +523,13 @@ pub struct StrikeUnit {
 ///    column 23 lands on the next row). The first cell with the highest value wins when it reaches 9 (the running best is
 ///    kept as a signed byte); the strike goes to the cell's centre.
 pub fn ai_strike_target(units: &[StrikeUnit]) -> Option<(i32, i32)> {
-    if let Some(u) = units.iter().find(|u| u.kind == 46 && !u.own && u.idle) {
+    if let Some(u) = units.iter().find(|u| u.kind == kinds::POD && !u.own && u.idle) {
         return Some((u.x, u.y));
     }
     let mut grid = [0i32; 481];
-    for u in units.iter().filter(|u| u.kind != 40) {
+    for u in units.iter().filter(|u| u.kind != kinds::ADVANCER) {
         let i = (u.x >> 7) + 24 * (u.y >> 7);
-        let w = if (41..=45).contains(&u.kind) && u.idle { 2 } else { 1 };
+        let w = if kinds::WALKERS.contains(&u.kind) && u.idle { 2 } else { 1 };
         let (limit, c, side, vert) = if u.own { (480, -3, -2, -1) } else { (256, 3 * w, 2 * w, w) };
         for (j, v) in [(i, c), (i + 1, side), (i - 1, side), (i + 24, vert), (i - 24, vert)] {
             if (0..=limit).contains(&j) {
@@ -548,12 +553,19 @@ pub const AIR_RANGE_STEP: i32 = 50;
 /// What the anti-air search sees of one aircraft slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AirSlot {
+    /// The aircraft's handle ([`Aircraft::id`]).
     pub id: u32,
+    /// The side that launched it.
     pub side: i32,
+    /// Which air force it is.
     pub force: AirForce,
+    /// X of the flight line in map pixels.
     pub x: i32,
+    /// Y of the flight line in map pixels.
     pub y: i32,
+    /// X offset of the point anti-air aims at ([`Aircraft::aim_dx`]).
     pub aim_dx: i32,
+    /// Hit points; a destroyed aircraft (0 or less) is still falling.
     pub hp: i32,
 }
 
@@ -637,7 +649,7 @@ mod tests {
         let pod = foe(300, 400, 46, true);
         assert_eq!(ai_strike_target(&[foe(10, 10, 1, false), pod]), Some((300, 400)));
         assert_eq!(ai_strike_target(&[foe(300, 400, 46, false)]), None); // a moving pod and a single unit: 3 < 9
-        // three foes on one block: 9 on it
+                                                                         // three foes on one block: 9 on it
         let three = [foe(200, 200, 1, false), foe(210, 200, 1, false), foe(220, 200, 1, false)];
         assert_eq!(ai_strike_target(&three), Some((192, 192)));
         // an own unit on the same block takes 3 away

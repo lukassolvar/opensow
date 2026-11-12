@@ -30,15 +30,21 @@
 use crate::facing::turn_step;
 use crate::recoil::{fire_sequence, FireSequence};
 
+/// Ticks between two target searches of an idle top.
 pub const SEARCH_POLL_TICKS: i32 = 30;
+/// The value the top's turn counter restarts from between two facing steps.
 pub const TURN_DELAY: i32 = 4;
 
+/// A weapon top's per-kind values, read from the exe's top constructors (see the module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AimParams {
     /// Target range in cells (`min`, `max`).
     pub min_range: u32,
+    /// Farthest target distance in cells (`[obj+0x1c]`).
     pub max_range: u32,
+    /// `[obj+0x28]`: the cooldown's reload value after a volley.
     pub reload: u32,
+    /// `[obj+0x2c]`: the cooldown's jitter (0 for the kinds that never set it).
     pub jitter: u32,
     /// Facings of the top sprite (32, or 16 for the walker tops).
     pub steps: u32,
@@ -64,7 +70,11 @@ pub fn spread(kind: i32) -> u32 {
 
 /// Rounds per shot (`[top+0x30]`, the spawner's outer loop): the fifth turret throws six, everything else one.
 pub fn rounds(kind: i32) -> u32 {
-    if kind == 113 { 6 } else { 1 }
+    if kind == 113 {
+        6
+    } else {
+        1
+    }
 }
 
 /// Aim and cooldown values of a unit kind's weapon top (ground kinds 1..=15, walkers 41..=45).
@@ -121,6 +131,7 @@ pub fn top_dy(kind: i32) -> i32 {
     }
 }
 
+/// What a weapon top is doing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum State {
     /// Looking for a target (every 30 ticks).
@@ -133,16 +144,20 @@ pub enum State {
     Cooldown,
 }
 
+/// A weapon top's aiming and firing state: it searches for a target, turns to it, plays its fire sequence and cools down.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TopAim {
+    /// The per-kind values of this top.
     pub params: AimParams,
     /// The weapon kind the tables came from (a snapshot keeps this and rebuilds `seq`, see [`TopAim::restore`]).
     kind: i32,
     #[serde(skip, default = "no_sequence")]
     seq: FireSequence,
+    /// What the top is doing now.
     pub state: State,
     /// Current and target facing of the top (`[obj+0x6c]`, `[obj+0x70]`).
     pub facing: u32,
+    /// The facing the top is turning to (`[obj+0x70]`).
     pub target_facing: u32,
     turn_counter: i32,
     search_counter: i32,
@@ -186,6 +201,7 @@ impl TopAim {
         }
     }
 
+    /// A top of weapon kind `kind` that points at `facing`; `None` for kinds without a weapon top.
     pub fn new(kind: i32, facing: u32) -> Option<TopAim> {
         let params = aim_params(kind)?;
         Some(TopAim {
@@ -306,7 +322,15 @@ mod tests {
                 log.push((tick, "shot"));
             }
             if t.state != last {
-                log.push((tick, match t.state { State::Idle => "idle", State::Aiming => "aiming", State::Firing => "firing", State::Cooldown => "cooldown" }));
+                log.push((
+                    tick,
+                    match t.state {
+                        State::Idle => "idle",
+                        State::Aiming => "aiming",
+                        State::Firing => "firing",
+                        State::Cooldown => "cooldown",
+                    },
+                ));
                 last = t.state;
             }
         }
@@ -321,7 +345,7 @@ mod tests {
         assert_eq!(log[1], (1, "aiming"));
         assert_eq!(log[2], (32, "firing")); // state changes on the tick the facing matches
         assert_eq!(log[3], (33, "shot")); // sequence tick 1
-        // 2 steps x 11 ticks = 22 ticks; the wrap tick is 33 + 22 = 55
+                                          // 2 steps x 11 ticks = 22 ticks; the wrap tick is 33 + 22 = 55
         assert_eq!(log[4], (55, "cooldown"));
         // cooldown 72 ticks counted from tick 56: back to idle on tick 127, which searches at once and re-acquires
         assert_eq!(log[5], (127, "acquired"));
@@ -353,7 +377,7 @@ mod tests {
             assert!(!t.tick(Some(8), |_| 0).acquired, "no search between polls");
         }
         assert!(t.tick(Some(8), |_| 0).acquired); // tick 31: the counter, reloaded to 30 on tick 1, is back to 0
-        // losing the target while aiming goes back to idle
+                                                  // losing the target while aiming goes back to idle
         let mut t = TopAim::new(7, 0).unwrap();
         t.tick(Some(8), |_| 0);
         assert_eq!(t.state, State::Aiming);

@@ -17,12 +17,14 @@
 
 use crate::sprite::Frame;
 
+/// The character of glyph 0: frame `k` of a font file is ASCII `32 + k`.
 pub const FIRST_CHAR: u32 = 32;
+/// Width of a space in pixels (the space has no glyph).
 pub const SPACE_ADVANCE: i32 = 4;
 /// The glyph a **byte >= 0x80** really draws in the exe (`0x461ac0` / `0x45ed50` read the byte with `movsx`, so it is negative, and index the
-/// glyph table `font * 100 + c`): the slot falls into the arrays of the fonts before it. The ten fonts are loaded one after the other at slot
-/// `f * 100 + 32` with room for 100 frames (`0x425af1..0x425c3e`: 0 small_i, 1 small_o, 2 medium_i, 3 medium_o, 4 big_i, 5 big_o, 6 msg_i,
-/// 7 msg_o, 8 font02_dark, 9 font02_light). Returns `(font, char)` of the glyph that is drawn (char 32..=125), or `None` when the slot holds no
+/// glyph table `font * 100 + c`): the slot falls into the arrays of the fonts before it. The thirteen fonts are loaded one after the other at slot
+/// `f * 100 + 32` with room for 100 frames (`0x425af1..0x425cb8`: 0 small_i, 1 small_o, 2 medium_i, 3 medium_o, 4 big_i, 5 big_o, 6 msg_i,
+/// 7 msg_o, 8 font02_dark, 9 font02_light, 10 font_msg2, 11 font_briefing_small, 12 font_briefing_big). Returns `(font, char)` of the glyph that is drawn (char 32..=125), or `None` when the slot holds no
 /// glyph of any font (slots before font 0 are other sprite arrays, slots 126..131 of a font are empty). Bytes below 0x80 return themselves.
 pub fn glyph_of_byte(font: i32, byte: u8) -> Option<(i32, u8)> {
     let slot = font * 100 + (byte as i8) as i32;
@@ -37,30 +39,37 @@ pub fn glyph_of_byte(font: i32, byte: u8) -> Option<(i32, u8)> {
 /// Characters drawn 2 px further right than the cursor (without changing the advance).
 pub const PIPE: char = '|';
 
+/// A bitmap font: one sprite frame per character from ASCII 32 on (docs/fonts.md).
 pub struct Font {
     glyphs: Vec<Frame>,
 }
 
 /// One glyph to draw: its frame and the top-left corner relative to the start of the line.
 pub struct Placed<'a> {
+    /// The character.
     pub ch: char,
+    /// Its glyph.
     pub glyph: &'a Frame,
     /// Pen position (the exe's left edge for plain text).
     pub x: i32,
     /// Left edge when masks are aligned by their hotspots (`pen - hot_x`), needed to nest `_i` in `_o`.
     pub left: i32,
+    /// Top edge relative to the start of the line.
     pub y: i32,
 }
 
 impl Font {
+    /// A font from the frames of its sprite file, in file order.
     pub fn new(glyphs: Vec<Frame>) -> Font {
         Font { glyphs }
     }
 
+    /// How many glyphs the font has.
     pub fn glyph_count(&self) -> usize {
         self.glyphs.len()
     }
 
+    /// The glyph of `c`, `None` when the font has none for it.
     pub fn glyph(&self, c: char) -> Option<&Frame> {
         let k = (c as u32).checked_sub(FIRST_CHAR)?;
         self.glyphs.get(k as usize)
@@ -77,6 +86,7 @@ impl Font {
         }
     }
 
+    /// Width of `text` in pixels with the given extra spacing between characters.
     pub fn measure(&self, text: &str, spacing: i32) -> i32 {
         text.chars().map(|c| self.advance(c, spacing)).sum()
     }
@@ -120,7 +130,16 @@ mod tests {
     use super::*;
 
     fn glyph(w: u16, h: u16, hot_y: i16) -> Frame {
-        Frame { width: w, height: h, hot_x: -1, hot_y, extra: [0; 4], pixels: vec![0; (w * h) as usize], mask: vec![true; (w * h) as usize], enhanced: Default::default() }
+        Frame {
+            width: w,
+            height: h,
+            hot_x: -1,
+            hot_y,
+            extra: [0; 4],
+            pixels: vec![0; (w * h) as usize],
+            mask: vec![true; (w * h) as usize],
+            enhanced: Default::default(),
+        }
     }
 
     fn font() -> Font {

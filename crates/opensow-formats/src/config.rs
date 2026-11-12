@@ -8,6 +8,7 @@
 
 use crate::{Error, Reader, Result};
 
+/// A record header `(version, magic)`: version 1, magic `0x1d6c`.
 pub const HEADER: (u16, u16) = (1, 0x1d6c);
 
 /// The per-player settings object (`0x28` bytes at `0x6bf710 + 0x28 * player`). Field offsets in the comments are the in-memory
@@ -30,6 +31,7 @@ pub struct Options {
     pub scroll_b: u32,
     /// `+0x1c`, `+0x20`: screen size (defaults 1920 x 1080; the options menu offers 640x480 .. 1920x1080).
     pub width: u32,
+    /// `+0x20`: screen height.
     pub height: u32,
     /// `+0x24`: language id 0..=7 (`lang.rs`; selects `data\diffdata\<SK|CZ|PL|HU|RU>\`).
     pub language: u32,
@@ -51,6 +53,7 @@ impl Options {
         Options { flag_a: true, flag_b: true, flag_c: false, flag_d: true, detail: 0, scroll_a: 3, scroll_b: 5, width: 0x400, height: 0x300, language: 0 }
     }
 
+    /// Parses an [`Options`] record.
     pub fn parse(data: &[u8]) -> Result<Options> {
         Options::read(&mut Reader::new(data))
     }
@@ -71,6 +74,7 @@ impl Options {
         Ok(Options { flag_a, flag_b, flag_c, flag_d, detail, scroll_a, scroll_b, width, height, language })
     }
 
+    /// Encodes the record as the exe writes it.
     pub fn write(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend(HEADER.0.to_le_bytes());
@@ -94,14 +98,21 @@ impl Options {
 /// loaded), and the music, speech and effect switches (`+0x5c/+0x5d/+0x5e`, any non-zero value is on).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Audio {
+    /// Music volume, 0..=100.
     pub music_volume: u32,
+    /// Speech volume, 0..=100.
     pub voice_volume: u32,
+    /// Sound effect volume, 0..=100.
     pub fx_volume: u32,
+    /// Music switch.
     pub music_on: bool,
+    /// Speech switch.
     pub voice_on: bool,
+    /// Sound effect switch.
     pub fx_on: bool,
 }
 
+/// The audio record's header `(version, magic)`.
 pub const AUDIO_HEADER: (u16, u16) = (1, 0x6121);
 
 impl Default for Audio {
@@ -112,6 +123,7 @@ impl Default for Audio {
 }
 
 impl Audio {
+    /// Reads an [`Audio`] record, clamping the volumes to 0..=100.
     pub fn read(r: &mut Reader) -> Result<Audio> {
         let head = (r.u16("audio version")?, r.u16("audio magic")?);
         if head != AUDIO_HEADER {
@@ -123,6 +135,7 @@ impl Audio {
         Ok(Audio { music_volume, voice_volume, fx_volume, music_on, voice_on, fx_on })
     }
 
+    /// Encodes the record as the exe writes it.
     pub fn write(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend(AUDIO_HEADER.0.to_le_bytes());
@@ -137,7 +150,9 @@ impl Audio {
 /// The whole `State of War_1.cfg`: the [`Options`] record, then the [`Audio`] record (`0x453310` / `0x452c30`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsFile {
+    /// The per-player settings record.
     pub options: Options,
+    /// The audio record.
     pub audio: Audio,
 }
 
@@ -147,6 +162,7 @@ impl SettingsFile {
         SettingsFile { options: Options::first_run(), audio: Audio::default() }
     }
 
+    /// Parses the whole settings file.
     pub fn parse(data: &[u8]) -> Result<SettingsFile> {
         let mut r = Reader::new(data);
         let options = Options::read(&mut r)?;
@@ -154,6 +170,7 @@ impl SettingsFile {
         Ok(SettingsFile { options, audio })
     }
 
+    /// Encodes the whole settings file.
     pub fn write(&self) -> Vec<u8> {
         let mut out = self.options.write();
         out.extend(self.audio.write());
@@ -172,6 +189,7 @@ pub const BLOCK_LEN: usize = 79 + 20 + 1 + 2 * LEVELS + 113;
 /// for states 0, 1, 2, followed by one random byte; the 20 random bytes before it plus the balancing byte add up to `0xac`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PassedLevels {
+    /// One state per level: 0 locked, 1 passed, 2 available.
     pub states: [u8; LEVELS],
 }
 
@@ -248,10 +266,17 @@ impl PassedLevels {
     /// `0x456720`: merge another progress record into this one (1 wins over 2 wins over 0).
     pub fn merge(&mut self, other: &PassedLevels) {
         for (a, b) in self.states.iter_mut().zip(&other.states) {
-            *a = if *a == 1 || *b == 1 { 1 } else if *a == 2 || *b == 2 { 2 } else { 0 };
+            *a = if *a == 1 || *b == 1 {
+                1
+            } else if *a == 2 || *b == 2 {
+                2
+            } else {
+                0
+            };
         }
     }
 
+    /// Parses the progress block of `player.cfg`.
     pub fn parse(data: &[u8]) -> Result<PassedLevels> {
         let mut r = Reader::new(data);
         let head = (r.u16("version")?, r.u16("magic")?);
@@ -299,7 +324,8 @@ mod tests {
 
     #[test]
     fn options_round_trip() {
-        let o = Options { flag_a: true, flag_b: false, flag_c: true, flag_d: true, detail: 3, scroll_a: 7, scroll_b: 10, width: 1024, height: 768, language: 2 };
+        let o =
+            Options { flag_a: true, flag_b: false, flag_c: true, flag_d: true, detail: 3, scroll_a: 7, scroll_b: 10, width: 1024, height: 768, language: 2 };
         let bytes = o.write();
         assert_eq!(bytes.len(), 4 + 20 + 4 + 4);
         assert_eq!(Options::parse(&bytes).unwrap(), o);
@@ -335,7 +361,10 @@ mod tests {
     fn first_run_values_and_the_audio_record() {
         let f = SettingsFile::first_run();
         let o = &f.options;
-        assert_eq!((o.flag_a, o.flag_b, o.flag_c, o.flag_d, o.detail, o.scroll_a, o.scroll_b, o.width, o.height), (true, true, false, true, 0, 3, 5, 1024, 768));
+        assert_eq!(
+            (o.flag_a, o.flag_b, o.flag_c, o.flag_d, o.detail, o.scroll_a, o.scroll_b, o.width, o.height),
+            (true, true, false, true, 0, 3, 5, 1024, 768)
+        );
         let bytes = f.write();
         assert_eq!(bytes.len(), 32 + 4 + 24);
         assert_eq!(&bytes[32..36], &[1, 0, 0x21, 0x61]);

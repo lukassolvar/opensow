@@ -17,6 +17,7 @@ pub const WORLD_VOICES: usize = 32;
 /// Player action voices playing at once, apart from the world ones.
 pub const PRIORITY_VOICES: usize = 16;
 
+/// Sound effects and speech: decoded sounds, the players they run on, and the options' switches and volumes.
 pub struct Sfx {
     device: Option<rodio::MixerDeviceSink>,
     /// The voices' own mixer when the sound enhancement (`hifi`, a soft limiter on the sum) or the debug recording
@@ -38,8 +39,11 @@ pub struct Sfx {
     pub enabled: bool,
     /// The options menu's FX / VOICE rows: switch and volume 0..=100 (`[audio+0x58]` / `[audio+0x54]`).
     pub fx_on: bool,
+    /// Effect volume, 0..=100.
     pub fx_volume: i32,
+    /// Speech switch.
     pub voice_on: bool,
+    /// Speech volume, 0..=100.
     pub voice_volume: i32,
     /// Effects asked for so far (ids), for tests.
     pub played: Vec<u8>,
@@ -48,8 +52,26 @@ pub struct Sfx {
 }
 
 impl Sfx {
+    /// Nothing loaded and no device opened yet.
     pub fn new() -> Sfx {
-        Sfx { device: None, route: None, route_hifi: false, log: None, hq: HashMap::new(), cache: HashMap::new(), voices: Vec::new(), priority: Vec::new(), speech: None, enabled: false, fx_on: true, fx_volume: 100, voice_on: true, voice_volume: 100, played: Vec::new(), spoken: Vec::new() }
+        Sfx {
+            device: None,
+            route: None,
+            route_hifi: false,
+            log: None,
+            hq: HashMap::new(),
+            cache: HashMap::new(),
+            voices: Vec::new(),
+            priority: Vec::new(),
+            speech: None,
+            enabled: false,
+            fx_on: true,
+            fx_volume: 100,
+            voice_on: true,
+            voice_volume: 100,
+            played: Vec::new(),
+            spoken: Vec::new(),
+        }
     }
 
     /// Open the output device on first use (and the voices' mixer, `route`); false when there is none (sound then stays off).
@@ -109,7 +131,9 @@ impl Sfx {
         if let Some(old) = self.speech.take() {
             old.stop();
         }
-        let Some(w) = game.resolve(&format!("Data\\Sounds\\{dir}\\{name}")).and_then(|p| std::fs::read(p).ok()).and_then(|d| wav::parse(&d).ok()) else { return };
+        let Some(w) = game.resolve(&format!("Data\\Sounds\\{dir}\\{name}")).and_then(|p| std::fs::read(p).ok()).and_then(|d| wav::parse(&d).ok()) else {
+            return;
+        };
         let (Some(ch), Some(rate)) = (NonZero::new(w.channels), NonZero::new(w.sample_rate)) else { return };
         if !self.open() {
             return;
@@ -180,7 +204,8 @@ impl Sfx {
         let out = device.config().sample_rate();
         let player = rodio::Player::connect_new(self.route.as_ref().map_or(device.mixer(), |r| &r.0));
         if crate::hifi::enabled() {
-            let data = self.hq.entry(id).or_insert_with(|| crate::hifi::prepare(w.pcm.iter().map(|&s| s as f32 / 32768.0), w.channels, w.sample_rate, true)).clone();
+            let data =
+                self.hq.entry(id).or_insert_with(|| crate::hifi::prepare(w.pcm.iter().map(|&s| s as f32 / 32768.0), w.channels, w.sample_rate, true)).clone();
             if gains.0 == gains.1 || w.channels > 2 {
                 // centred (all sounds are, `play_at`): the one volume on the player, the samples stay mono
                 player.set_volume(gains.0);
@@ -193,7 +218,11 @@ impl Sfx {
                 }
                 player.append(crate::hifi::Resampled::new(st.into(), 2, w.sample_rate, speed, out, false));
             }
-            if priority { self.priority.push(player) } else { self.voices.push(player) }
+            if priority {
+                self.priority.push(player)
+            } else {
+                self.voices.push(player)
+            }
             return;
         }
         let mut samples: Vec<f32> = w.pcm.iter().map(|&s| s as f32 / 32768.0).collect();
@@ -212,7 +241,11 @@ impl Sfx {
             }
         }
         player.append(rodio::buffer::SamplesBuffer::new(ch, rate, samples).speed(speed));
-        if priority { self.priority.push(player) } else { self.voices.push(player) }
+        if priority {
+            self.priority.push(player)
+        } else {
+            self.voices.push(player)
+        }
     }
 }
 
@@ -232,7 +265,7 @@ fn route(device: &rodio::MixerDeviceSink) -> Option<(rodio::mixer::Mixer, rodio:
             let v = self.inner.next()?;
             let _ = self.out.write_all(&((v.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
             self.n += 1;
-            if self.n % 48000 == 0 {
+            if self.n.is_multiple_of(48000) {
                 let _ = self.out.flush();
             }
             Some(v)
@@ -263,7 +296,11 @@ fn route(device: &rodio::MixerDeviceSink) -> Option<(rodio::mixer::Mixer, rodio:
     }
     if let Some(path) = dump {
         if let Ok(f) = std::fs::File::create(&path) {
-            eprintln!("audio: recording the effects mix to {path} (raw 16-bit little-endian, {} Hz, {} channels)", device.config().sample_rate(), device.config().channel_count());
+            eprintln!(
+                "audio: recording the effects mix to {path} (raw 16-bit little-endian, {} Hz, {} channels)",
+                device.config().sample_rate(),
+                device.config().channel_count()
+            );
             source = Box::new(Tap { inner: source, out: std::io::BufWriter::new(f), n: 0 });
         }
     }
@@ -274,6 +311,6 @@ fn route(device: &rodio::MixerDeviceSink) -> Option<(rodio::mixer::Mixer, rodio:
 
 /// +-10 % pitch from a cheap clock-based pick (the exe uses its visual generator, so the sequence need not match).
 pub fn jitter() -> f32 {
-    let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos() / 1000) % 201;
+    let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_micros()) % 201;
     0.9 + n as f32 / 1000.0
 }

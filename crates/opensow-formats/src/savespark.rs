@@ -10,7 +10,9 @@
 pub const COLUMNS: [i32; 4] = [-300, -270, -45, 104];
 /// y of the first table line relative to the screen centre (`0x445538`: `cy - 0xa0`), eleven lines 32 px apart.
 pub const ROW0: i32 = -160;
+/// Number of table lines.
 pub const ROWS: i32 = 11;
+/// Pixels between two table lines.
 pub const ROW_STEP: i32 = 32;
 /// Sparks alive at the same time at most (a new one is only born while fewer than ten exist, `0x444b79`).
 pub const MAX_SPARKS: usize = 10;

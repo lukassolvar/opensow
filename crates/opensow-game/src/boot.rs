@@ -24,6 +24,7 @@ const SKIP_FROM: i32 = 60;
 /// `(picture, timer at page start)` in the order the exe shows them.
 pub const PAGES: [(&str, i32); 3] = [("CS", 0), ("presents", 0), ("nazov", -80)];
 
+/// The pictures shown before the intro movie, one after the other.
 pub struct Boot {
     pages: Vec<(Image, i32)>,
     index: usize,

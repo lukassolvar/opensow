@@ -16,10 +16,12 @@ use std::sync::{Arc, OnceLock};
 
 static ENABLED: AtomicBool = AtomicBool::new(true);
 
+/// Switches the sound enhancement on or off.
 pub fn set_enabled(on: bool) {
     ENABLED.store(on, Ordering::Relaxed);
 }
 
+/// Whether the sound enhancement is on.
 pub fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
@@ -104,6 +106,7 @@ pub struct Resampled {
 }
 
 impl Resampled {
+    /// A sound resampled to the output rate while it plays; `speed` changes the pitch.
     pub fn new(data: Arc<[f32]>, channels: u16, in_rate: u32, speed: f32, out_rate: rodio::SampleRate, looping: bool) -> Resampled {
         let ch = channels.max(1) as usize;
         let step = in_rate as f64 * speed.max(0.01) as f64 / out_rate.get() as f64;
@@ -195,7 +198,11 @@ mod tests {
 
     /// Worst error against the exact sine, away from the start and end.
     fn worst(out: &[f32], freq: f64, rate: f64) -> f32 {
-        out[200..out.len() - 200].iter().enumerate().map(|(i, &v)| (v - (2.0 * std::f64::consts::PI * freq * (i + 200) as f64 / rate).sin() as f32 * 0.5).abs()).fold(0.0, f32::max)
+        out[200..out.len() - 200]
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| (v - (2.0 * std::f64::consts::PI * freq * (i + 200) as f64 / rate).sin() as f32 * 0.5).abs())
+            .fold(0.0, f32::max)
     }
 
     #[test]

@@ -11,6 +11,7 @@ const FILE: &str = "skirmish-stars.txt";
 /// Star colours (RGB): bronze, silver, gold, ruby, in [`Difficulty::ALL`] order.
 pub const COLOURS: [(u8, u8, u8); 4] = [(205, 127, 50), (205, 212, 224), (255, 208, 40), (230, 25, 90)];
 
+/// The colour of the star for a win at this difficulty.
 pub fn colour(d: Difficulty) -> (u8, u8, u8) {
     COLOURS[rank(d)]
 }
@@ -19,6 +20,7 @@ fn rank(d: Difficulty) -> usize {
     Difficulty::ALL.iter().position(|&x| x == d).unwrap_or(1)
 }
 
+/// The skirmish maps the player has won, with the hardest difficulty each was won at.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Stars {
     best: HashMap<String, Difficulty>,
@@ -38,6 +40,7 @@ impl Stars {
         Stars::parse(&text)
     }
 
+    /// Reads the stars from the text of their file (`map=difficulty` lines).
     pub fn parse(text: &str) -> Stars {
         let best = text
             .lines()
@@ -50,6 +53,7 @@ impl Stars {
         Stars { best }
     }
 
+    /// The stars as the text of their file.
     pub fn to_text(&self) -> String {
         let mut lines: Vec<String> = self.best.iter().map(|(m, d)| format!("{m}={}", d.name())).collect();
         lines.sort();
@@ -70,6 +74,7 @@ impl Stars {
         true
     }
 
+    /// Writes the stars file (never in tests).
     pub fn save(&self) {
         if cfg!(test) {
             return;

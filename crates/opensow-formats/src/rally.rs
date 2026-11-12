@@ -15,6 +15,7 @@ pub const WIDGET_ID: u32 = 0x7b;
 
 /// `ikonyrpoints` frames of the button: idle `[0x5e719c]` and hovered `[0x5e71a4]` (48x21, hot (24, 10)).
 pub const BUTTON_FRAME: usize = 1;
+/// `ikonyrpoints` frame of the button while the pointer is over it.
 pub const BUTTON_HOVER_FRAME: usize = 3;
 
 /// The button's hot spot sits at the top icon's position + this (`0x455dcf`: x + 4, y - 0x29).
@@ -26,6 +27,7 @@ pub const BUTTON_RECT: (i32, i32, i32, i32) = (-0x19, -0xb, 0x19, 0xc);
 /// The map marker (`extras\rallypoint`, array `0x5eab00`, 16 frames) is drawn with the additive blit at the point while the
 /// building is selected; its frame `[bld+0x60]` advances every 3 ticks (`0x40de60`: counter `[bld+0x64]` reloaded with 3).
 pub const MARKER_FRAMES: u64 = 16;
+/// Ticks each frame of the map marker is shown.
 pub const MARKER_PERIOD: u64 = 3;
 
 /// The marker frame of a building at game tick `tick` (all buildings share the phase: every building's counter starts at 0 when
@@ -37,8 +39,11 @@ pub fn marker_frame(tick: u64) -> usize {
 /// The animation played once at the point when it is set (`0x4175c4`): `extras\cross_rp` (array `0x5e6028`) frames 0..=20,
 /// 3 ticks each, additive; sound 68 (`airforce-dest`), not positional.
 pub const CLICK_ARRAY: u32 = 0x5e6028;
+/// Last frame of the animation played when the point is set.
 pub const CLICK_LAST_FRAME: u16 = 20;
+/// Ticks each frame of that animation is shown.
 pub const CLICK_PERIOD: u8 = 3;
+/// Sound played when the point is set (`airforce-dest`).
 pub const CLICK_SOUND: u8 = 68;
 
 /// Whether a building kind has the rally feature.
@@ -60,6 +65,7 @@ pub fn usable(point: (i32, i32), cells: (i32, i32)) -> bool {
 /// The pointer while the mode is active (`0x41763b..0x417681`): type 9 at offset (-1, 0) over a free ground cell, else the
 /// blocked arrow (type 1, offset (-12, -8)); `blocked` is the walkers' grid `0x6c7a4c`.
 pub const POINTER_TYPE: usize = 9;
+/// Offset of the rally pointer's picture from the mouse position.
 pub const POINTER_OFFSET: (i32, i32) = (-1, 0);
 
 #[cfg(test)]

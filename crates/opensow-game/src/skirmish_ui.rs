@@ -7,16 +7,15 @@
 
 use crate::assets::{load_backdrop, Assets};
 use crate::multiplayer::{display_names, Setup};
+use crate::page::{
+    arrow, capitalised, hud_icon, mark, outline, rect, ring, star_shape, stepper_arrows, turret_picture, Ink, Picture, ACCENT, BLUE, GOLD, GREEN, MUTED, SIDE,
+    T, TEXT, WARN,
+};
 use crate::sim::Difficulty;
 use crate::tr::Tr;
 use crate::ui::{self, Image, Rect};
 use opensow_formats::lang::LangFile;
 use opensow_formats::level::{Level, ObjectKind};
-use opensow_formats::sprite::Frame;
-use opensow_viewer::render::pack;
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::rc::Rc;
 
 /// The in-game sprites of the air-force rows in `multiplayer::AIR_ROWS` order (fighter, bomber, tripler, carryall, asteroid; first
 /// frame, the bomber flying right, docs/air.md); the cards carry no names, the pictures say it.
@@ -29,134 +28,6 @@ const CREDITS: usize = 275;
 const RESEARCH: usize = 276;
 /// Picture size the map preview is reduced to once (then scaled to the window).
 const THUMB: usize = 720;
-
-/// Colours of the page.
-const TEXT: (u8, u8, u8) = (226, 236, 226);
-const MUTED: (u8, u8, u8) = (150, 172, 150);
-const GOLD: (u8, u8, u8) = (247, 239, 99);
-const ACCENT: (u8, u8, u8) = (120, 230, 120);
-const BLUE: (u8, u8, u8) = (110, 150, 255);
-const GREEN: (u8, u8, u8) = (90, 230, 110);
-const SIDE: [(u8, u8, u8); 2] = [BLUE, GREEN];
-
-/// A card picture: one or more frames placed in a common space (top-left offsets), e.g. a turret's base and gun top.
-struct Picture {
-    layers: Vec<(Frame, i32, i32)>,
-    /// Bounding box of the layers.
-    x0: i32,
-    y0: i32,
-    w: i32,
-    h: i32,
-}
-
-impl Picture {
-    fn of(layers: Vec<(Frame, i32, i32)>) -> Picture {
-        let x0 = layers.iter().map(|l| l.1).min().unwrap_or(0);
-        let y0 = layers.iter().map(|l| l.2).min().unwrap_or(0);
-        let x1 = layers.iter().map(|l| l.1 + l.0.width as i32).max().unwrap_or(0);
-        let y1 = layers.iter().map(|l| l.2 + l.0.height as i32).max().unwrap_or(0);
-        Picture { layers, x0, y0, w: x1 - x0, h: y1 - y0 }
-    }
-
-    /// Scaled to fit `area` (at most `max_scale`), centred; enlarged pictures use the 2x Lanczos copies (`upscale::enhanced`).
-    fn draw(&self, c: &mut [u32], w: usize, h: usize, area: Rect, max_scale: f32) {
-        if self.w <= 0 || self.h <= 0 || area.w <= 0 || area.h <= 0 {
-            return;
-        }
-        let s = (area.w as f32 / self.w as f32).min(area.h as f32 / self.h as f32).min(max_scale);
-        let (ox, oy) = (area.x as f32 + (area.w as f32 - self.w as f32 * s) / 2.0, area.y as f32 + (area.h as f32 - self.h as f32 * s) / 2.0);
-        for (f, x, y) in &self.layers {
-            let (dx, dy) = ((ox + (x - self.x0) as f32 * s).round() as i32, (oy + (y - self.y0) as f32 * s).round() as i32);
-            match opensow_viewer::upscale::enhanced(f).filter(|_| s > 1.2) {
-                Some(big) => ui::sprite(c, w, h, big, dx, dy, s * f.width as f32 / big.width.max(1) as f32),
-                None => ui::sprite(c, w, h, f, dx, dy, s),
-            }
-        }
-    }
-}
-
-/// A turret as it stands on the map (docs/art.md): the finished base `builds\blue\sentry0N` at the building's art offset and the
-/// blue gun top (`buildings::turret_art`) at its own position, turned south-east so the barrel shows.
-fn turret_picture(assets: &mut Assets, kind: i32) -> Picture {
-    let mut layers = Vec::new();
-    let Some(art) = opensow_formats::buildings::turret_art(kind) else { return Picture::of(layers) };
-    if let Some(f) = assets.art.load(&format!("builds\\blue\\{}.ps6", art.base)).and_then(|set| set.get(2).or(set.first()).cloned()) {
-        let (ax, ay) = opensow_formats::buildings::art_offset(kind);
-        layers.push((f.clone(), ax - f.hot_x as i32, ay - f.hot_y as i32));
-    }
-    if let Some(f) = assets.art.load(&format!("units\\{}_blue.ps6", art.top)).and_then(|set| set.get(12).or(set.first()).cloned()) {
-        let (tx, ty) = opensow_formats::buildings::turret_top_pos(kind, (0, 0));
-        layers.push((f.clone(), tx - f.hot_x as i32, ty + art.top_dy - f.hot_y as i32));
-    }
-    Picture::of(layers)
-}
-
-/// HUD icon `k` without its tile: every frame of the same size shares the tile, so a pixel belongs to the icon when it differs
-/// from the colour most of those frames have there; the result is cropped to the icon.
-fn hud_icon(set: &[Frame], k: usize) -> Option<Frame> {
-    let f = set.get(k)?;
-    let peers: Vec<&Frame> = set.iter().filter(|o| o.width == f.width && o.height == f.height && o.hot_x == f.hot_x && o.hot_y == f.hot_y).collect();
-    if peers.len() < 3 {
-        return None;
-    }
-    let rgb = |p: u16| opensow_formats::sprite::rgb565_to_rgb8(p);
-    let near = |a: u16, b: u16| {
-        let (a, b) = (rgb(a), rgb(b));
-        (0..3).map(|i| (a[i] as i32 - b[i] as i32).abs()).sum::<i32>() < 36
-    };
-    let (w, h) = (f.width as usize, f.height as usize);
-    // pixels showing the tile: the value the most peers agree on
-    let tile_like: Vec<bool> = (0..w * h)
-        .map(|i| {
-            !f.mask[i] || {
-                let tile = peers.iter().filter(|o| o.mask[i]).map(|o| o.pixels[i]).max_by_key(|&p| peers.iter().filter(|o| o.mask[i] && near(o.pixels[i], p)).count());
-                tile.is_none_or(|t| near(f.pixels[i], t))
-            }
-        })
-        .collect();
-    // the tile is what of it is reachable from the frame's edge: what shows through the icon (the bulb's glass) stays
-    let mut outside = vec![false; w * h];
-    let mut stack: Vec<usize> = (0..w * h).filter(|&i| (i % w == 0 || i % w == w - 1 || i / w == 0 || i / w == h - 1) && tile_like[i]).collect();
-    while let Some(i) = stack.pop() {
-        if outside[i] {
-            continue;
-        }
-        outside[i] = true;
-        let (x, y) = (i % w, i / w);
-        for (nx, ny) in [(x.wrapping_sub(1), y), (x + 1, y), (x, y.wrapping_sub(1)), (x, y + 1)] {
-            if nx < w && ny < h && tile_like[ny * w + nx] && !outside[ny * w + nx] {
-                stack.push(ny * w + nx);
-            }
-        }
-    }
-    let keep: Vec<bool> = (0..w * h).map(|i| f.mask[i] && !outside[i]).collect();
-    // drop lone specks (noise where the tile itself varies)
-    let solid: Vec<bool> = (0..w * h)
-        .map(|i| {
-            let (x, y) = ((i % w) as i32, (i / w) as i32);
-            keep[i] && [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().filter(|(dx, dy)| {
-                let (nx, ny) = (x + dx, y + dy);
-                nx >= 0 && ny >= 0 && (nx as usize) < w && (ny as usize) < h && keep[ny as usize * w + nx as usize]
-            }).count() >= 2
-        })
-        .collect();
-    let xs = (0..w * h).filter(|&i| solid[i]).map(|i| i % w);
-    let ys = (0..w * h).filter(|&i| solid[i]).map(|i| i / w);
-    let (x0, x1, y0, y1) = (xs.clone().min()?, xs.max()?, ys.clone().min()?, ys.max()?);
-    let (cw, ch) = (x1 - x0 + 1, y1 - y0 + 1);
-    let mut pixels = vec![0u16; cw * ch];
-    let mut mask = vec![false; cw * ch];
-    for y in 0..ch {
-        for x in 0..cw {
-            let i = (y + y0) * w + x + x0;
-            if solid[i] {
-                pixels[y * cw + x] = f.pixels[i];
-                mask[y * cw + x] = true;
-            }
-        }
-    }
-    Some(Frame { width: cw as u16, height: ch as u16, hot_x: 0, hot_y: 0, extra: [0; 4], pixels, mask, enhanced: Default::default() })
-}
 
 /// Every control of the page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,13 +45,28 @@ pub enum Hit {
     Back,
     Reset,
     Start,
+    /// The map list's tabs: the shipped maps, the players' own (docs/map-editor-ingame.md).
+    Tab(Tab),
+    /// Custom tab: show the maps folder, edit the selected map.
+    OpenFolder,
+    Edit,
 }
 
+/// Which maps the list shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    Original,
+    Custom,
+}
+
+/// What a press on the screen asks the game to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     None,
     Leave,
     Start,
+    /// Open this custom map in the map editor.
+    Edit(std::path::PathBuf),
 }
 
 /// The selected map's picture and script.
@@ -205,6 +91,8 @@ struct Geo {
     badge: Rect,
     /// The map list (wide) or the map selector line (compact).
     list: Option<Rect>,
+    /// Compact layout: the row of the list's tabs (and the Custom tab's folder / edit buttons) above the selector.
+    tab_row: Option<Rect>,
     row_h: i32,
     selector: Option<Rect>,
     preview_panel: Rect,
@@ -222,10 +110,6 @@ struct Geo {
     note_x: i32,
 }
 
-fn rect(x: i32, y: i32, w: i32, h: i32) -> Rect {
-    Rect { x, y, w, h }
-}
-
 impl Geo {
     fn wide() -> Geo {
         Geo {
@@ -240,6 +124,7 @@ impl Geo {
             hh: 58,
             badge: rect(1520, 24, 340, 48),
             list: Some(rect(60, 128, 420, 800)),
+            tab_row: None,
             row_h: 50,
             selector: None,
             preview_panel: rect(510, 128, 560, 800),
@@ -271,10 +156,11 @@ impl Geo {
             hh: 40,
             badge: rect(744, 12, 264, 36),
             list: None,
+            tab_row: Some(rect(16, 70, 420, 38)),
             row_h: 0,
-            selector: Some(rect(16, 72, 420, 44)),
-            preview_panel: rect(16, 124, 420, 556),
-            preview: rect(36, 140, 380, 380),
+            selector: Some(rect(16, 114, 420, 42)),
+            preview_panel: rect(16, 164, 420, 516),
+            preview: rect(54, 176, 344, 344),
             facts_y: 534,
             facts_dy: 34,
             players: rect(452, 72, 556, 132),
@@ -334,9 +220,7 @@ impl Geo {
 
     /// A stepper's "-" and "+" areas at its two ends.
     fn stepper(r: Rect) -> (Rect, Rect) {
-        // the arrows take at most a third each, and not much wider than tall: the value keeps the middle
-        let t = (r.w / 3).min(r.h + r.h / 4);
-        (rect(r.x, r.y, t, r.h), rect(r.x + r.w - t, r.y, t, r.h))
+        stepper_arrows(r)
     }
 
     /// The difficulty stepper on the computer's row.
@@ -360,50 +244,67 @@ impl Geo {
         rect(self.side_col(side) - w / 2, row.y + 4, w, row.h - 8)
     }
 
-    /// Visible map rows of the list.
+    /// Visible map rows of the list (the Custom tab keeps a row for its buttons).
+    fn visible_rows_of(&self, tab: Tab) -> usize {
+        let foot = if tab == Tab::Custom { self.row_h + self.pad / 2 } else { 0 };
+        self.list.map_or(0, |l| ((l.h - self.hh - self.pad / 2 - foot) / self.row_h).max(1) as usize)
+    }
+
+    #[cfg(test)]
     fn visible_rows(&self) -> usize {
-        self.list.map_or(0, |l| ((l.h - self.hh - self.pad / 2) / self.row_h).max(1) as usize)
+        self.visible_rows_of(Tab::Original)
+    }
+
+    /// The two tabs: in the list's heading (wide) or at the left of the tab row (compact).
+    fn tabs(&self) -> [Rect; 2] {
+        match (self.list, self.tab_row) {
+            (Some(l), _) => {
+                let tw = (l.w - 2 * self.pad - 8) / 2;
+                [0, 1].map(|i| rect(l.x + self.pad + i * (tw + 8), l.y + 10, tw, self.hh - 18))
+            }
+            (None, Some(r)) => [0, 1].map(|i| rect(r.x + i * 128, r.y, 124, r.h)),
+            _ => [rect(0, 0, 0, 0); 2],
+        }
+    }
+
+    /// The Custom tab's folder and edit buttons: under the list (wide) or at the right of the tab row (compact).
+    fn custom_buttons(&self) -> [Rect; 2] {
+        match (self.list, self.tab_row) {
+            (Some(l), _) => {
+                let bw = (l.w - 2 * self.pad - 8) / 2;
+                let y = l.y + l.h - self.pad / 2 - self.row_h;
+                [0, 1].map(|i| rect(l.x + self.pad + i * (bw + 8), y, bw, self.row_h - 6))
+            }
+            (None, Some(r)) => [rect(r.x + 262, r.y, 76, r.h), rect(r.x + 344, r.y, 76, r.h)],
+            _ => [rect(0, 0, 0, 0); 2],
+        }
     }
 }
 
-/// Design -> window transform: the design area scaled to fit and centred.
-#[derive(Clone, Copy)]
-struct T {
-    s: f32,
-    ox: f32,
-    oy: f32,
-}
-
-impl T {
-    fn new(g: &Geo, w: usize, h: usize) -> T {
-        let s = (w as f32 / g.d.0 as f32).min(h as f32 / g.d.1 as f32);
-        T { s, ox: (w as f32 - g.d.0 as f32 * s) / 2.0, oy: (h as f32 - g.d.1 as f32 * s) / 2.0 }
-    }
-    fn x(&self, v: i32) -> i32 {
-        (self.ox + v as f32 * self.s).round() as i32
-    }
-    fn y(&self, v: i32) -> i32 {
-        (self.oy + v as f32 * self.s).round() as i32
-    }
-    fn len(&self, v: i32) -> i32 {
-        (v as f32 * self.s).round() as i32
-    }
-    fn r(&self, r: Rect) -> Rect {
-        let (x0, y0) = (self.x(r.x), self.y(r.y));
-        Rect { x: x0, y: y0, w: self.x(r.x + r.w) - x0, h: self.y(r.y + r.h) - y0 }
-    }
-}
-
+/// The skirmish setup screen: map list, preview, both sides' resources, side and difficulty.
 pub struct SkirmishMenu {
-    /// Level names (`data\levels\*.net` without the extension) and what the list shows for each.
+    /// The list's maps: level names (`data\levels\*.net` without the extension) on the Original tab, the stars' keys
+    /// (`custom/<file stem>`) on the Custom tab; and what the list shows for each.
     pub maps: Vec<String>,
+    /// What the list shows for each entry of `maps`.
     pub names: Vec<String>,
+    /// The tab shown: the shipped maps or the player's custom maps.
+    pub tab: Tab,
+    /// The shipped maps' `maps` / `names` while the Custom tab shows.
+    shipped: (Vec<String>, Vec<String>),
+    /// The maps folder (`custom_maps.rs`), read when the Custom tab opens.
+    pub custom: Vec<crate::custom_maps::Entry>,
+    /// The maps folder (`custom_maps::dir`; tests use their own).
+    custom_dir: std::path::PathBuf,
+    /// Index of the chosen map in `maps`.
     pub map: usize,
+    /// Both sides' starting values as edited.
     pub setup: Setup,
     /// The selected map's own setup (`Setup::skirmish_default`); a win earns a star only while `setup` equals it.
     defaults: Setup,
     /// The human's side: 0 blue, 1 green.
     pub local: usize,
+    /// The computer's strength.
     pub difficulty: Difficulty,
     stars: crate::stars::Stars,
     preview: Option<Preview>,
@@ -418,8 +319,7 @@ pub struct SkirmishMenu {
     turrets: Vec<Picture>,
     /// Credits and research: the HUD's gold bars and light bulb cut off their tile (`hud_icon`).
     icons: [Option<Picture>; 2],
-    fonts: RefCell<HashMap<i32, Rc<crate::gdi::Gdi>>>,
-    bitmap: Rc<(opensow_formats::font::Font, opensow_formats::font::Font)>,
+    ink: Ink,
     hover: Option<Hit>,
     cursor: (i32, i32),
     /// Ticks shown so far (the hovered card's picture turns).
@@ -430,9 +330,15 @@ pub struct SkirmishMenu {
 }
 
 impl SkirmishMenu {
+    /// Builds the screen; `stars` are the maps the player has already won.
     pub fn new(assets: &mut Assets, stars: &crate::stars::Stars) -> SkirmishMenu {
         let language = assets.game.language();
-        let strings = assets.game.resolve(&format!("Data\\Language\\{}", language.file_name())).and_then(|p| std::fs::read(p).ok()).and_then(|d| LangFile::parse(&d).ok()).map(|f| f.with_supplement(language));
+        let strings = assets
+            .game
+            .resolve(&format!("Data\\Language\\{}", language.file_name()))
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|d| LangFile::parse(&d).ok())
+            .map(|f| f.with_supplement(language));
         let mut maps: Vec<String> = assets
             .game
             .level_files()
@@ -449,13 +355,20 @@ impl SkirmishMenu {
         };
         maps.sort_by_key(|m| (from_warmonger(m), m.to_lowercase()));
         let names = display_names(&maps, &assets.game);
-        let air = AIR_SPRITES.iter().map(|n| Picture::of(assets.art.load(&format!("{n}.ps6")).and_then(|set| set.first().cloned()).map(|f| (f, 0, 0)).into_iter().collect())).collect();
-        let turrets = (25..=29).map(|kind| turret_picture(assets, kind)).collect();
+        let air = AIR_SPRITES
+            .iter()
+            .map(|n| Picture::of(assets.art.load(&format!("{n}.ps6")).and_then(|set| set.first().cloned()).map(|f| (f, 0, 0)).into_iter().collect()))
+            .collect();
+        let turrets = (25..=29).map(|kind| turret_picture(&mut assets.art, kind)).collect();
         let hud = assets.art.load("extras\\ikony.ps6");
         let icons = [GOLD_ICON, BULB_ICON].map(|k| hud.as_deref().and_then(|set| hud_icon(set, k)).map(|f| Picture::of(vec![(f, 0, 0)])));
         let mut m = SkirmishMenu {
+            shipped: (maps.clone(), names.clone()),
             maps,
             names,
+            tab: Tab::Original,
+            custom: Vec::new(),
+            custom_dir: crate::custom_maps::dir(),
             map: 0,
             setup: Setup::default(),
             defaults: Setup::default(),
@@ -470,8 +383,7 @@ impl SkirmishMenu {
             air,
             turrets,
             icons,
-            fonts: RefCell::new(HashMap::new()),
-            bitmap: assets.font("medium"),
+            ink: Ink::new(assets.font("medium")),
             hover: None,
             cursor: (-1, -1),
             tick: 0,
@@ -483,6 +395,39 @@ impl SkirmishMenu {
         m
     }
 
+    /// Shows the shipped maps or the players' own (the folder is read again each time the Custom tab opens).
+    pub fn set_tab(&mut self, tab: Tab) {
+        if tab == Tab::Custom {
+            self.custom = crate::custom_maps::list_in(&self.custom_dir);
+            self.maps = self.custom.iter().map(|e| e.star_key()).collect();
+            self.names = self.custom.iter().map(|e| e.name.clone()).collect();
+        } else {
+            (self.maps, self.names) = self.shipped.clone();
+        }
+        self.tab = tab;
+        self.scroll = 0;
+        self.preview = None;
+        self.map = 0;
+        self.select_map(0);
+    }
+
+    /// The selected custom map's file, when the Custom tab shows one.
+    pub fn custom_path(&self) -> Option<std::path::PathBuf> {
+        (self.tab == Tab::Custom).then(|| self.custom.get(self.map).map(|e| e.path.clone())).flatten()
+    }
+
+    /// The selected custom map's mission in words (countdown, destroy-everything rule); `None` for a plain skirmish.
+    pub fn objective(&self) -> Option<String> {
+        let map = (self.tab == Tab::Custom).then(|| self.custom.get(self.map).and_then(|e| e.map.as_ref().ok())).flatten()?;
+        self.preview.as_ref().filter(|p| p.map == self.map)?;
+        self.tr.objective(map.timer(), map.mission.win)
+    }
+
+    /// Why the selected custom map cannot be played (`None` on the Original tab).
+    pub fn blocker(&self) -> Option<crate::custom_maps::Blocker> {
+        (self.tab == Tab::Custom).then(|| self.custom.get(self.map).and_then(|e| e.blocker())).flatten()
+    }
+
     /// Chooses a map, loads its defaults and its picture.
     pub fn select_map(&mut self, i: usize) {
         if i >= self.maps.len() {
@@ -490,15 +435,28 @@ impl SkirmishMenu {
         }
         self.map = i;
         self.preview = None;
-        let Some(level) = crate::skirmish::load_map(&self.game, &self.maps[i]) else { return };
-        self.setup = Setup::skirmish_default(&level);
+        let (level, (game, terrain)) = match self.tab {
+            Tab::Original => {
+                let Some(level) = crate::skirmish::load_map(&self.game, &self.maps[i]) else { return };
+                self.setup = Setup::skirmish_default(&level);
+                let source = self.game.net_terrain(&self.maps[i], level.level_id());
+                (level, source)
+            }
+            Tab::Custom => {
+                let Some(map) = self.custom.get(i).and_then(|e| e.map.as_ref().ok()).filter(|_| self.custom[i].blocker().is_none()) else { return };
+                // a custom map's own resources are its default (no carryall rule: its maker chose them)
+                self.setup = Setup::of_map(&map.level);
+                // the human plays blue on every custom map (no Swap sides on that tab)
+                self.local = 0;
+                (map.level.clone(), crate::custom_maps::terrain_source(&self.game, map.terrain()))
+            }
+        };
         self.defaults = self.setup.clone();
-        let (game, terrain) = self.game.net_terrain(&self.maps[i], level.level_id());
         if let Some(thumb) = opensow_viewer::scene::thumbnail(&game, &terrain, THUMB, THUMB) {
             self.preview = Some(Preview { map: i, thumb, level });
         }
         // keep the chosen row in the list's view
-        let rows = Geo::wide().visible_rows().max(1);
+        let rows = Geo::wide().visible_rows_of(self.tab).max(1);
         if i < self.scroll {
             self.scroll = i;
         } else if i >= self.scroll + rows {
@@ -527,6 +485,7 @@ impl SkirmishMenu {
         self.strings.as_ref().and_then(|s| s.get(i)).map(|s| s.trim().to_owned()).unwrap_or_default()
     }
 
+    /// Advances the screen's animations by `ticks` game ticks.
     pub fn update(&mut self, ticks: u32) {
         self.tick = self.tick.wrapping_add(ticks);
     }
@@ -536,10 +495,20 @@ impl SkirmishMenu {
     /// Every control with its window rectangle.
     fn controls(&self, w: usize, h: usize) -> Vec<(Rect, Hit)> {
         let g = Geo::for_window(w, h);
-        let t = T::new(&g, w, h);
+        let t = T::new(g.d, w, h);
         let mut out = Vec::new();
+        for (r, tab) in g.tabs().into_iter().zip([Tab::Original, Tab::Custom]) {
+            out.push((t.r(r), Hit::Tab(tab)));
+        }
+        if self.tab == Tab::Custom {
+            let [folder, edit] = g.custom_buttons();
+            out.push((t.r(folder), Hit::OpenFolder));
+            if self.custom.get(self.map).is_some_and(|e| e.map.is_ok()) {
+                out.push((t.r(edit), Hit::Edit));
+            }
+        }
         if let Some(l) = g.list {
-            for row in 0..g.visible_rows() {
+            for row in 0..g.visible_rows_of(self.tab) {
                 let i = self.scroll + row;
                 if i >= self.maps.len() {
                     break;
@@ -551,7 +520,10 @@ impl SkirmishMenu {
             out.push((t.r(rect(s.x, s.y, s.h + 10, s.h)), Hit::MapPrev));
             out.push((t.r(rect(s.x + s.w - s.h - 10, s.y, s.h + 10, s.h)), Hit::MapNext));
         }
-        out.push((t.r(g.swap_button()), Hit::Swap));
+        // on a custom map the human always plays blue: no Swap sides there
+        if self.tab == Tab::Original {
+            out.push((t.r(g.swap_button()), Hit::Swap));
+        }
         let (down, up) = Geo::stepper(g.level_stepper());
         out.push((t.r(down), Hit::LevelDown));
         out.push((t.r(up), Hit::LevelUp));
@@ -589,6 +561,7 @@ impl SkirmishMenu {
         self.controls(w, h).into_iter().find(|(_, k)| *k == hit).map(|(r, _)| (r.x + r.w / 2, r.y + r.h / 2))
     }
 
+    /// Updates what the pointer is over.
     pub fn mouse_moved(&mut self, x: i32, y: i32, w: usize, h: usize) {
         self.cursor = (x, y);
         let hit = self.hit(x, y, w, h);
@@ -598,6 +571,7 @@ impl SkirmishMenu {
         self.hover = hit;
     }
 
+    /// A click at a window position.
     pub fn click(&mut self, x: i32, y: i32, w: usize, h: usize) -> Event {
         match self.hit(x, y, w, h) {
             Some(hit) => self.press(hit),
@@ -605,6 +579,7 @@ impl SkirmishMenu {
         }
     }
 
+    /// Does what a widget does when pressed.
     pub fn press(&mut self, hit: Hit) -> Event {
         match hit {
             Hit::Map(i) => {
@@ -614,6 +589,9 @@ impl SkirmishMenu {
                 }
             }
             Hit::MapPrev | Hit::MapNext => {
+                if self.maps.is_empty() {
+                    return Event::None;
+                }
                 let n = self.maps.len().max(1);
                 let i = if hit == Hit::MapNext { (self.map + 1) % n } else { (self.map + n - 1) % n };
                 self.select_map(i);
@@ -645,17 +623,40 @@ impl SkirmishMenu {
                 return Event::Leave;
             }
             Hit::Start => {
+                if self.map_level().is_none() {
+                    return Event::None; // nothing playable selected (an empty or broken custom map)
+                }
                 self.sounds.push(38);
                 return Event::Start;
+            }
+            Hit::Tab(tab) => {
+                if tab != self.tab {
+                    self.set_tab(tab);
+                    self.sounds.push(39);
+                }
+            }
+            Hit::OpenFolder => {
+                self.sounds.push(39);
+                if !cfg!(test) {
+                    crate::custom_maps::open_folder();
+                }
+            }
+            Hit::Edit => {
+                if let Some(p) = self.custom.get(self.map).filter(|e| e.map.is_ok()).map(|e| e.path.clone()) {
+                    self.sounds.push(39);
+                    return Event::Edit(p);
+                }
             }
         }
         Event::None
     }
 
+    /// Escape: the same as the Back button.
     pub fn escape(&mut self) -> Event {
         self.press(Hit::Back)
     }
 
+    /// Enter: the same as the Start button.
     pub fn enter(&mut self) -> Event {
         self.press(Hit::Start)
     }
@@ -674,56 +675,14 @@ impl SkirmishMenu {
             }
             return;
         }
-        let max = self.maps.len().saturating_sub(g.visible_rows());
+        let max = self.maps.len().saturating_sub(g.visible_rows_of(self.tab));
         let steps = dy.round() as i32;
         self.scroll = (self.scroll as i32 - steps).clamp(0, max as i32) as usize;
     }
 
     // ---- drawing ----
 
-    fn font(&self, px: i32) -> Option<Rc<crate::gdi::Gdi>> {
-        let px = px.max(8);
-        if let Some(f) = self.fonts.borrow().get(&px) {
-            return Some(f.clone());
-        }
-        let f = Rc::new(crate::gdi::Gdi::load_sized(px as f32, 1.0)?);
-        self.fonts.borrow_mut().insert(px, f.clone());
-        Some(f)
-    }
-
-    fn text_w(&self, s: &str, px: i32) -> i32 {
-        match self.font(px) {
-            Some(g) => g.width(s),
-            None => ui::text_width(&self.bitmap, s, px as f32 / 16.0),
-        }
-    }
-
-    /// Text with its top-left at `(x, y)`, `px` high, with a dark shadow.
-    #[allow(clippy::too_many_arguments)]
-    fn text(&self, c: &mut [u32], w: usize, h: usize, s: &str, x: i32, y: i32, px: i32, rgb: (u8, u8, u8)) {
-        match self.font(px) {
-            // the face is already `px` high: no zoom; small text gets no shadow (it would smear)
-            Some(g) if px < 14 => g.draw_flat(c, w, h, s, x as f32, y as f32, 1.0, rgb),
-            Some(g) => g.draw_shadowed(c, w, h, s, x as f32, y as f32, 1.0, rgb, (0, 0, 0)),
-            None => ui::text(c, w, h, &self.bitmap, s, x, y, px as f32 / 16.0, rgb, (0, 0, 0)),
-        }
-    }
-
-    /// Text squeezed to at most `max_w` pixels wide (card names, long translations).
-    #[allow(clippy::too_many_arguments)]
-    fn text_fit(&self, c: &mut [u32], w: usize, h: usize, s: &str, x: i32, y: i32, px: i32, rgb: (u8, u8, u8), max_w: i32) {
-        match self.font(px) {
-            Some(g) => g.draw_fit(c, w, h, s, s, x as f32, y as f32, 1.0, rgb, max_w),
-            None => self.text(c, w, h, s, x, y, px, rgb),
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn centred(&self, c: &mut [u32], w: usize, h: usize, s: &str, r: Rect, px: i32, rgb: (u8, u8, u8)) {
-        let tw = self.text_w(s, px).min(r.w);
-        self.text_fit(c, w, h, s, r.x + (r.w - tw) / 2, r.y + (r.h - px) / 2 - px / 10, px, rgb, r.w);
-    }
-
+    /// Draws the screen into the `w` x `h` frame buffer.
     pub fn draw(&mut self, buf: &mut [u32], w: usize, h: usize) {
         let mut canvas = std::mem::take(&mut self.canvas);
         canvas.resize(w * h, 0);
@@ -734,7 +693,7 @@ impl SkirmishMenu {
 
     fn render(&self, c: &mut [u32], w: usize, h: usize) {
         let g = Geo::for_window(w, h);
-        let t = T::new(&g, w, h);
+        let t = T::new(g.d, w, h);
         let px = |v: i32| t.len(v).max(9);
         let tr = self.tr;
         // backdrop, dimmed
@@ -752,25 +711,29 @@ impl SkirmishMenu {
         // title, subtitle, star badge
         let title_x = t.x(g.list.or(g.selector).map_or(16, |r| r.x));
         let title = tr.title();
-        self.text(c, w, h, title, title_x, t.y((g.top - g.title_px) / 2 - 4), px(g.title_px), TEXT);
-        let sub_x = title_x + self.text_w(title, px(g.title_px)) + t.len(36);
+        self.ink.text(c, w, h, title, title_x, t.y((g.top - g.title_px) / 2 - 4), px(g.title_px), TEXT);
+        let sub_x = title_x + self.ink.width(title, px(g.title_px)) + t.len(36);
         if g.list.is_some() {
-            self.text(c, w, h, tr.subtitle(), sub_x, t.y((g.top - g.sub_px) / 2 + 2), px(g.sub_px), MUTED);
+            self.ink.text(c, w, h, tr.subtitle(), sub_x, t.y((g.top - g.sub_px) / 2 + 2), px(g.sub_px), MUTED);
         }
-        let star = self.maps.get(self.map).and_then(|m| self.stars.get(m));
+        // stars belong to the shipped maps only: the Custom tab has no badge, no row stars and no star note
+        let stars = self.tab == Tab::Original;
+        let star = self.maps.get(self.map).filter(|_| stars).and_then(|m| self.stars.get(m));
         let badge = t.r(g.badge);
-        let bc = star.map_or(GOLD, crate::stars::colour);
-        ui::fill(c, w, h, badge, (30, 30, 10), 220);
-        outline(c, w, h, badge, bc, 2);
-        let r = badge.h / 4;
-        star_shape(c, w, h, badge.x + badge.h / 2 + 4, badge.y + badge.h / 2, r.max(4), bc);
-        let label = star.map_or_else(|| tr.star_none().to_owned(), |d| tr.star_line(d));
-        let lx = badge.x + badge.h + 4;
-        self.text_fit(c, w, h, &label, lx, badge.y + (badge.h - px(g.small_px + 2)) / 2 - 2, px(g.small_px + 2), bc, badge.x + badge.w - lx - 8);
-        // maps
+        if stars {
+            let bc = star.map_or(GOLD, crate::stars::colour);
+            ui::fill(c, w, h, badge, (30, 30, 10), 220);
+            outline(c, w, h, badge, bc, 2);
+            let r = badge.h / 4;
+            star_shape(c, w, h, badge.x + badge.h / 2 + 4, badge.y + badge.h / 2, r.max(4), bc);
+            let label = star.map_or_else(|| tr.star_none().to_owned(), |d| tr.star_line(d));
+            let lx = badge.x + badge.h + 4;
+            self.ink.fit(c, w, h, &label, lx, badge.y + (badge.h - px(g.small_px + 2)) / 2 - 2, px(g.small_px + 2), bc, badge.x + badge.w - lx - 8);
+        }
+        // maps: the tabs in the list's heading (wide) or in their own row (compact)
         if let Some(l) = g.list {
-            self.panel(c, w, h, &g, &t, l, tr.maps());
-            for row in 0..g.visible_rows() {
+            self.panel(c, w, h, &g, &t, l, "");
+            for row in 0..g.visible_rows_of(self.tab) {
                 let i = self.scroll + row;
                 let Some(name) = self.names.get(i) else { break };
                 let r = t.r(rect(l.x + 12, l.y + g.hh + row as i32 * g.row_h, l.w - 24, g.row_h - 4));
@@ -781,19 +744,54 @@ impl SkirmishMenu {
                     ui::fill(c, w, h, r, (40, 110, 50), 90);
                 }
                 let tp = px(g.body_px - 2);
-                self.text_fit(c, w, h, name, r.x + t.len(16), r.y + (r.h - tp) / 2 - 2, tp, if chosen { (255, 255, 255) } else { TEXT }, r.w - t.len(56));
-                if let Some(d) = self.stars.get(&self.maps[i]) {
+                let broken = self.tab == Tab::Custom && self.custom.get(i).is_some_and(|e| e.blocker().is_some());
+                let colour = if broken {
+                    WARN
+                } else if chosen {
+                    (255, 255, 255)
+                } else {
+                    TEXT
+                };
+                self.ink.fit(c, w, h, name, r.x + t.len(16), r.y + (r.h - tp) / 2 - 2, tp, colour, r.w - t.len(56));
+                if broken {
+                    self.ink.centred(c, w, h, "!", Rect { x: r.x + r.w - t.len(40), y: r.y, w: t.len(36), h: r.h }, tp, WARN);
+                } else if let Some(d) = self.stars.get(&self.maps[i]).filter(|_| stars) {
                     star_shape(c, w, h, r.x + r.w - t.len(22), r.y + r.h / 2, t.len(11).max(4), crate::stars::colour(d));
                 }
             }
             // a scroll bar when not all maps fit
-            let rows = g.visible_rows();
+            let rows = g.visible_rows_of(self.tab);
             if self.maps.len() > rows {
                 let track = t.r(rect(l.x + l.w - 8, l.y + g.hh, 4, rows as i32 * g.row_h));
                 ui::fill(c, w, h, track, (60, 120, 70), 140);
                 let n = self.maps.len() as i32;
                 let thumb = Rect { x: track.x, y: track.y + track.h * self.scroll as i32 / n, w: track.w, h: (track.h * rows as i32 / n).max(8) };
                 ui::fill(c, w, h, thumb, ACCENT, 255);
+            }
+            if self.tab == Tab::Custom && self.maps.is_empty() {
+                let tp = px(g.body_px - 4);
+                for (k, line) in self.ink.wrap(tr.no_custom_maps(), tp, t.len(l.w - 2 * g.pad)).iter().enumerate() {
+                    self.ink.text(c, w, h, line, t.x(l.x + g.pad), t.y(l.y + g.hh + 8) + k as i32 * (tp + tp / 3), tp, MUTED);
+                }
+            }
+        }
+        for (r, tab) in g.tabs().into_iter().zip([Tab::Original, Tab::Custom]) {
+            let label = if tab == Tab::Original { tr.tab_original() } else { tr.tab_custom() };
+            self.ink.chip(c, w, h, t.r(r), label, px(g.small_px + 2), self.tab == tab, self.hover == Some(Hit::Tab(tab)), ACCENT);
+        }
+        if self.tab == Tab::Custom {
+            let [folder, edit] = g.custom_buttons();
+            let fr = t.r(folder);
+            if g.list.is_some() {
+                self.ink.button(c, w, h, fr, tr.open_folder(), px(g.small_px), self.hover == Some(Hit::OpenFolder), false);
+            } else {
+                // the compact row has no room for the label: a folder
+                let hot = self.hover == Some(Hit::OpenFolder);
+                self.ink.button(c, w, h, fr, "", px(g.small_px), hot, false);
+                crate::page::folder(c, w, h, fr, if hot { (255, 255, 255) } else { ACCENT });
+            }
+            if self.custom.get(self.map).is_some_and(|e| e.map.is_ok()) {
+                self.ink.button(c, w, h, t.r(edit), tr.edit_map(), px(g.small_px), self.hover == Some(Hit::Edit), false);
             }
         }
         if let Some(s) = g.selector {
@@ -805,9 +803,10 @@ impl SkirmishMenu {
                 let cx = if left { r.x + r.h / 2 + 4 } else { r.x + r.w - r.h / 2 - 4 };
                 arrow(c, w, h, cx, r.y + r.h / 2, a, left, if self.hover == Some(hit) { (255, 255, 255) } else { ACCENT });
             }
-            if let Some(name) = self.names.get(self.map) {
-                let inner = Rect { x: r.x + r.h + 8, y: r.y, w: r.w - 2 * r.h - 16, h: r.h };
-                self.centred(c, w, h, name, inner, px(g.body_px), (255, 255, 255));
+            let inner = Rect { x: r.x + r.h + 8, y: r.y, w: r.w - 2 * r.h - 16, h: r.h };
+            match self.names.get(self.map) {
+                Some(name) => self.ink.centred(c, w, h, name, inner, px(g.body_px), (255, 255, 255)),
+                None => self.ink.centred(c, w, h, tr.no_custom_short(), inner, px(g.small_px), MUTED),
             }
         }
         // the map picture with its facts
@@ -817,6 +816,20 @@ impl SkirmishMenu {
         ui::fill(c, w, h, pr, (0, 0, 0), 255);
         if let Some(p) = self.preview.as_ref().filter(|p| p.map == self.map) {
             self.draw_preview(c, w, h, p, pr);
+        } else if let Some(b) = self.blocker() {
+            let tp = px(g.body_px - 4);
+            let lines = self.ink.wrap(&tr.blocker(&b), tp, pr.w - t.len(40));
+            let y0 = pr.y + pr.h / 2 - lines.len() as i32 * (tp + 4) / 2;
+            for (k, line) in lines.iter().enumerate() {
+                self.ink.centred(c, w, h, line, Rect { x: pr.x, y: y0 + k as i32 * (tp + 4), w: pr.w, h: tp + 4 }, tp, WARN);
+            }
+        }
+        // a custom map's mission: a strip over the picture's lower edge
+        if let Some(line) = self.objective() {
+            let tp = px(g.body_px - 3);
+            let strip = Rect { x: pr.x, y: pr.y + pr.h - tp - t.len(16), w: pr.w, h: tp + t.len(16) };
+            ui::fill(c, w, h, strip, (0, 0, 0), 190);
+            self.ink.centred(c, w, h, &line, Rect { x: strip.x, y: strip.y + t.len(6), w: strip.w, h: tp + 4 }, tp, GOLD);
         }
         outline(c, w, h, pr, (70, 150, 80), 2);
         if let Some(p) = self.preview.as_ref().filter(|p| p.map == self.map) {
@@ -825,13 +838,14 @@ impl SkirmishMenu {
             let all = buildings.clone().count();
             let neutral = buildings.filter(|o| o.raw[14] == 2).count();
             let mines = lv.objects.iter().filter(|o| matches!(o.object_kind(), ObjectKind::GoldMine)).count();
-            let values = [format!("{} × {}", p.thumb.full_w / 32, p.thumb.full_h / 32), tr.buildings(all, neutral), mines.to_string(), tr.mission(lv.level_id())];
+            let values =
+                [format!("{} × {}", p.thumb.full_w / 32, p.thumb.full_h / 32), tr.buildings(all, neutral), mines.to_string(), tr.mission(lv.level_id())];
             let fy = if g.list.is_some() { g.facts_y } else { g.preview_panel.y + g.pad + g.preview.h + 14 };
             for (i, (k, v)) in tr.fact_labels().iter().zip(values.iter()).enumerate() {
                 let y = t.y(fy + i as i32 * g.facts_dy);
                 let x = g.preview.x + 10;
-                self.text(c, w, h, k, t.x(x), y, px(g.body_px - 3), MUTED);
-                self.text(c, w, h, v, t.x(x + g.preview.w * 42 / 100), y, px(g.body_px - 3), TEXT);
+                self.ink.text(c, w, h, k, t.x(x), y, px(g.body_px - 3), MUTED);
+                self.ink.text(c, w, h, v, t.x(x + g.preview.w * 42 / 100), y, px(g.body_px - 3), TEXT);
             }
         }
         // players
@@ -844,15 +858,28 @@ impl SkirmishMenu {
             let bp = px(g.body_px);
             let ty = r.y + (r.h - bp) / 2 - 2;
             let sx = r.x + t.len(if g.list.is_some() { 28 + 170 } else { 28 + 128 });
-            self.text_fit(c, w, h, if i == 0 { tr.you() } else { tr.computer() }, r.x + t.len(28), ty, bp, TEXT, sx - r.x - t.len(28 + 10));
+            self.ink.fit(c, w, h, if i == 0 { tr.you() } else { tr.computer() }, r.x + t.len(28), ty, bp, TEXT, sx - r.x - t.len(28 + 10));
             // the side's name ends before the swap button / the level stepper of its row
             let end = if i == 0 { t.r(g.swap_button()).x } else { t.r(g.level_stepper()).x };
-            self.text_fit(c, w, h, tr.side(side == 1), sx, ty + t.len(2), px(g.body_px - 3), SIDE[side], (end - sx - t.len(10)).min(t.len(170)));
+            self.ink.fit(c, w, h, tr.side(side == 1), sx, ty + t.len(2), px(g.body_px - 3), SIDE[side], (end - sx - t.len(10)).min(t.len(170)));
         }
-        let sw = t.r(g.swap_button());
-        self.button(c, w, h, sw, tr.swap(), px(g.small_px), self.hover == Some(Hit::Swap), false);
+        if self.tab == Tab::Original {
+            let sw = t.r(g.swap_button());
+            self.ink.button(c, w, h, sw, tr.swap(), px(g.small_px), self.hover == Some(Hit::Swap), false);
+        }
         let ls = t.r(g.level_stepper());
-        self.stepper(c, w, h, ls, tr.difficulty(self.difficulty), px(if g.list.is_some() { g.body_px } else { g.small_px }), ACCENT, self.hover, Hit::LevelDown, Hit::LevelUp);
+        self.stepper(
+            c,
+            w,
+            h,
+            ls,
+            tr.difficulty(self.difficulty),
+            px(if g.list.is_some() { g.body_px } else { g.small_px }),
+            ACCENT,
+            self.hover,
+            Hit::LevelDown,
+            Hit::LevelUp,
+        );
         let hc = self.difficulty.handicap();
         let row = t.r(g.player_rows()[1]);
         // income and production on two lines, so neither has to be squeezed
@@ -861,14 +888,14 @@ impl SkirmishMenu {
         let gap = np / 6;
         let y0 = row.y + (row.h - 2 * np - gap) / 2 - np / 8;
         for (k, line) in tr.income(hc.income_pct, hc.production_pct).iter().enumerate() {
-            self.text_fit(c, w, h, line, nx, y0 + k as i32 * (np + gap), np, MUTED, row.x + row.w - nx - 4);
+            self.ink.fit(c, w, h, line, nx, y0 + k as i32 * (np + gap), np, MUTED, row.x + row.w - nx - 4);
         }
         // resources
         self.panel(c, w, h, &g, &t, g.resources, tr.resources());
         for side in 0..2 {
             let head = tr.side_short(side == 1);
             let hp = px(g.small_px);
-            self.text(c, w, h, head, t.x(g.side_col(side)) - self.text_w(head, hp) / 2, t.y(g.resources.y + (g.hh - g.small_px) / 2), hp, SIDE[side]);
+            self.ink.text(c, w, h, head, t.x(g.side_col(side)) - self.ink.width(head, hp) / 2, t.y(g.resources.y + (g.hh - g.small_px) / 2), hp, SIDE[side]);
         }
         for (r, row) in g.resource_rows().into_iter().enumerate() {
             let rr = t.r(row);
@@ -877,12 +904,33 @@ impl SkirmishMenu {
             }
             // the Slovak / Czech strings are lower case ("kredity"): a capital first letter like the other labels
             let label = capitalised(&self.string([CREDITS, RESEARCH][r]));
-            self.text_fit(c, w, h, &label, rr.x + t.len(56), rr.y + (rr.h - px(g.body_px)) / 2 - 2, px(g.body_px), TEXT, t.x(g.side_col(0)) - t.len(110) - rr.x - t.len(56));
+            self.ink.fit(
+                c,
+                w,
+                h,
+                &label,
+                rr.x + t.len(56),
+                rr.y + (rr.h - px(g.body_px)) / 2 - 2,
+                px(g.body_px),
+                TEXT,
+                t.x(g.side_col(0)) - t.len(110) - rr.x - t.len(56),
+            );
             for side in 0..2 {
                 let s = &self.setup.sides[side];
                 let v = if r == 0 { s.credits } else { s.research };
                 let k = (5 + r) * 2;
-                self.stepper(c, w, h, t.r(g.resource_stepper(r, side)), &v.to_string(), px(g.body_px + 2), SIDE[side], self.hover, Hit::Step(side, k), Hit::Step(side, k + 1));
+                self.stepper(
+                    c,
+                    w,
+                    h,
+                    t.r(g.resource_stepper(r, side)),
+                    &v.to_string(),
+                    px(g.body_px + 2),
+                    SIDE[side],
+                    self.hover,
+                    Hit::Step(side, k),
+                    Hit::Step(side, k + 1),
+                );
             }
         }
         // air forces and turrets
@@ -921,51 +969,31 @@ impl SkirmishMenu {
             }
         }
         // bottom bar
-        self.button(c, w, h, t.r(g.back), tr.back(), px(g.body_px + 2), self.hover == Some(Hit::Back), false);
-        self.button(c, w, h, t.r(g.reset), tr.reset(), px(g.body_px - 2), self.hover == Some(Hit::Reset), false);
-        self.button(c, w, h, t.r(g.start), tr.start(), px(g.title_px * 7 / 10), self.hover == Some(Hit::Start), true);
-        let (nc, note) = if self.is_default() { ((140, 220, 140), tr.setup_default()) } else { ((230, 150, 90), tr.setup_changed()) };
-        let nx = t.x(g.note_x);
-        let room = t.x(g.reset.x) - nx - t.len(16);
-        self.text_fit(c, w, h, note, nx, t.y(g.back.y + g.back.h / 2) - px(g.body_px - 2) / 2 - 2, px(g.body_px - 2), nc, room);
+        self.ink.button(c, w, h, t.r(g.back), tr.back(), px(g.body_px + 2), self.hover == Some(Hit::Back), false);
+        self.ink.button(c, w, h, t.r(g.reset), tr.reset(), px(g.body_px - 2), self.hover == Some(Hit::Reset), false);
+        self.ink.button(c, w, h, t.r(g.start), tr.start(), px(g.title_px * 7 / 10), self.hover == Some(Hit::Start), true);
+        if stars {
+            let (nc, note) = if self.is_default() { ((140, 220, 140), tr.setup_default()) } else { ((230, 150, 90), tr.setup_changed()) };
+            let nx = t.x(g.note_x);
+            let room = t.x(g.reset.x) - nx - t.len(16);
+            self.ink.fit(c, w, h, note, nx, t.y(g.back.y + g.back.h / 2) - px(g.body_px - 2) / 2 - 2, px(g.body_px - 2), nc, room);
+        }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn panel(&self, c: &mut [u32], w: usize, h: usize, g: &Geo, t: &T, r: Rect, title: &str) {
-        let pr = t.r(r);
-        ui::fill(c, w, h, pr, (4, 14, 8), 200);
-        outline(c, w, h, pr, (70, 150, 80), 2);
-        ui::fill(c, w, h, Rect { x: pr.x, y: pr.y, w: pr.w, h: t.len(4).max(2) }, (110, 220, 120), 255);
-        if !title.is_empty() {
-            let hp = t.len(g.head_px).max(9);
-            self.text_fit(c, w, h, title, pr.x + t.len(g.pad), pr.y + (t.len(g.hh) - hp) / 2, hp, GOLD, pr.w / 2);
-            ui::fill(c, w, h, Rect { x: pr.x + t.len(g.pad), y: pr.y + t.len(g.hh) - t.len(8), w: pr.w - 2 * t.len(g.pad), h: 1 }, (60, 120, 70), 255);
-        }
+        self.ink.panel(c, w, h, t.r(r), title, t.len(g.head_px).max(9), t.len(g.pad), t.len(g.hh));
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn button(&self, c: &mut [u32], w: usize, h: usize, r: Rect, label: &str, px: i32, hot: bool, primary: bool) {
-        if primary {
-            ui::fill(c, w, h, r, if hot { (80, 200, 90) } else { (60, 170, 70) }, 255);
-            outline(c, w, h, r, (170, 255, 170), 2);
-            self.centred(c, w, h, label, r, px, (5, 30, 10));
-        } else {
-            ui::fill(c, w, h, r, (0, 0, 0), if hot { 200 } else { 120 });
-            outline(c, w, h, r, if hot { (255, 255, 255) } else { ACCENT }, 2);
-            self.centred(c, w, h, label, r, px, if hot { (255, 255, 255) } else { TEXT });
-        }
-    }
-
-    /// Arrow, value, arrow.
-    #[allow(clippy::too_many_arguments)]
+    /// Arrow, value, arrow (`minus` / `plus` = the arrows' controls, highlighted under the mouse).
     fn stepper(&self, c: &mut [u32], w: usize, h: usize, r: Rect, value: &str, px: i32, colour: (u8, u8, u8), hover: Option<Hit>, minus: Hit, plus: Hit) {
-        let (lr, rr) = Geo::stepper(r);
-        let a = (r.h / 4).clamp(3, 12);
-        for (hit, left, ar) in [(minus, true, lr), (plus, false, rr)] {
-            let c2 = if hover == Some(hit) { (255, 255, 255) } else { colour };
-            arrow(c, w, h, ar.x + ar.w / 2, ar.y + ar.h / 2, a, left, c2);
-        }
-        self.centred(c, w, h, value, Rect { x: lr.x + lr.w, y: r.y, w: rr.x - lr.x - lr.w, h: r.h }, px, (255, 255, 255));
+        let hot = if hover == Some(minus) {
+            Some(false)
+        } else if hover == Some(plus) {
+            Some(true)
+        } else {
+            None
+        };
+        self.ink.stepper(c, w, h, r, value, px, colour, hot);
     }
 
     /// The map picture scaled into `r`, with the buildings and start positions marked.
@@ -1011,114 +1039,23 @@ impl SkirmishMenu {
                 let (x, y) = (ox + (cx * k) as i32, oy + (cy * k) as i32);
                 ring(c, w, h, x, y, unit * 3, unit / 2 + 1, colour(o.raw[14]));
             }
-            dot(c, cx, cy, if hq { unit * 2 } else if kind.is_building() { unit + 1 } else { unit - 1 }, colour(o.raw[14]));
+            dot(
+                c,
+                cx,
+                cy,
+                if hq {
+                    unit * 2
+                } else if kind.is_building() {
+                    unit + 1
+                } else {
+                    unit - 1
+                },
+                colour(o.raw[14]),
+            );
         }
         for m in p.level.markers.iter().filter(|m| m.is_advancer()) {
             dot(c, m.x as f32 / 32.0, m.y as f32 / 32.0, unit - 1, colour(m.player));
         }
-    }
-}
-
-/// `s` with its first letter in upper case (the rest unchanged).
-fn capitalised(s: &str) -> String {
-    let mut c = s.chars();
-    c.next().map_or(String::new(), |f| f.to_uppercase().chain(c).collect())
-}
-
-/// A rectangle's border, `t` pixels thick.
-fn outline(c: &mut [u32], w: usize, h: usize, r: Rect, col: (u8, u8, u8), t: i32) {
-    ui::fill(c, w, h, Rect { x: r.x, y: r.y, w: r.w, h: t }, col, 255);
-    ui::fill(c, w, h, Rect { x: r.x, y: r.y + r.h - t, w: r.w, h: t }, col, 255);
-    ui::fill(c, w, h, Rect { x: r.x, y: r.y, w: t, h: r.h }, col, 255);
-    ui::fill(c, w, h, Rect { x: r.x + r.w - t, y: r.y, w: t, h: r.h }, col, 255);
-}
-
-fn put(c: &mut [u32], w: usize, h: usize, x: i32, y: i32, col: (u8, u8, u8)) {
-    if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
-        c[y as usize * w + x as usize] = pack(col.0, col.1, col.2);
-    }
-}
-
-/// A solid triangle pointing left or right, `a` half-height, centred on `(cx, cy)`.
-fn arrow(c: &mut [u32], w: usize, h: usize, cx: i32, cy: i32, a: i32, left: bool, col: (u8, u8, u8)) {
-    for dy in -a..=a {
-        let len = a - dy.abs();
-        for dx in 0..=len {
-            let x = if left { cx + a / 2 - dx } else { cx - a / 2 + dx };
-            put(c, w, h, x, cy + dy, col);
-        }
-    }
-}
-
-/// A five-pointed star of outer radius `r` with a dark rim.
-fn star_shape(c: &mut [u32], w: usize, h: usize, cx: i32, cy: i32, r: i32, col: (u8, u8, u8)) {
-    let pts: Vec<(f32, f32)> = (0..10)
-        .map(|i| {
-            let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
-            let rad = if i % 2 == 0 { r as f32 } else { r as f32 * 0.42 };
-            (cx as f32 + rad * a.cos(), cy as f32 + rad * a.sin())
-        })
-        .collect();
-    let inside = |x: f32, y: f32, scale: f32| {
-        let mut hit = false;
-        for i in 0..10 {
-            let (a, b) = (pts[i], pts[(i + 1) % 10]);
-            let (ax, ay) = (cx as f32 + (a.0 - cx as f32) * scale, cy as f32 + (a.1 - cy as f32) * scale);
-            let (bx, by) = (cx as f32 + (b.0 - cx as f32) * scale, cy as f32 + (b.1 - cy as f32) * scale);
-            if (ay > y) != (by > y) && x < (bx - ax) * (y - ay) / (by - ay) + ax {
-                hit = !hit;
-            }
-        }
-        hit
-    };
-    for y in cy - r - 2..=cy + r + 2 {
-        for x in cx - r - 2..=cx + r + 2 {
-            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            if inside(fx, fy, 1.0) {
-                put(c, w, h, x, y, col);
-            } else if inside(fx, fy, 1.0 + 1.5 / r as f32 + 0.12) {
-                put(c, w, h, x, y, (0, 0, 0));
-            }
-        }
-    }
-}
-
-/// A circle outline of radius `r`, `t` thick.
-fn ring(c: &mut [u32], w: usize, h: usize, cx: i32, cy: i32, r: i32, t: i32, col: (u8, u8, u8)) {
-    let (outer, inner) = ((r * r) as f32, ((r - t).max(0) * (r - t).max(0)) as f32);
-    for y in -r - 1..=r + 1 {
-        for x in -r - 1..=r + 1 {
-            let d = (x * x + y * y) as f32;
-            if d <= outer + r as f32 && d >= inner - r as f32 {
-                put(c, w, h, cx + x, cy + y, col);
-            } else if d <= (r + 1) as f32 * (r + 1) as f32 + r as f32 && d > outer {
-                put(c, w, h, cx + x, cy + y, (0, 0, 0));
-            }
-        }
-    }
-}
-
-/// A tick (on) or a cross (off) in the middle of a toggle.
-fn mark(c: &mut [u32], w: usize, h: usize, r: Rect, on: bool) {
-    let s = (r.h / 3).max(3);
-    let (cx, cy) = (r.x + r.w / 2, r.y + r.h / 2);
-    let line = |c: &mut [u32], (x0, y0): (i32, i32), (x1, y1): (i32, i32), col: (u8, u8, u8)| {
-        let n = (x1 - x0).abs().max((y1 - y0).abs()).max(1);
-        for i in 0..=n {
-            let (x, y) = (x0 + (x1 - x0) * i / n, y0 + (y1 - y0) * i / n);
-            for d in 0..2 {
-                put(c, w, h, x, y + d, col);
-                put(c, w, h, x + d, y, col);
-            }
-        }
-    };
-    if on {
-        line(c, (cx - s, cy), (cx - s / 3, cy + s * 2 / 3), (0, 0, 0));
-        line(c, (cx - s / 3, cy + s * 2 / 3), (cx + s, cy - s * 2 / 3), (0, 0, 0));
-    } else {
-        let col = (170, 170, 170);
-        line(c, (cx - s * 2 / 3, cy - s * 2 / 3), (cx + s * 2 / 3, cy + s * 2 / 3), col);
-        line(c, (cx + s * 2 / 3, cy - s * 2 / 3), (cx - s * 2 / 3, cy + s * 2 / 3), col);
     }
 }
 
@@ -1224,6 +1161,88 @@ mod tests {
         m.select_map(0);
         m.wheel(-1.0, 640, 480);
         assert_eq!(m.map, 1);
+    }
+
+    #[test]
+    fn a_custom_map_is_played_from_the_blue_side_and_offers_no_swap() {
+        let Some((mut m, _)) = menu() else { return };
+        let dir = crate::mapeditor_ui::tests::many_maps("skirmish-side", 2);
+        // the second map is a mission
+        let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
+        files.sort();
+        let mut map = crate::custom_maps::load(&files[1]).unwrap();
+        map.mission.win = opensow_formats::custommap::WinRule::Everything;
+        map.set_timer(Some(opensow_formats::custommap::Timer { minutes: 20, end: opensow_formats::custommap::TimerEnd::Victory }));
+        std::fs::write(&files[1], map.to_bytes()).unwrap();
+        m.custom_dir = dir.clone();
+        let swap = |m: &SkirmishMenu| [(1920, 1080), (640, 480)].iter().all(|&(w, h)| m.controls(w, h).iter().any(|(_, h)| *h == Hit::Swap));
+        assert!(swap(&m), "the shipped maps let the player choose");
+        m.press(Hit::Swap);
+        assert_eq!(m.local, 1);
+        m.set_tab(Tab::Custom);
+        assert!([(1920, 1080), (640, 480)].iter().all(|&(w, h)| !m.controls(w, h).iter().any(|(_, h)| *h == Hit::Swap)));
+        assert_eq!(m.local, 0);
+        m.select_map(1);
+        // the mission in words on the map's picture (English in the tests' install or not: both parts are there)
+        if m.map_level().is_some() {
+            let line = m.objective().expect("a mission line");
+            assert!(line.contains("20") && line.contains('·'), "{line}");
+        }
+        m.select_map(0);
+        assert_eq!(m.local, 0);
+        assert_eq!(m.objective(), None, "a plain skirmish map says nothing");
+        m.set_tab(Tab::Original);
+        assert!(swap(&m));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_custom_list_scrolls_through_many_maps_in_both_layouts() {
+        let Some((mut m, _)) = menu() else { return };
+        let dir = crate::mapeditor_ui::tests::many_maps("skirmish", 30);
+        m.custom_dir = dir.clone();
+        m.set_tab(Tab::Custom);
+        assert_eq!(m.maps.len(), 30);
+        let rows = Geo::wide().visible_rows_of(Tab::Custom);
+        assert!(rows < 30 && rows < Geo::wide().visible_rows(), "the Custom tab keeps a row for its buttons");
+        let shown = |m: &SkirmishMenu, w, h| m.controls(w, h).iter().filter_map(|(_, h)| if let Hit::Map(i) = h { Some(*i) } else { None }).collect::<Vec<_>>();
+        assert_eq!(shown(&m, 1920, 1080), (0..rows).collect::<Vec<_>>());
+        // the wheel scrolls to the end and no further, the rows stay inside the list and clear of the buttons
+        m.wheel(-100.0, 1920, 1080);
+        assert_eq!(m.scroll, 30 - rows);
+        assert_eq!(shown(&m, 1920, 1080), (30 - rows..30).collect::<Vec<_>>());
+        let controls = m.controls(1920, 1080);
+        let folder = controls.iter().find(|(_, h)| *h == Hit::OpenFolder).unwrap().0;
+        for (r, hit) in controls.iter().filter(|(_, h)| matches!(h, Hit::Map(_))) {
+            assert!(r.y + r.h <= folder.y, "{hit:?} {r:?} runs into the buttons at {folder:?}");
+        }
+        // clicking the last row picks it, and it loads
+        let (x, y) = m.centre(Hit::Map(29), 1920, 1080).unwrap();
+        m.click(x, y, 1920, 1080);
+        assert_eq!(m.map, 29);
+        assert!(m.map_level().is_some(), "the 30th map loads");
+        // the keys walk the list and keep the choice in view
+        m.select_map(0);
+        assert_eq!(m.scroll, 0);
+        for _ in 0..20 {
+            m.step_map(true);
+        }
+        assert_eq!(m.map, 20);
+        assert!(m.scroll <= 20 && 20 < m.scroll + rows, "row 20 in view (scroll {})", m.scroll);
+        m.step_map(false);
+        assert_eq!(m.map, 19);
+        // compact: the selector walks all of them, the wheel too
+        m.select_map(0);
+        m.wheel(-1.0, 640, 480);
+        assert_eq!(m.map, 1);
+        for _ in 0..29 {
+            m.press(Hit::MapNext);
+        }
+        assert_eq!(m.map, 0, "the selector wraps round");
+        for (r, hit) in m.controls(640, 480) {
+            assert!(r.x >= 0 && r.y >= 0 && r.x + r.w <= 640 && r.y + r.h <= 480, "{hit:?} at 640x480");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

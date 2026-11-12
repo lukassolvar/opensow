@@ -38,12 +38,19 @@ pub enum Pointer {
     AirStrike = 10,
     /// Scroll arrows, `0x0b..=0x12`.
     ScrollUpLeft = 0x0b,
+    /// Scroll arrow pointing up and right.
     ScrollUpRight = 0x0c,
+    /// Scroll arrow pointing down and right.
     ScrollDownRight = 0x0d,
+    /// Scroll arrow pointing down and left.
     ScrollDownLeft = 0x0e,
+    /// Scroll arrow pointing down.
     ScrollDown = 0x0f,
+    /// Scroll arrow pointing left.
     ScrollLeft = 0x10,
+    /// Scroll arrow pointing right.
     ScrollRight = 0x11,
+    /// Scroll arrow pointing up.
     ScrollUp = 0x12,
 }
 

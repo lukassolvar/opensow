@@ -10,20 +10,26 @@
 //! - event ids 17..=21 announce "bomber/carryall/asteroid/fighter/tripler ready" (`0x403340`);
 //! - manual: the fighter "cannot be destroyed by antiaircraft means".
 
+/// The five air forces a side can call in. Their numbers in the exe are 30..=34 ([`AirForce::code`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AirForce {
+    /// Code 30, "Bomber Attack".
     Bomber,
+    /// Code 31, "CarryAll": lands a squad of units.
     Carryall,
+    /// Code 33, "Tripler Strafe".
     Tripler,
+    /// Code 32, "Fighter Assault".
     Fighter,
+    /// Code 34, "Meteor Storm": no aircraft, only the meteors.
     Asteroid,
 }
 
 /// Order in which the level header lists the five stocks (and the order of the in-game icons).
-pub const HEADER_ORDER: [AirForce; 5] =
-    [AirForce::Bomber, AirForce::Asteroid, AirForce::Carryall, AirForce::Tripler, AirForce::Fighter];
+pub const HEADER_ORDER: [AirForce; 5] = [AirForce::Bomber, AirForce::Asteroid, AirForce::Carryall, AirForce::Tripler, AirForce::Fighter];
 
 impl AirForce {
+    /// The exe's number for this air force (30..=34).
     pub fn code(self) -> i32 {
         match self {
             AirForce::Bomber => 30,
@@ -34,12 +40,12 @@ impl AirForce {
         }
     }
 
+    /// The air force with this number, `None` outside 30..=34.
     pub fn from_code(code: i32) -> Option<AirForce> {
-        [AirForce::Bomber, AirForce::Carryall, AirForce::Fighter, AirForce::Tripler, AirForce::Asteroid]
-            .into_iter()
-            .find(|a| a.code() == code)
+        [AirForce::Bomber, AirForce::Carryall, AirForce::Fighter, AirForce::Tripler, AirForce::Asteroid].into_iter().find(|a| a.code() == code)
     }
 
+    /// English name for listings.
     pub fn name(self) -> &'static str {
         match self {
             AirForce::Bomber => "Bomber",
@@ -57,9 +63,7 @@ impl AirForce {
             AirForce::Carryall => &["carryAll", "carryAll_down", "carryAll_rear"],
             AirForce::Tripler => &["tripler", "tripler_ph"],
             AirForce::Fighter => &["fighter", "fighter_smoke", "fighter_bomb", "fighter_ex"],
-            AirForce::Asteroid => {
-                &["meteor_medium", "meteor_medium_aura", "meteor_medium_smoke", "meteor_small", "meteor_small_aura", "meteor_small_smoke"]
-            }
+            AirForce::Asteroid => &["meteor_medium", "meteor_medium_aura", "meteor_medium_smoke", "meteor_small", "meteor_small_aura", "meteor_small_smoke"],
         }
     }
 }
@@ -68,7 +72,9 @@ impl AirForce {
 /// levels) and side 1 the enemy; multiplayer files repeat the count in slots 1 and 2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AirStock {
+    /// Which air force.
     pub force: AirForce,
+    /// The three count words of the level header for this force (see the struct docs for which side is which).
     pub counts: [i32; 3],
 }
 

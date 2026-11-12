@@ -67,42 +67,43 @@ const fn bt(speed: Option<u32>, interval: Option<u32>, anim: Option<[i32; 4]>, p
     BulletType { speed, interval, anim, partial }
 }
 
+/// The exe's bullet type table: entry `type - 1` describes bullet type `type` (1..=35).
 pub const BULLET_TYPES: [BulletType; 35] = [
-    bt(Some(360), Some(8), None, false),                      // 1  anti-air gun bullet
-    bt(Some(180), Some(8), None, false),                      // 2
-    bt(Some(180), Some(8), None, false),                      // 3  (1A artillery uses type 3)
-    bt(Some(120), Some(8), None, false),                      // 4  (2A, 3A)
-    bt(Some(1800), None, None, false),                        // 5
-    bt(Some(1800), None, None, false),                        // 6  (cannons 1C 2C 3C)
-    bt(Some(1800), None, None, false),                        // 7  (walker 5W4)
-    bt(Some(180), Some(6), None, false),                      // 8
-    bt(Some(180), Some(6), None, false),                      // 9  (flamers)
-    bt(Some(60), None, Some([0, 4, 1, 4]), false),            // 10
-    bt(Some(210), None, Some([0, 4, 1, 5]), false),           // 11
-    bt(Some(180), None, Some([0, 3, 1, 10]), false),          // 12
-    bt(None, None, Some([0, 16, 1, 2]), false),               // 13
-    bt(None, Some(3), None, false),                           // 14
-    bt(Some(30), None, Some([0, 16, 1, 3]), false),           // 15
-    bt(Some(30), None, Some([0, 16, 1, 3]), false),           // 16
-    bt(Some(360), None, None, false),                         // 17
-    bt(Some(30), None, None, false),                          // 18
-    bt(Some(60), None, None, false),                           // 19
-    bt(Some(60), Some(2), None, false),                        // 20
-    bt(Some(60), None, None, false),                           // 21
-    bt(Some(20), None, Some([10, 178, 1, 1]), false),         // 22
-    bt(Some(60), None, None, false),                           // 23
-    bt(Some(240), Some(0), Some([0, 16, 1, 2]), false),       // 24
-    bt(Some(240), Some(0), Some([0, 16, 1, 2]), false),       // 25
-    bt(Some(150), None, Some([0, 8, 1, 2]), false),           // 26
-    bt(Some(600), Some(5), None, false),                      // 27 (1S, 5W1)
-    bt(Some(600), Some(5), Some([0, 19, 1, 2]), false),       // 28 (2S)
-    bt(Some(300), Some(5), None, false),                      // 29 (3S)
-    bt(Some(300), Some(5), None, false),                      // 30 (5W5)
-    bt(Some(600), Some(2), None, false),                      // 31
-    bt(None, Some(4), None, false),                           // 32
-    bt(Some(360), None, Some([0, 1, 1, 4]), false),           // 33
-    bt(Some(210), None, None, false),                         // 34 (5W3)
-    bt(Some(100), None, None, false),                         // 35
+    bt(Some(360), Some(8), None, false),                // 1  anti-air gun bullet
+    bt(Some(180), Some(8), None, false),                // 2
+    bt(Some(180), Some(8), None, false),                // 3  (1A artillery uses type 3)
+    bt(Some(120), Some(8), None, false),                // 4  (2A, 3A)
+    bt(Some(1800), None, None, false),                  // 5
+    bt(Some(1800), None, None, false),                  // 6  (cannons 1C 2C 3C)
+    bt(Some(1800), None, None, false),                  // 7  (walker 5W4)
+    bt(Some(180), Some(6), None, false),                // 8
+    bt(Some(180), Some(6), None, false),                // 9  (flamers)
+    bt(Some(60), None, Some([0, 4, 1, 4]), false),      // 10
+    bt(Some(210), None, Some([0, 4, 1, 5]), false),     // 11
+    bt(Some(180), None, Some([0, 3, 1, 10]), false),    // 12
+    bt(None, None, Some([0, 16, 1, 2]), false),         // 13
+    bt(None, Some(3), None, false),                     // 14
+    bt(Some(30), None, Some([0, 16, 1, 3]), false),     // 15
+    bt(Some(30), None, Some([0, 16, 1, 3]), false),     // 16
+    bt(Some(360), None, None, false),                   // 17
+    bt(Some(30), None, None, false),                    // 18
+    bt(Some(60), None, None, false),                    // 19
+    bt(Some(60), Some(2), None, false),                 // 20
+    bt(Some(60), None, None, false),                    // 21
+    bt(Some(20), None, Some([10, 178, 1, 1]), false),   // 22
+    bt(Some(60), None, None, false),                    // 23
+    bt(Some(240), Some(0), Some([0, 16, 1, 2]), false), // 24
+    bt(Some(240), Some(0), Some([0, 16, 1, 2]), false), // 25
+    bt(Some(150), None, Some([0, 8, 1, 2]), false),     // 26
+    bt(Some(600), Some(5), None, false),                // 27 (1S, 5W1)
+    bt(Some(600), Some(5), Some([0, 19, 1, 2]), false), // 28 (2S)
+    bt(Some(300), Some(5), None, false),                // 29 (3S)
+    bt(Some(300), Some(5), None, false),                // 30 (5W5)
+    bt(Some(600), Some(2), None, false),                // 31
+    bt(None, Some(4), None, false),                     // 32
+    bt(Some(360), None, Some([0, 1, 1, 4]), false),     // 33
+    bt(Some(210), None, None, false),                   // 34 (5W3)
+    bt(Some(100), None, None, false),                   // 35
 ];
 
 /// Parameters of bullet type `t` (1..=35).
@@ -245,10 +246,15 @@ pub const SPLASH_RADIUS: i32 = 32;
 /// What the area damage routine needs to know about a unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnitRef {
+    /// X in map pixels.
     pub x: i32,
+    /// Y in map pixels.
     pub y: i32,
+    /// Whether the unit is in the air (the Advancer).
     pub flying: bool,
+    /// The unit's owner.
     pub owner: u32,
+    /// The unit's kind.
     pub kind: i32,
 }
 
@@ -279,8 +285,20 @@ pub fn building_hit(bullet_type: u8) -> BuildingHit {
 pub fn building_damage(bullet_type: u8, strength: i32, building_kind: i32) -> i32 {
     match building_hit(bullet_type) {
         BuildingHit::Full => strength,
-        BuildingHit::FullUnlessHq => if building_kind == 100 { 0 } else { strength },
-        BuildingHit::HalfUnlessHq => if building_kind == 100 { 0 } else { (strength - (strength >> 31)) >> 1 },
+        BuildingHit::FullUnlessHq => {
+            if building_kind == 100 {
+                0
+            } else {
+                strength
+            }
+        }
+        BuildingHit::HalfUnlessHq => {
+            if building_kind == 100 {
+                0
+            } else {
+                (strength - (strength >> 31)) >> 1
+            }
+        }
     }
 }
 
@@ -295,7 +313,7 @@ pub fn splash_victims(units: &[UnitRef], x: i32, y: i32, bullet_type: u8, owner:
         .filter(|(_, u)| {
             !u.flying
                 && !(bullet_type == 30 && u.kind == 45 && u.owner == owner)
-                && !(109..=113).contains(&u.kind)
+                && !crate::kinds::TURRET_TOPS.contains(&u.kind)
                 && distance(x, y, u.x, u.y) < SPLASH_RADIUS
         })
         .map(|(i, _)| i)
@@ -372,7 +390,7 @@ mod tests {
         assert_eq!(peak(&t3), 50 - 2500 / 100); // i = 50: 25
         assert_eq!(peak(&t4), (50 - 25) * 20 / 13); // 38
         assert_eq!(peak(&t15), 4 * 50 - 4 * 2500 / 100); // 100
-        // the arc keeps the x track and subtracts the lift from y; the last points come back to the ground
+                                                         // the arc keeps the x track and subtracts the lift from y; the last points come back to the ground
         for (i, (q, f)) in t4.points.iter().zip(&flat.points).enumerate() {
             assert_eq!((q.0, q.1 + t4.lift[i]), (f.0, f.1));
         }
@@ -421,12 +439,12 @@ mod tests {
     fn splash_hits_ground_units_in_range_including_friends() {
         let u = |x, y, flying, owner, kind| UnitRef { x, y, flying, owner, kind };
         let units = [
-            u(100, 100, false, 0, 7),  // direct hit, friendly
-            u(120, 110, false, 1, 7),  // 22 px away
-            u(135, 100, false, 1, 7),  // 35 px away
-            u(100, 100, true, 1, 41),  // flying: never hit
+            u(100, 100, false, 0, 7),   // direct hit, friendly
+            u(120, 110, false, 1, 7),   // 22 px away
+            u(135, 100, false, 1, 7),   // 35 px away
+            u(100, 100, true, 1, 41),   // flying: never hit
             u(100, 101, false, 1, 111), // turret under construction: handled via its building
-            u(100, 100, false, 0, 45), // spared by its owner's type-30 bullets
+            u(100, 100, false, 0, 45),  // spared by its owner's type-30 bullets
         ];
         assert_eq!(splash_victims(&units, 100, 100, 6, 0), vec![0, 1, 5]);
         assert_eq!(splash_victims(&units, 100, 100, 30, 0), vec![0, 1]);
@@ -437,8 +455,47 @@ mod tests {
 /// Offsets of the sub-blasts of a type-17 event (a Tripler pod, `0x40f590` -> table built at `0x412520` into `0x513328`):
 /// the exe loops over the first 34 pairs `(dx, dy)` (an ellipse of about 64 x 41 px), adds a random -5..4 px to both
 /// coordinates and runs the area damage `0x42f2c0(x, y, 100, owner, 17)` for each. This is the Tripler Strafe's damage.
-pub const TRIPLER_RING: [(i32, i32); 36] = [(64, 1), (64, 9), (59, 18), (52, 25), (42, 32), (32, 36), (27, 38), (17, 40), (8, 41), (1, 40), (64, -9), (59, -18), (52, -25), (42, -32), (32, -36), (27, -38), (17, -40), (8, -41), (-64, -1), (-64, -9), (-59, -18), (-52, -25), (-42, -32), (-32, -36), (-27, -38), (-17, -40), (-8, -41), (-1, -40), (-64, 9), (-59, 18), (-52, 25), (-42, 32), (-32, 36), (-27, 38), (-17, 40), (-8, 41)];
+pub const TRIPLER_RING: [(i32, i32); 36] = [
+    (64, 1),
+    (64, 9),
+    (59, 18),
+    (52, 25),
+    (42, 32),
+    (32, 36),
+    (27, 38),
+    (17, 40),
+    (8, 41),
+    (1, 40),
+    (64, -9),
+    (59, -18),
+    (52, -25),
+    (42, -32),
+    (32, -36),
+    (27, -38),
+    (17, -40),
+    (8, -41),
+    (-64, -1),
+    (-64, -9),
+    (-59, -18),
+    (-52, -25),
+    (-42, -32),
+    (-32, -36),
+    (-27, -38),
+    (-17, -40),
+    (-8, -41),
+    (-1, -40),
+    (-64, 9),
+    (-59, 18),
+    (-52, 25),
+    (-42, 32),
+    (-32, 36),
+    (-27, 38),
+    (-17, 40),
+    (-8, 41),
+];
+/// How many points of the ring above the Tripler uses.
 pub const TRIPLER_RING_USED: usize = 34;
+/// Strength of each blast of the Tripler's ring.
 pub const TRIPLER_BLAST_STRENGTH: i32 = 100;
 
 #[cfg(test)]

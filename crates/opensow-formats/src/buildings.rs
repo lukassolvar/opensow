@@ -64,10 +64,14 @@ pub struct BuildingAnim {
 
 /// The state numbers of [`BuildingAnim`].
 pub const STATE_WORKING: usize = 3;
+/// State 4: damaged (hit points at most half).
 pub const STATE_DAMAGED: usize = 4;
+/// State 5: destroyed.
 pub const STATE_DESTROYED: usize = 5;
+/// State 6: neutral.
 pub const STATE_NEUTRAL: usize = 6;
 
+/// The animation states of a building kind; `None` for kinds that are not buildings.
 pub fn anim(kind: i32) -> Option<BuildingAnim> {
     let (damaged, period) = match kind {
         100 => return Some(BuildingAnim { bounds: [0, 1, 2, 3, 4, 5, 6, 7], period: 6000 }),
@@ -98,7 +102,11 @@ impl BuildingAnim {
 
     /// The state of a finished, not destroyed building (`0x40e099`): damaged at half hit points or less, else working.
     pub fn state(hp: i32, max_hp: i32) -> usize {
-        if hp <= max_hp / 2 { STATE_DAMAGED } else { STATE_WORKING }
+        if hp <= max_hp / 2 {
+            STATE_DAMAGED
+        } else {
+            STATE_WORKING
+        }
     }
 
     /// Frame to draw for the given hit points at `tick`.

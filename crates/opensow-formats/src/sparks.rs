@@ -29,8 +29,26 @@ impl Sparks {
     pub fn draw(bullet_type: u8, mut rand: impl FnMut(u16) -> u16) -> Option<Sparks> {
         let mut r = |n: u16, off: i32| rand(n) as i32 - off;
         Some(match bullet_type {
-            19 => Sparks { fragments: (0..5).map(|_| { let x = r(30, 15); let y = r(20, 10); (x, y, r(3, 0)) }).collect(), delay: 0 },
-            20 => Sparks { fragments: (0..2).map(|_| { let x = r(20, 10); let y = r(20, 10); (x, y, 0) }).collect(), delay: 0 },
+            19 => Sparks {
+                fragments: (0..5)
+                    .map(|_| {
+                        let x = r(30, 15);
+                        let y = r(20, 10);
+                        (x, y, r(3, 0))
+                    })
+                    .collect(),
+                delay: 0,
+            },
+            20 => Sparks {
+                fragments: (0..2)
+                    .map(|_| {
+                        let x = r(20, 10);
+                        let y = r(20, 10);
+                        (x, y, 0)
+                    })
+                    .collect(),
+                delay: 0,
+            },
             21 => {
                 let mut f: Vec<(i32, i32, i32)> = (0..12).map(|i| (0, -i, r(2, 0))).collect();
                 for (k, frame) in [(9, 0), (10, 4), (11, 0)] {

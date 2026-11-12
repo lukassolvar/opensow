@@ -13,6 +13,7 @@ pub const WRAP_WIDTH: i32 = 300;
 pub const MAX_LINES: usize = 9;
 /// The text's left edge and the line pitch.
 pub const TEXT_X: i32 = 48;
+/// Pixels from one text line to the next.
 pub const LINE_PITCH: i32 = 20;
 /// Distance of the last line's top from the bottom edge.
 pub const LAST_LINE_UP: i32 = 25;
@@ -20,17 +21,23 @@ pub const LAST_LINE_UP: i32 = 25;
 pub const BOX_LEFT: i32 = 31;
 /// The coin's x and the arrow's start x (`0x456470(-0x50, ..)`), speed (`[+0x14]` = 6 steps per tick) and hit box (`0x456490`).
 pub const COIN_X: i32 = 15;
+/// X the arrow button starts from, left of the screen.
 pub const ARROW_START_X: i32 = -80;
+/// Pixels the arrow moves per tick.
 pub const ARROW_SPEED: i32 = 6;
+/// Size of the arrow's hit box.
 pub const ARROW_HIT: (i32, i32) = (21, 19);
 /// The arrow button's target x is `[0x70f2e4] + 0x1e` = widest + 80.
 pub const ARROW_TARGET_PAD: i32 = 80;
 /// Frames of `extras\tutorialgfx`: 16 per animation, "i" coin first, the arrow, then the "!" coin (`0x5e9440`, `0x5e9480`, `0x5e94c0`).
 pub const COIN_I: usize = 0;
+/// First frame of the arrow's animation.
 pub const ARROW: usize = 16;
+/// First frame of the "!" coin's animation.
 pub const COIN_TASK: usize = 32;
 /// Ticks per frame of the coin (`[0x70f30c]` reloads 5) and of the arrow (`[0x70f314]` reloads 3), 16 frames each.
 pub const COIN_PERIOD: u32 = 6;
+/// Ticks per frame of the arrow.
 pub const ARROW_PERIOD: u32 = 4;
 /// Sound of the arrow click (`[+0x58] = 0x21`, played by `0x456410`).
 pub const CLICK_SOUND: u8 = 33;
@@ -126,6 +133,7 @@ pub fn byte_width(small: &(Font, Font), medium: &Font, bytes: &[u8], spacing: i3
 /// The panel while a step's text is shown.
 #[derive(Debug, Clone)]
 pub struct Panel {
+    /// The step's text, wrapped into lines.
     pub text: Wrapped,
     /// The arrow button's x (native pixels from the left edge; its y is [`Panel::arrow_y`] from the bottom).
     pub arrow_x: i32,
@@ -135,6 +143,7 @@ pub struct Panel {
 }
 
 impl Panel {
+    /// A panel for a new text: the arrow starts off screen.
     pub fn new(text: Wrapped) -> Panel {
         Panel { text, arrow_x: ARROW_START_X, coin: (0, COIN_PERIOD - 1), arrow: (0, ARROW_PERIOD - 1) }
     }
@@ -153,6 +162,7 @@ impl Panel {
         }
     }
 
+    /// The x the arrow button moves to.
     pub fn arrow_target(&self) -> i32 {
         self.text.width + ARROW_TARGET_PAD - 50
     }
@@ -162,6 +172,7 @@ impl Panel {
         -20 - 10 * self.text.breaks()
     }
 
+    /// The coin's frame, `None` when the text has no marker.
     pub fn coin_frame(&self) -> Option<usize> {
         match self.text.marker {
             'i' => Some(COIN_I + self.coin.0),
@@ -170,6 +181,7 @@ impl Panel {
         }
     }
 
+    /// The arrow's frame.
     pub fn arrow_frame(&self) -> usize {
         ARROW + self.arrow.0
     }

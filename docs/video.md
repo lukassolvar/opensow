@@ -7,6 +7,7 @@ adds a video stream bound to the game's DirectDraw surface and an audio stream, 
 (`0x457300` picks the path string by the language index, `0x4573e0` opens it, `0x457220` positions it
 centred in a 640x480 rectangle, `0x4576c0` releases it). Playback and decoding are done by the OS codecs;
 a port needs its own MPEG-1 and Indeo/MS-Video-1 decoders or an external one.
+**Differs from the exe:** OpenSOW decodes every movie itself (`video.rs`, `mpeg1.rs`, `mp2.rs`, `msvideo1.rs`, `indeo5.rs`, sections below) instead of using the OS codecs through DirectShow. It plays the sound through rodio, resampled by `hifi.rs` when sound enhancement is on (docs/audio.md). The MPEG-1 pictures can differ from other decoders by IDCT rounding ("Verification" below).
 
 Paths are table entries `data\levels\m01.sgv … m22.sgv` (0x48ec93…), `mI.sgv` (intro, 0x48e938, used at
 0x434dc0), `mO.sgv` (outro, 0x48e958, used at 0x43528f), `mA`/`mB` at 0x48f2d4/0x48f2e8.
@@ -82,9 +83,11 @@ Verification: all 100 frames are bit-identical to FFmpeg's output; the test pins
 
 `opensow-game` plays `mI.sgv` full screen before the menu (`intro.rs`): `mpeg1::Stream` (incremental
 decoder) yields frames as the clock needs them, dropping frames if the machine is slow; the layer II track is
-decoded up front and played through `rodio` (new dependency, `playback` feature only; no device = silent).
-Any key or click skips it. `--no-intro` starts at the menu, `--lang SK|CZ|PL|HU|RU|CHINNESSE` picks the
-language copy: the exe's path table (0x48e4bc, 0x48ff48...) maps language index 0..6 to `data\levels\` and
+decoded up front and played through `rodio` (`playback` feature only; no device = silent).
+Any key or click skips it.
+**Differs from the exe:** the exe places the movie in a 640x480 rectangle centred on the screen (`0x457220`). OpenSOW scales each frame to fit the whole window (nearest neighbour, black bars; `Intro::draw`), and drops frames when the machine is slow.
+`--no-intro` starts at the menu, `--lang EN|SK|CZ|CS|CT` (or `CHINNESSE`; PL/HU/RU fall back to
+English, docs/text.md) picks the language and with it the copy: the exe's path table (0x48e4bc, 0x48ff48...) maps language index 0..6 to `data\levels\` and
 `data\diffdata\{SK,CZ,PL,HU,RU,CHINNESSE}\levels\`. Headless: `--screenshot out.png --intro-frame N`.
 ### Briefings and outro
 
@@ -98,7 +101,7 @@ game plays it after winning the last campaign mission (`FINAL_LEVEL = "M22"`, an
 
 In `opensow-game`: choosing a mission plays its briefing (`Game::begin`), then starts it; restarting from the
 pause menu does not replay it; winning M22 plays `mO` before the closing message. Same skip keys, `--mute`
-opens no audio device, `--no-intro` turns every movie off. Headless: `--movie M05 --intro-frame 120`.
+opens no audio device, `--no-intro` turns every movie off (port options, not in the exe). Headless: `--movie M05 --intro-frame 120`.
 The briefing movies have no language copies (only mI/mO do); the player falls back to `Data\Levels`.
 
 ## How the exe uses the two AVIs
@@ -108,7 +111,7 @@ track `Brief`/`Brief2` chosen by a coin flip at 0x441cf9; `mB.sgv` (128x112) at 
 0x441553 and 0x441c7f, around the same screen's state changes (docs/lands.md). Both go through the same DirectShow player
 object as the MPEG files.
 
-Indeo 5 (mA): decoded by `indeo5.rs`, bit-exact against FFmpeg for all 104 frames (all intra, docs/indeo5.md); 
+Indeo 5 (mA): decoded by `indeo5.rs`, bit-exact against FFmpeg for all 104 frames (all intra, docs/indeo5.md).
 
 In the game (`intro.rs::Anim`, `lands.rs`): "New game" plays `mA` full screen (with its PCM sound), then the campaign map appears
 with `mB` looping at (32, 1) (the exe's open call); see docs/lands.md. The mission

@@ -1,19 +1,29 @@
+//! A level loaded for drawing: [`Scene`] holds the background picture, the blocked-cell map, the level's objects with
+//! their sprites, and the overlays the viewer can switch on.
+
 use crate::art::{Art, Placed};
 use crate::render::View;
 use crate::upscale::{self, HiGround};
+use opensow_formats::{level::Level, map::Map, srf, GameDir};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
-use opensow_formats::{level::Level, map::Map, srf, GameDir};
 
+/// Pixels per map cell.
 pub const CELL: i32 = 32;
 
+/// A level loaded for drawing (see the module docs).
 pub struct Scene {
+    /// The level's name, e.g. `M01`.
     pub name: String,
     /// Background RGB8, `bg_w * bg_h * 3`.
     pub bg: Vec<u8>,
+    /// Width of the background in pixels (map cells * 32).
     pub bg_w: usize,
+    /// Height of the background in pixels.
     pub bg_h: usize,
+    /// The per-cell terrain flags (`.map`).
     pub map: Map,
+    /// The level's objects and unit markers, when the level file was found.
     pub level: Option<Level>,
     /// Sprites for objects that have art, sorted back-to-front.
     pub placed: Vec<Placed>,
@@ -34,13 +44,19 @@ pub struct Scene {
 
 /// A ground picture and its foreground mask as the renderer samples them; `k` = its size relative to the map in pixels (1 or 2).
 pub struct GroundRef<'a> {
+    /// The ground picture, RGB8.
     pub bg: &'a [u8],
+    /// The foreground mask, one flag per pixel.
     pub fg: &'a [bool],
+    /// Width of both in pixels.
     pub w: usize,
+    /// Height of both in pixels.
     pub h: usize,
+    /// Size relative to the map in pixels: 1 for the original ground, 2 for the enhanced one.
     pub k: usize,
 }
 
+/// Holds a scene's 2x enhanced ground once the background thread has made it.
 #[derive(Default)]
 pub struct HiSlot {
     started: AtomicBool,
@@ -51,6 +67,7 @@ pub struct HiSlot {
 const MAX_ENHANCED_GROUND: usize = 4_300_000;
 
 impl Scene {
+    /// Loads level `name` from the install; every unit is given `facing`, weapon tops `aim` (`None` = the same).
     pub fn load(game: &GameDir, name: &str, facing: usize, aim: Option<usize>) -> Result<Scene, String> {
         Scene::load_with(game, name, facing, aim, None)
     }
@@ -80,7 +97,21 @@ impl Scene {
         }
         let placed = build_placed(game, level.as_ref(), facing, aim);
         let foreground = foreground_mask(&read("tmi").ok(), &read("til").ok(), bg_w, bg_h);
-        Ok(Scene { name: name.to_owned(), bg, bg_w, bg_h, map, level, placed, facing, aim, shots: Vec::new(), ranges: Vec::new(), foreground, hi: HiSlot::default() })
+        Ok(Scene {
+            name: name.to_owned(),
+            bg,
+            bg_w,
+            bg_h,
+            map,
+            level,
+            placed,
+            facing,
+            aim,
+            shots: Vec::new(),
+            ranges: Vec::new(),
+            foreground,
+            hi: HiSlot::default(),
+        })
     }
 
     /// The ground to draw for `view` and the view to draw it with: the enhanced 2x ground (view doubled, zoom halved, so the screen
@@ -169,15 +200,17 @@ fn foreground_mask(tmi: &Option<Vec<u8>>, til: &Option<Vec<u8>>, bg_w: usize, bg
     fg
 }
 
-
 /// A reduced picture of a map's ground (`.srf`), for menus.
 pub struct Thumbnail {
     /// `w * h` packed `0x00RRGGBB` pixels.
     pub pixels: Vec<u32>,
+    /// Width of the thumbnail in pixels.
     pub w: usize,
+    /// Height of the thumbnail in pixels.
     pub h: usize,
     /// The full picture's size in pixels (cells * 32), to place cells on the thumbnail.
     pub full_w: usize,
+    /// Height of the full picture in pixels.
     pub full_h: usize,
 }
 

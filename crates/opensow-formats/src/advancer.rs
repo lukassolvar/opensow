@@ -6,13 +6,17 @@
 //! `+0x100`; setters `0x46e5c0/0x46e620/0x46e680`) and flies there. Once the Advancer sits on that cell and the target is
 //! still valid, every beam shot (`0x46f440`) creates an action event (code 0x15/0x13/0x14) executed by `0x40f590`.
 
+use crate::kinds;
 use crate::level::Level;
 
 /// The three Advancer orders; the numbers are the action-event codes (`[event+0x2658]`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Action {
+    /// Repair a damaged building or turret (event code `0x13`).
     Repair = 0x13,
+    /// Upgrade a building's production line (event code `0x14`).
     Upgrade = 0x14,
+    /// Destroy: shoot a building down to capture it, or a turret or headquarters to remove it (event code `0x15`).
     Destroy = 0x15,
 }
 
@@ -35,8 +39,9 @@ pub fn building_max_hp(kind: i32) -> i32 {
 /// update (`0x40de60`) at up to this many points per tick.
 pub const HEAL_PER_TICK: i32 = 150;
 
+/// Whether an object kind is one of the five turrets (25..=29).
 pub fn is_turret(kind: i32) -> bool {
-    (25..=29).contains(&kind)
+    kinds::TURRETS.contains(&kind)
 }
 
 /// Ticks between two beam shots of one Advancer (60 ticks/s, so 6 shots per second).
@@ -150,7 +155,7 @@ pub fn pointer_over_building(own: bool, kind: i32, damaged: bool, slot_locked: b
     if !own {
         return Pointer::Destroy;
     }
-    if kind == 100 {
+    if kind == kinds::HEADQUARTERS {
         return Pointer::Move;
     }
     let repair_first = is_turret(kind) || repair_mode;
@@ -207,7 +212,9 @@ pub fn fragment(a: Action, i: usize, rand: &mut impl FnMut(u32) -> u32) -> (i32,
 
 /// `bodky_b` / `bodky_y` / `bodky_r` effect arrays (`extras\bodky_*`).
 pub const BODKY_B: u32 = 0x5e6bd0;
+/// The `extras\bodky_y` effect array.
 pub const BODKY_Y: u32 = 0x5e6c20;
+/// The `extras\bodky_r` effect array.
 pub const BODKY_R: u32 = 0x5e6b80;
 
 /// Who owns a destroyed building afterwards (`0x43ab40` with the owner argument 0): the player with the largest
@@ -227,7 +234,7 @@ pub fn capture_winner(tally: [i32; 3], owner: usize) -> Option<usize> {
 
 /// Whether destroying a building of this kind removes it (turrets and the HQ) instead of handing it over.
 pub fn removed_when_destroyed(kind: i32) -> bool {
-    is_turret(kind) || kind == 100
+    is_turret(kind) || kind == kinds::HEADQUARTERS
 }
 
 #[cfg(test)]

@@ -27,13 +27,16 @@ pub const CURVES: usize = 200;
 /// One curve: points relative to the start point (lift already subtracted from `y`) and the lift per point.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Curve {
+    /// The points, relative to the start point.
     pub points: Vec<(i32, i32)>,
+    /// The lift at each point, in pixels.
     pub lift: Vec<i32>,
 }
 
 /// The 200 curves (`0x4ec228` lift, `0x49de98` points, `0x4ec098` lengths).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurveTable {
+    /// The curves, in table order.
     pub curves: Vec<Curve>,
 }
 

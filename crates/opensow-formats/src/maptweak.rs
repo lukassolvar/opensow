@@ -26,18 +26,23 @@
 //! every edit of a map is resolved against the original script first and then applied together: moves never chain. Added
 //! buildings copy the words of the first building of the same kind in the map (factory slots, levels), else [`template`].
 
+use crate::kinds;
 use crate::level::{Level, Marker, Object};
 use crate::{Error, Result};
 
 /// Owner of an object: neutral (2), blue = player 0, green = player 1 (object word 14, marker player).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
+    /// Nobody's (owner code 2).
     Neutral,
+    /// Player 0 (owner code 0).
     Blue,
+    /// Player 1 (owner code 1).
     Green,
 }
 
 impl Side {
+    /// The owner number as the level file stores it.
     pub fn code(self) -> i32 {
         match self {
             Side::Blue => 0,
@@ -46,6 +51,7 @@ impl Side {
         }
     }
 
+    /// The side an owner number stands for, `None` for anything but 0, 1, 2.
     pub fn from_code(c: i32) -> Option<Side> {
         match c {
             0 => Some(Side::Blue),
@@ -55,6 +61,7 @@ impl Side {
         }
     }
 
+    /// The side's name as written in the tweaks file.
     pub fn name(self) -> &'static str {
         match self {
             Side::Neutral => "neutral",
@@ -71,7 +78,9 @@ impl Side {
 /// What an edit acts on: a building or turret (object kind 25-29, 100-108) or a unit marker (kind 1-15, 40-46).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Thing {
+    /// A building or turret, by object kind.
     Object(i32),
+    /// A unit marker, by unit kind.
     Unit(i32),
 }
 
@@ -106,12 +115,15 @@ pub fn unit_name(kind: i32) -> String {
     }
 }
 
+/// The name of an object kind as written in the tweaks file (the number when it has no name).
 pub fn object_name(kind: i32) -> String {
     OBJECT_NAMES.iter().find(|(k, _)| *k == kind).map_or(kind.to_string(), |(_, n)| (*n).to_string())
 }
 
 fn parse_unit(s: &str) -> Option<i32> {
-    s.parse().ok().or_else(|| [(1..=15).collect::<Vec<i32>>(), vec![40, 41, 42, 43, 44, 45, 46]].concat().into_iter().find(|&k| unit_name(k).eq_ignore_ascii_case(s)))
+    s.parse()
+        .ok()
+        .or_else(|| [(1..=15).collect::<Vec<i32>>(), vec![40, 41, 42, 43, 44, 45, 46]].concat().into_iter().find(|&k| unit_name(k).eq_ignore_ascii_case(s)))
 }
 
 fn parse_object(s: &str) -> Option<i32> {
@@ -121,8 +133,11 @@ fn parse_object(s: &str) -> Option<i32> {
 /// One object of the shipped script: its kind, its cell there and which of several equal ones (1-based).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Key {
+    /// What kind of thing it is.
     pub thing: Thing,
+    /// Its cell in the shipped script.
     pub cell: (i32, i32),
+    /// Which one, counting from 1, when several of that kind share the cell.
     pub nth: u32,
 }
 
@@ -130,18 +145,23 @@ pub struct Key {
 /// tech-levels it may rise (words 3-7 and 8-12; at most five lines).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Production {
+    /// How many lines produce from the start (object word 2).
     pub active: i32,
+    /// Each line's unit kind and the number of tech-levels it may rise.
     pub lines: Vec<(i32, i32)>,
 }
 
+/// Most production lines a building can have.
 pub const MAX_LINES: usize = 5;
 
 impl Production {
+    /// Reads a building's production lines from its object record.
     pub fn of(o: &Object) -> Production {
         let lines = (0..MAX_LINES).filter(|&i| o.raw[3 + i] != 0).map(|i| (o.raw[3 + i], o.raw[8 + i])).collect();
         Production { active: o.raw[2], lines }
     }
 
+    /// Writes the production lines into an object record.
     pub fn write(&self, o: &mut Object) {
         o.raw[2] = self.active;
         for i in 0..MAX_LINES {
@@ -193,10 +213,14 @@ fn parse_production(words: &[&str]) -> Option<Production> {
     (p.lines.len() <= MAX_LINES && (0..=MAX_LINES as i32).contains(&p.active)).then_some(p)
 }
 
+/// One change to a shipped map, as one line of the tweaks file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Edit {
+    /// Move the object to another cell.
     Move(Key, (i32, i32)),
+    /// Give the object to another side.
     Owner(Key, Side),
+    /// Remove the object.
     Remove(Key),
     /// A new object; buildings may come with their own production lines (else those of one of its kind in the map).
     Add(Thing, (i32, i32), Side, Option<Production>),
@@ -209,6 +233,7 @@ pub enum Edit {
 /// The tweaks of every map, in file order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Tweaks {
+    /// Map name and its edits, in file order.
     pub maps: Vec<(String, Vec<Edit>)>,
 }
 
@@ -218,6 +243,7 @@ fn cell(s: &str) -> Option<(i32, i32)> {
 }
 
 impl Tweaks {
+    /// Parses the tweaks file (`data/skirmish-maps.txt`).
     pub fn parse(text: &str) -> Result<Tweaks> {
         let mut t = Tweaks::default();
         for (n, raw) in text.lines().enumerate() {
@@ -261,7 +287,9 @@ impl Tweaks {
             };
             let edit = match (op.as_str(), words.as_slice()) {
                 ("move", [from, "->", to]) => Edit::Move(key(from).ok_or_else(|| bad("bad cell"))?, cell(to).ok_or_else(|| bad("bad cell"))?),
-                ("owner", [at, side]) => Edit::Owner(key(at).ok_or_else(|| bad("bad cell"))?, Side::parse(side).ok_or_else(|| bad("owner is neutral, blue or green"))?),
+                ("owner", [at, side]) => {
+                    Edit::Owner(key(at).ok_or_else(|| bad("bad cell"))?, Side::parse(side).ok_or_else(|| bad("owner is neutral, blue or green"))?)
+                }
                 ("remove", [at]) => Edit::Remove(key(at).ok_or_else(|| bad("bad cell"))?),
                 ("add", [at, side, prod @ ..]) => {
                     let p = if prod.is_empty() { None } else { Some(parse_production(prod).ok_or_else(|| bad("expected `active N` and the lines"))?) };
@@ -270,7 +298,9 @@ impl Tweaks {
                     }
                     Edit::Add(thing, cell(at).ok_or_else(|| bad("bad cell"))?, Side::parse(side).ok_or_else(|| bad("owner is neutral, blue or green"))?, p)
                 }
-                ("slots", [at, prod @ ..]) if matches!(thing, Thing::Object(_)) => Edit::Slots(key(at).ok_or_else(|| bad("bad cell"))?, parse_production(prod).ok_or_else(|| bad("expected `active N` and up to five lines"))?),
+                ("slots", [at, prod @ ..]) if matches!(thing, Thing::Object(_)) => {
+                    Edit::Slots(key(at).ok_or_else(|| bad("bad cell"))?, parse_production(prod).ok_or_else(|| bad("expected `active N` and up to five lines"))?)
+                }
                 _ => return Err(bad("expected move/owner/remove/add/slots")),
             };
             if matches!(edit, Edit::Owner(Key { thing: Thing::Unit(_), .. }, Side::Neutral) | Edit::Add(Thing::Unit(_), _, Side::Neutral, _)) {
@@ -324,6 +354,7 @@ fn key_text(k: &Key) -> String {
     format!("{} {},{}{n}", thing_text(k.thing), k.cell.0, k.cell.1)
 }
 
+/// The edit as one line of the tweaks file.
 pub fn edit_line(e: &Edit) -> String {
     match e {
         Edit::Move(k, to) => format!("move {} -> {},{}", key_text(k), to.0, to.1),
@@ -366,8 +397,8 @@ pub fn template(kind: i32, cell: (i32, i32), side: Side) -> Object {
         _ => &[],
     };
     raw[2..2 + words.len()].copy_from_slice(words);
-    raw[13] = if (25..=29).contains(&kind) { [900, 1250, 1540, 2100, 2600][(kind - 25) as usize] } else { 13536 };
-    raw[15] = i32::from(kind == 100);
+    raw[13] = if kinds::TURRETS.contains(&kind) { [900, 1250, 1540, 2100, 2600][(kind - 25) as usize] } else { 13536 };
+    raw[15] = i32::from(kind == kinds::HEADQUARTERS);
     raw[18] = 100;
     let mut o = Object { kind, cell_x: cell.0, cell_y: cell.1, raw };
     set_object(&mut o, cell, side);
@@ -425,8 +456,11 @@ pub fn key_of(original: &Level, unit: bool, i: usize) -> Key {
 /// A script with its edits and where every object and marker came from (`Some(i)` = `original`'s object/marker `i`, `None` = added).
 #[derive(Debug, Clone)]
 pub struct Tracked {
+    /// The level with the edits applied.
     pub level: Level,
+    /// For each object of `level`: its index in the original, `None` when it was added.
     pub object_origin: Vec<Option<usize>>,
+    /// For each marker of `level`: its index in the original, `None` when it was added.
     pub marker_origin: Vec<Option<usize>>,
 }
 
@@ -583,7 +617,11 @@ mod tests {
             version: 4,
             header: [0; HEADER_WORDS],
             objects: vec![obj(100, 1, 1, 0, 0), obj(100, 50, 50, 1, 0), obj(105, 20, 20, 2, 16), obj(105, 30, 30, 2, 16), obj(107, 40, 10, 2, 22)],
-            markers: vec![Marker { kind: 40, player: 0, x: 3 * 32 + 5, y: 4 * 32 + 9 }, Marker { kind: 7, player: 1, x: 10 * 32, y: 10 * 32 }, Marker { kind: 7, player: 1, x: 10 * 32 + 8, y: 10 * 32 }],
+            markers: vec![
+                Marker { kind: 40, player: 0, x: 3 * 32 + 5, y: 4 * 32 + 9 },
+                Marker { kind: 7, player: 1, x: 10 * 32, y: 10 * 32 },
+                Marker { kind: 7, player: 1, x: 10 * 32 + 8, y: 10 * 32 },
+            ],
         }
     }
 
@@ -611,7 +649,10 @@ mod tests {
         let t = Tweaks::parse(TEXT).unwrap();
         let e = t.edits("06-meteor swarm");
         assert_eq!(e.len(), 9);
-        assert_eq!(e[7], Edit::Slots(Key { thing: Thing::Object(105), cell: (20, 20), nth: 1 }, Production { active: 2, lines: vec![(16, 0), (17, 0), (18, 0)] }));
+        assert_eq!(
+            e[7],
+            Edit::Slots(Key { thing: Thing::Object(105), cell: (20, 20), nth: 1 }, Production { active: 2, lines: vec![(16, 0), (17, 0), (18, 0)] })
+        );
         assert_eq!(e[8], Edit::Add(Thing::Object(102), (5, 5), Side::Blue, Some(Production { active: 1, lines: vec![(7, 2), (13, 1)] })));
         assert_eq!(e[0], Edit::Move(Key { thing: Thing::Object(105), cell: (20, 20), nth: 1 }, (25, 26)));
         assert_eq!(e[5], Edit::Remove(Key { thing: Thing::Unit(7), cell: (10, 10), nth: 2 }));
@@ -624,7 +665,17 @@ mod tests {
 
     #[test]
     fn bad_lines_are_refused_with_their_number() {
-        for bad in ["move mine 1,1 -> 2,2\n", "[m]\nmove mine 1,1 2,2\n", "[m]\nadd castle 1,1 blue\n", "[m]\nadd unit cannon1 1,1 neutral\n", "[m]\nowner mine 1,1 red\n", "[m]\nslots mine 1,1 gold1\n", "[m]\nslots medium 1,1 active 1 a b c d e f\n", "[m]\nslots medium 1,1 active 1 castle1\n", "[m]\nslots unit cannon1 1,1 active 0\n"] {
+        for bad in [
+            "move mine 1,1 -> 2,2\n",
+            "[m]\nmove mine 1,1 2,2\n",
+            "[m]\nadd castle 1,1 blue\n",
+            "[m]\nadd unit cannon1 1,1 neutral\n",
+            "[m]\nowner mine 1,1 red\n",
+            "[m]\nslots mine 1,1 gold1\n",
+            "[m]\nslots medium 1,1 active 1 a b c d e f\n",
+            "[m]\nslots medium 1,1 active 1 castle1\n",
+            "[m]\nslots unit cannon1 1,1 active 0\n",
+        ] {
             assert!(Tweaks::parse(bad).is_err(), "{bad}");
         }
         assert!(format!("{:?}", Tweaks::parse("[m]\n\nmove x").unwrap_err()).contains("line 3"));
@@ -637,11 +688,15 @@ mod tests {
         assert!(skipped.is_empty());
         let l = &r.level;
         assert_eq!(l.objects.len(), 6, "one removed, two added");
-        let mine = l.objects.iter().find(|o| o.kind == 105).unwrap();
+        let mine = l.objects.iter().find(|o| o.kind == kinds::GOLD_MINE).unwrap();
         assert_eq!((mine.cell_x, mine.cell_y, mine.raw[16], mine.raw[17], mine.raw[14]), (25, 26, 25, 26, 2));
-        assert_eq!(l.objects.iter().find(|o| o.kind == 107).unwrap().raw[14], 0, "the windtrap is blue");
+        assert_eq!(l.objects.iter().find(|o| o.kind == kinds::WINDTRAP).unwrap().raw[14], 0, "the windtrap is blue");
         let heavy = &l.objects[4];
-        assert_eq!((heavy.kind, heavy.cell_x, heavy.raw[14], &heavy.raw[2..11]), (103, 12, 2, &[1, 7, 10, 13, 0, 0, 2, 2, 2][..]), "no heavy factory to copy: the template");
+        assert_eq!(
+            (heavy.kind, heavy.cell_x, heavy.raw[14], &heavy.raw[2..11]),
+            (103, 12, 2, &[1, 7, 10, 13, 0, 0, 2, 2, 2][..]),
+            "no heavy factory to copy: the template"
+        );
         assert_eq!(l.markers[0].cell(), (6, 7));
         assert_eq!((l.markers[0].x & 31, l.markers[0].y & 31), (5, 9), "the offset inside the cell stays");
         assert_eq!(l.markers.len(), 3);
@@ -667,7 +722,10 @@ mod tests {
         let d = diff(&level(), &r);
         let (again, _) = apply(&level(), &d);
         assert_eq!(again.level.objects, r.level.objects);
-        assert_eq!(again.level.markers.iter().map(|m| (m.kind, m.player, m.cell())).collect::<Vec<_>>(), r.level.markers.iter().map(|m| (m.kind, m.player, m.cell())).collect::<Vec<_>>());
+        assert_eq!(
+            again.level.markers.iter().map(|m| (m.kind, m.player, m.cell())).collect::<Vec<_>>(),
+            r.level.markers.iter().map(|m| (m.kind, m.player, m.cell())).collect::<Vec<_>>()
+        );
         assert!(diff(&level(), &apply(&level(), &[]).0).is_empty(), "no change, no edits");
         assert!(d.iter().any(|e| matches!(e, Edit::Slots(..))) && d.iter().any(|e| matches!(e, Edit::Add(_, _, _, Some(_)))), "{d:?}");
         let plain = apply(&level(), &[Edit::Add(Thing::Object(105), (5, 6), Side::Blue, None)]).0;
@@ -684,11 +742,14 @@ mod tests {
     #[test]
     fn a_building_that_becomes_owned_starts_with_full_hit_points() {
         // the mines of the test map are neutral with word 18 = 50 (half), like the shipped ones
-        let (r, _) = apply(&level(), &[
-            Edit::Add(Thing::Object(105), (5, 6), Side::Blue, None),
-            Edit::Owner(Key { thing: Thing::Object(105), cell: (20, 20), nth: 1 }, Side::Green),
-            Edit::Owner(Key { thing: Thing::Object(100), cell: (50, 50), nth: 1 }, Side::Blue),
-        ]);
+        let (r, _) = apply(
+            &level(),
+            &[
+                Edit::Add(Thing::Object(105), (5, 6), Side::Blue, None),
+                Edit::Owner(Key { thing: Thing::Object(105), cell: (20, 20), nth: 1 }, Side::Green),
+                Edit::Owner(Key { thing: Thing::Object(100), cell: (50, 50), nth: 1 }, Side::Blue),
+            ],
+        );
         let added = r.level.objects.last().unwrap();
         assert_eq!((added.raw[14], added.raw[18]), (0, 100), "added as blue from a neutral mine's words");
         let mine = r.level.objects.iter().find(|o| (o.cell_x, o.cell_y) == (20, 20)).unwrap();

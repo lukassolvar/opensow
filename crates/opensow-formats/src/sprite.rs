@@ -16,6 +16,7 @@
 
 use crate::{Error, Reader, Result};
 
+/// What a sprite file's rows hold, by file type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     /// `.ps6` / `.tsp`: RGB565 pixels.
@@ -25,6 +26,7 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// The kind of a sprite file by its extension, `None` for other files.
     pub fn from_extension(path: &std::path::Path) -> Option<Kind> {
         match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
             "ps6" | "tsp" => Some(Kind::Color),
@@ -34,12 +36,18 @@ impl Kind {
     }
 }
 
+/// One decoded frame of a sprite file.
 #[derive(Debug, Clone)]
 pub struct Frame {
+    /// Width in pixels.
     pub width: u16,
+    /// Height in pixels.
     pub height: u16,
+    /// X of the anchor point (the hotspot).
     pub hot_x: i16,
+    /// Y of the anchor point (the hotspot).
     pub hot_y: i16,
+    /// Four header words whose meaning is not confirmed (e.g. 320, 240, 160, 120); unit sheets store sizes here.
     pub extra: [u16; 4],
     /// Row-major RGB565 colour (0 for shadow sprites and transparent pixels).
     pub pixels: Vec<u16>,
@@ -67,12 +75,14 @@ impl Frame {
     }
 }
 
+/// Expands an RGB565 colour to 8 bits per channel.
 #[inline(always)]
 pub fn rgb565_to_rgb8(c: u16) -> [u8; 3] {
     let (r, g, b) = ((c >> 11) as u8, ((c >> 5) & 63) as u8, (c & 31) as u8);
     [r << 3 | r >> 2, g << 2 | g >> 4, b << 3 | b >> 2]
 }
 
+/// Decodes every frame of a sprite file of the given kind.
 pub fn parse(data: &[u8], kind: Kind) -> Result<Vec<Frame>> {
     let mut frames = Vec::new();
     let mut r = Reader::new(data);
@@ -142,7 +152,7 @@ pub fn encode(frames: &[Frame], kind: Kind) -> Vec<u8> {
         let mut body: Vec<u16> = vec![f.width, f.height, f.hot_x as u16, f.hot_y as u16];
         body.extend(f.extra);
         let table_at = body.len();
-        body.extend(std::iter::repeat(0).take(h * 2));
+        body.extend(std::iter::repeat_n(0, h * 2));
         for y in 0..h {
             let off = body.len() as u32;
             body[table_at + y * 2] = off as u16;
@@ -185,7 +195,7 @@ mod tests {
         let h = rows.len() as u16;
         let mut body: Vec<u16> = vec![w, h, 1, 2, 0, 0, 0, 0];
         let table_at = body.len();
-        body.extend(std::iter::repeat(0).take(rows.len() * 2));
+        body.extend(std::iter::repeat_n(0, rows.len() * 2));
         for (i, row) in rows.iter().enumerate() {
             let off = body.len() as u32;
             body[table_at + i * 2] = off as u16;

@@ -8,3 +8,11 @@
 /State of War_1.cfg
 /assets
 /opensow.cfg
+# Launcher art meant to ship with it: background screenshots and the tank icon (docs/launcher.md)
+!/crates/opensow-launcher/art/*.jpg
+!/crates/opensow-launcher/art/tank.png
+# README screenshots (rendered headless with --screenshot)
+!/docs/screenshots/*.jpg
+# Claude Code worktrees and personal settings
+/.claude/worktrees/
+/.claude/settings.local.json

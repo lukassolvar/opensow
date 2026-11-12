@@ -1,6 +1,6 @@
 # Production, economy and buildings (decoded from the exe + game strings)
 
-Code: `crates/opensow-formats/src/production.rs`, sim in `crates/opensow-game/src/sim.rs` (`step_production`). Exe tests: `production_slot_values_match_the_exes_slot_initialiser`.
+Code: `crates/opensow-formats/src/production.rs`, sim in `crates/opensow-game/src/sim/economy.rs` (`step_production`). Exe tests: `production_slot_values_match_the_exes_slot_initialiser`.
 
 ## Rules (strings 154-168, 324-346 in `langEN.txt`)
 - Ground-unit production is **automatic and free**; a progress bar fills, then the unit appears. Upgrading a factory with the Advancer lets it produce **several units at once** (more active slots); tech-levels (medium/heavy units) cost **research points** (500) from a Research lab; the Advancer also captures and repairs buildings.
@@ -17,5 +17,7 @@ word 2 = **active slots** (`[bld+0x144]`), words 3-7 = **slot kinds**, words 8-1
 - At the target: air forces add to the player's stock (`0x453e80`, player block `0x70ba50 + player*0xc68`) and show the "ready" message; ground units set the ready flag and the building update (`0x40de60`) spawns the unit (`0x408740`; offsets `[bld+0x124..0x138]` = spawn cell, primary exit, alternative exit; only these two exits exist, see docs/ai.md). The unit is ordered out through the exit and then, for a player factory with a rally point, on to it (docs/rally.md). If both exits are occupied it retries each tick and after 240 ticks says message 5 ("No space for units").
 - Building update `0x40de60` also runs the smoke/animation counters, the HP-dependent damage animation and runs the slots. `0x40e3d0` is the Advancer's upgrade (not research): it adds the Advancer rate to `[bld+0x148]` and unlocks slot `[bld+0x144]` when the points reach that slot's target (docs/advancer-actions.md).
 
-## Not decoded yet
-See docs/ai.md (economy, AI, missions) and docs/advancer-actions.md. Enemy factories now produce with the same rule as the player's; the only unit limit is the exe's 1000 unit slots per side (`0x43a420` fails at `cmp ecx, 0x3e8`; a corpse holds its slot for 430 steps, docs/effects.md), which the game now uses for both sides instead of the old 60-unit placeholder.
+## OpenSOW and the unit limit
+`step_production` (`sim/economy.rs`) runs the slots, exits, rally order and "No space" wait as above for both sides (`formats::production`: `rate_row`, `factory_exit`, `next_tier`). The only unit limit is the exe's 1000 unit slots per side (`0x43a420` fails at `cmp ecx, 0x3e8`; a corpse holds its slot for 430 steps, docs/effects.md): `UNIT_SLOTS`, counted as live units plus corpses. Economy, AI and missions: docs/ai.md; Advancer upgrades: docs/advancer-actions.md.
+
+**Differs from the exe:** in skirmishes (not in the exe) the computer's production speed is scaled by its difficulty (`Difficulty::handicap().production_pct`: Easy 70 %, Hard 130 %, Brutal 180 %; Normal and campaign missions 100 %).

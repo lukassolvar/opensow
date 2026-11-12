@@ -20,6 +20,7 @@
 pub const CARRYALL_HP: f32 = 360.0;
 /// Cruising speed 120 px/s = 16 ticks per cell; the slow approach and the unload take about this long over the target.
 pub const TICKS_PER_CELL: f32 = 16.0;
+/// Ticks a carryall spends over the target: the slow approach and the unload.
 pub const HOVER_TICKS: f32 = 200.0;
 /// A drop whose expected damage exceeds this share of the carryall's hit points is not flown.
 pub const MAX_RISK: f32 = 0.7;
@@ -44,11 +45,14 @@ pub struct Tuning {
 }
 
 impl Tuning {
+    /// Easy: a carryall every 30 s at most, and no raids.
     pub const EASY: Tuning = Tuning { cooldown: 1800, raids: false, raid_opponent_after: u64::MAX, hq_safe: 0.0, quiet_raids: false, max_inbound: 1 };
     /// Normal: one carryall at a time, 30 s apart, raids on the player's buildings only after 5 minutes and never into
     /// the 16 cells around the player's HQ, always one carryall kept back.
     pub const NORMAL: Tuning = Tuning { cooldown: 1800, raids: true, raid_opponent_after: 5 * 3600, hq_safe: 16.0, quiet_raids: false, max_inbound: 1 };
+    /// Hard: 15 s apart, raids on the player's buildings after 2 minutes, down to 8 cells from the HQ.
     pub const HARD: Tuning = Tuning { cooldown: 900, raids: true, raid_opponent_after: 2 * 3600, hq_safe: 8.0, quiet_raids: true, max_inbound: 2 };
+    /// Brutal: 10 s apart, raids from the start and anywhere.
     pub const BRUTAL: Tuning = Tuning { cooldown: 600, raids: true, raid_opponent_after: 0, hq_safe: 0.0, quiet_raids: true, max_inbound: 3 };
 }
 
@@ -62,12 +66,12 @@ const NEAR: f32 = 9.0;
 
 /// Anti-air kinds (they shoot only flyers: the Advancer and aircraft).
 pub fn is_anti_air(kind: i32) -> bool {
-    matches!(kind, 1 | 2 | 3 | 42)
+    opensow_formats::kinds::ANTI_AIR_UNITS.contains(&kind)
 }
 
 /// How much a ground unit counts in a fight.
 pub fn weight(kind: i32) -> f32 {
-    if (41..=45).contains(&kind) {
+    if opensow_formats::kinds::WALKERS.contains(&kind) {
         2.5
     } else if is_anti_air(kind) {
         0.3
@@ -79,17 +83,24 @@ pub fn weight(kind: i32) -> f32 {
 /// A building or turret.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Site {
+    /// Index in `World::structures`.
     pub index: usize,
+    /// Object kind number.
     pub kind_id: i32,
+    /// Origin cell.
     pub cell: (i32, i32),
+    /// Footprint in cells.
     pub size: (i32, i32),
+    /// Belongs to the side that plans.
     pub own: bool,
     /// Owned by nobody (neutral) rather than the enemy.
     pub neutral: bool,
+    /// Cannot be captured (a headquarters).
     pub protected: bool,
 }
 
 impl Site {
+    /// The middle of the footprint, in cells.
     pub fn centre(&self) -> (f32, f32) {
         (self.cell.0 as f32 + self.size.0 as f32 / 2.0, self.cell.1 as f32 + self.size.1 as f32 / 2.0)
     }
@@ -109,7 +120,7 @@ impl Site {
     }
 
     fn is_turret(&self) -> bool {
-        (25..=29).contains(&self.kind_id)
+        opensow_formats::kinds::TURRETS.contains(&self.kind_id)
     }
 
     /// Ground firepower of a turret (tier points as in `defence.rs`; the A.A. turret has none).
@@ -126,35 +137,49 @@ impl Site {
 /// A ground unit (either side).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Trooper {
+    /// The unit's id.
     pub id: u32,
+    /// The cell it stands on.
     pub cell: (i32, i32),
+    /// Unit kind number.
     pub kind: i32,
+    /// Belongs to the side that plans.
     pub own: bool,
 }
 
 /// Anti-air fire: an A.A. turret or unit of the enemy (cell, reach in cells, damage per tick).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Flak {
+    /// Where it stands.
     pub cell: (i32, i32),
+    /// Reach in cells.
     pub range: f32,
+    /// Damage per tick.
     pub dps: f32,
 }
 
 /// What the planner sees.
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
+    /// Map size in cells.
     pub map: (i32, i32),
+    /// Every building and turret.
     pub sites: Vec<Site>,
+    /// Every ground unit.
     pub troops: Vec<Trooper>,
+    /// The enemy's anti-air.
     pub flak: Vec<Flak>,
     /// The enemy Advancer: id, cell, and the own building (site index) it works on, if any.
     pub enemy_advancer: Option<(u32, (i32, i32), Option<usize>)>,
+    /// Carryalls the side has in stock.
     pub stock: u32,
+    /// The current game tick.
     pub tick: u64,
     /// When the side last launched a carryall.
     pub last_launch: Option<u64>,
     /// Drop cells of the side's carryalls still in the air: a following one lands beside them.
     pub inbound: Vec<(i32, i32)>,
+    /// The difficulty's settings.
     pub tuning: Tuning,
     /// Centre of the opponent's HQ (the [`Tuning::hq_safe`] zone).
     pub opponent_hq: Option<(f32, f32)>,
@@ -181,8 +206,11 @@ pub enum Need {
 /// A launch: the carryall drops whatever squad comes at `cell` (out of anti-air reach) for `need`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Drop {
+    /// Where the carryall lands.
     pub cell: (i32, i32),
+    /// What the drop is for.
     pub need: Need,
+    /// The planner's score of this drop; the best one is flown.
     pub value: f32,
 }
 
@@ -276,7 +304,7 @@ pub fn decide(s: &Snapshot, free: impl Fn((i32, i32)) -> bool) -> Option<Drop> {
     let strength = expected_strength();
     let mut best: Option<Drop> = None;
     let mut consider = |d: Drop| {
-        if best.map_or(true, |b| d.value > b.value) {
+        if best.is_none_or(|b| d.value > b.value) {
             best = Some(d);
         }
     };
@@ -297,9 +325,9 @@ pub fn decide(s: &Snapshot, free: impl Fn((i32, i32)) -> bool) -> Option<Drop> {
     }
     // 2. the enemy Advancer at an own building: whatever comes may hold anti-air units
     if let Some((id, cell, on)) = s.enemy_advancer {
-        let at = on.and_then(|k| s.sites.iter().find(|b| b.index == k)).or_else(|| {
-            s.sites.iter().filter(|b| b.own && !b.is_turret()).find(|b| dist(b.centre(), mid(cell)) <= 6.0)
-        });
+        let at = on
+            .and_then(|k| s.sites.iter().find(|b| b.index == k))
+            .or_else(|| s.sites.iter().filter(|b| b.own && !b.is_turret()).find(|b| dist(b.centre(), mid(cell)) <= 6.0));
         if let Some(b) = at {
             if let Some(c) = drop_cell(s, mid((cell.0 + 2, cell.1)), &free) {
                 consider(Drop { cell: c, need: Need::Advancer(id), value: b.worth() });
@@ -327,10 +355,10 @@ pub fn decide(s: &Snapshot, free: impl Fn((i32, i32)) -> bool) -> Option<Drop> {
 /// A foreign building a raid may go for: not satellite-protected, of the turrets only the A.A. turret, and the opponent's
 /// own buildings only as the [`Tuning`] allows (time, distance from its HQ).
 fn raidable(s: &Snapshot, b: &Site) -> bool {
-    if b.own || b.protected || (b.is_turret() && b.kind_id != 26) {
+    if b.own || b.protected || (b.is_turret() && b.kind_id != opensow_formats::kinds::ANTI_AIR_TURRET) {
         return false;
     }
-    b.neutral || (s.tick >= s.tuning.raid_opponent_after && s.opponent_hq.map_or(true, |h| dist(b.centre(), h) > s.tuning.hq_safe))
+    b.neutral || (s.tick >= s.tuning.raid_opponent_after && s.opponent_hq.is_none_or(|h| dist(b.centre(), h) > s.tuning.hq_safe))
 }
 
 /// After the unload: what each landed unit goes for, by its type (units without a goal are left to the normal AI).
@@ -358,13 +386,21 @@ pub fn assign(s: &Snapshot, landed: &[Trooper], at: (i32, i32)) -> Vec<(u32, Cha
         s.troops.iter().filter(|t| !t.own && dist(mid(t.cell), p) <= r).min_by(|a, b| dist(mid(a.cell), p).partial_cmp(&dist(mid(b.cell), p)).unwrap())
     };
     // a) the nearest own building losing a fight within 14 cells: its nearest attacker
-    let losing = s.sites.iter().filter(|b| b.own && !b.is_turret() && dist(b.centre(), here) <= 14.0).filter(|b| {
-        let (press, hold) = balance(s, b.centre(), true);
-        press >= 1.0 && press > hold
-    }).min_by(|a, b| dist(a.centre(), here).partial_cmp(&dist(b.centre(), here)).unwrap());
+    let losing = s
+        .sites
+        .iter()
+        .filter(|b| b.own && !b.is_turret() && dist(b.centre(), here) <= 14.0)
+        .filter(|b| {
+            let (press, hold) = balance(s, b.centre(), true);
+            press >= 1.0 && press > hold
+        })
+        .min_by(|a, b| dist(a.centre(), here).partial_cmp(&dist(b.centre(), here)).unwrap());
     let goal = if let Some(f) = losing.and_then(|b| nearest_foe(b.centre(), NEAR)) {
         Some(Chase::Unit(f.id))
-    } else if let Some(b) = s.sites.iter().filter(|b| raidable(s, b) && dist(b.centre(), here) <= 14.0)
+    } else if let Some(b) = s
+        .sites
+        .iter()
+        .filter(|b| raidable(s, b) && dist(b.centre(), here) <= 14.0)
         .filter(|b| 1.5 * balance(s, b.centre(), false).1 + 1.0 <= g)
         .min_by(|a, b| dist(a.centre(), here).partial_cmp(&dist(b.centre(), here)).unwrap())
     {
@@ -385,8 +421,8 @@ mod tests {
     use super::*;
 
     fn site(index: usize, kind_id: i32, cell: (i32, i32), own: bool) -> Site {
-        let size = if (25..=29).contains(&kind_id) { (1, 1) } else { (3, 3) };
-        Site { index, kind_id, cell, size, own, neutral: false, protected: kind_id == 100 }
+        let size = if opensow_formats::kinds::TURRETS.contains(&kind_id) { (1, 1) } else { (3, 3) };
+        Site { index, kind_id, cell, size, own, neutral: false, protected: kind_id == opensow_formats::kinds::HEADQUARTERS }
     }
 
     fn snap() -> Snapshot {

@@ -10,11 +10,19 @@
 use std::f32::consts::PI;
 
 fn sinc(x: f32) -> f32 {
-    if x.abs() < 1e-6 { 1.0 } else { (PI * x).sin() / (PI * x) }
+    if x.abs() < 1e-6 {
+        1.0
+    } else {
+        (PI * x).sin() / (PI * x)
+    }
 }
 
 fn lanczos3(x: f32) -> f32 {
-    if x.abs() >= 3.0 { 0.0 } else { sinc(x) * sinc(x / 3.0) }
+    if x.abs() >= 3.0 {
+        0.0
+    } else {
+        sinc(x) * sinc(x / 3.0)
+    }
 }
 
 /// Separable Lanczos3 resample of an interleaved f32 image with `c` channels; edges are clamped.
@@ -82,12 +90,7 @@ pub fn scale2x(rgba: &[u8], w: usize, h: usize) -> Vec<u8> {
         for x in 0..w as isize {
             let (p, a, b, c, d) = (px(x, y), px(x, y - 1), px(x + 1, y), px(x - 1, y), px(x, y + 1));
             let e = if !same(c, b) && !same(a, d) {
-                [
-                    if same(a, c) { a } else { p },
-                    if same(a, b) { b } else { p },
-                    if same(d, c) { c } else { p },
-                    if same(d, b) { d } else { p },
-                ]
+                [if same(a, c) { a } else { p }, if same(a, b) { b } else { p }, if same(d, c) { c } else { p }, if same(d, b) { d } else { p }]
             } else {
                 [p; 4]
             };
@@ -153,6 +156,7 @@ pub fn smooth(rgba: &[u8], w: usize, h: usize, factor: usize, sharpen: f32) -> V
     out
 }
 
+/// A smoothed copy of an RGBA picture at twice the size.
 pub fn smooth2x(rgba: &[u8], w: usize, h: usize) -> Vec<u8> {
     smooth(rgba, w, h, 2, 0.0)
 }
@@ -205,6 +209,7 @@ pub fn set_enabled(on: bool) {
     ENABLED.store(on, Ordering::Relaxed);
 }
 
+/// Whether the enhancement is switched on.
 pub fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
@@ -247,19 +252,39 @@ pub fn enhanced(f: &Frame) -> Option<&Frame> {
             .pixels
             .iter()
             .zip(&f.mask)
-            .flat_map(|(&c, &m)| if m { let [r, g, b] = rgb565_to_rgb8(c); [r, g, b, 255] } else { [0, 0, 0, 0] })
+            .flat_map(|(&c, &m)| {
+                if m {
+                    let [r, g, b] = rgb565_to_rgb8(c);
+                    [r, g, b, 255]
+                } else {
+                    [0, 0, 0, 0]
+                }
+            })
             .collect();
         let up = smooth(&rgba, w, h, 2, 0.35);
         let (pixels, mask): (Vec<u16>, Vec<bool>) = up.chunks(4).map(|p| (if p[3] != 0 { to_565(p[0], p[1], p[2]) } else { 0 }, p[3] != 0)).unzip();
-        Arc::new(Frame { width: f.width * 2, height: f.height * 2, hot_x: f.hot_x * 2, hot_y: f.hot_y * 2, extra: f.extra, pixels, mask, enhanced: OnceLock::new() })
+        Arc::new(Frame {
+            width: f.width * 2,
+            height: f.height * 2,
+            hot_x: f.hot_x * 2,
+            hot_y: f.hot_y * 2,
+            extra: f.extra,
+            pixels,
+            mask,
+            enhanced: OnceLock::new(),
+        })
     }))
 }
 
 /// A finished 2x background: colour, and the foreground mask (tree tops...) at the same size.
 pub struct HiGround {
+    /// The 2x ground picture, RGB8.
     pub bg: Vec<u8>,
+    /// The 2x foreground mask, one flag per pixel.
     pub fg: Vec<bool>,
+    /// Width in pixels (twice the map's).
     pub w: usize,
+    /// Height in pixels (twice the map's).
     pub h: usize,
 }
 
@@ -336,7 +361,8 @@ mod tests {
 
     #[test]
     fn enhanced_frame_doubles_geometry_and_is_cached() {
-        let mut f = Frame { width: 3, height: 2, hot_x: 1, hot_y: -2, extra: [1, 2, 3, 4], pixels: vec![0xF800; 6], mask: vec![true; 6], enhanced: OnceLock::new() };
+        let mut f =
+            Frame { width: 3, height: 2, hot_x: 1, hot_y: -2, extra: [1, 2, 3, 4], pixels: vec![0xF800; 6], mask: vec![true; 6], enhanced: OnceLock::new() };
         f.mask[0] = false;
         let e = enhanced(&f).unwrap();
         assert_eq!((e.width, e.height, e.hot_x, e.hot_y, e.extra), (6, 4, 2, -4, [1, 2, 3, 4]));

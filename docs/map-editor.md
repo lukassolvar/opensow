@@ -1,6 +1,6 @@
 # Skirmish map editor (internal tool, not in the original)
 
-An internal tool for adjusting the shipped skirmish maps (`*.net`) for balance. It is not part of the game players get: it lives in the viewer, and its result is a small text file in the repo that the game compiles in. Making new skirmish maps in the game is a separate, later feature.
+An internal tool for adjusting the shipped skirmish maps (`*.net`) for balance. It is not part of the game players get: it lives in the viewer, and its result is a small text file in the repo that the game compiles in. Players make their own maps with the in-game editor (docs/map-editor-ingame.md), which shares this tool's editing state.
 
 ```bash
 cargo run --release -p opensow-viewer -- --edit "08-Island of Fate"
@@ -19,6 +19,8 @@ The sidebar is built from the game's own pictures (building and unit sprites, th
 - Optional keys: Del (delete), Esc (stop placing, else deselect), Ctrl+S, Ctrl+Z, Ctrl+Y / Ctrl+Shift+Z.
 
 The game picks the file up on its next build (`cargo run` rebuilds); `skirmish::rebalance` applies it when a skirmish loads the map.
+
+**Differs from the exe:** the original plays the shipped `.net` files unchanged; only OpenSOW skirmishes see these edits (the network lobby and the files on disk stay as shipped).
 
 ## The file `data/skirmish-maps.txt`
 Edits of the shipped scripts, one section per map, readable and editable by hand:

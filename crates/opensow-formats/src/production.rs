@@ -6,7 +6,7 @@
 //! and free ("Production of ground units is automatic and costs nothing", tutorial string). Per tick a slot gains
 //! `projectile::steps_at(row, tick % 60)`; when the progress reaches the target the unit is spawned at a free cell next to
 //! the building (`0x408740`; if none is free the spawn is retried every tick and, after 240 ticks, the player is told "No
-//! space for units"). Air-force slots (the air base) add to the player's stock instead of spawning ("<force> ready").
+//! space for units"). Air-force slots (the air base) add to the player's stock instead of spawning ("(force) ready").
 //!
 //! The building record in a level file stores the slots: raw word 2 = number of *active* slots (`[bld+0x144]`, raised
 //! by the tech-level upgrade), words 3-7 = slot kinds, words 8-12 = a per-slot value (`[slot+0x24]`, only read by mission
@@ -14,6 +14,7 @@
 
 use crate::level::Object;
 
+/// Production slots per building.
 pub const SLOTS: usize = 5;
 /// Default slot rate `[slot+0x14]` (set by the slot initialiser for every kind).
 pub const BASE_RATE: u32 = 30;
@@ -59,10 +60,16 @@ pub fn turret_price(tier: u32) -> Option<i32> {
 /// Income per tick of a gold mine (credits) or research lab (research points) with `active` upgrade levels unlocked
 /// (`0x42d6b0` loop: jump tables `0x42e56c` / `0x42e558`): `active + 1`, nothing at 0. Credits cap at 99999, research at 9999.
 pub fn income_per_tick(active: usize) -> i32 {
-    if (1..=5).contains(&active) { active as i32 + 1 } else { 0 }
+    if (1..=5).contains(&active) {
+        active as i32 + 1
+    } else {
+        0
+    }
 }
 
+/// The most credits a side can hold.
 pub const CREDITS_CAP: i32 = 99_999;
+/// The most research points a side can hold.
 pub const RESEARCH_CAP: i32 = 9_999;
 
 /// A factory's two exits as cell offsets from the building's origin cell (constructor `0x40a330`: `[bld+0x124/0x128]`
@@ -75,14 +82,18 @@ pub const RESEARCH_CAP: i32 = 9_999;
 /// continues two cells further out: down from the primary one (`y + 0x50` px), up from the alternative (`y - 0x30` px).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FactoryExit {
+    /// Where the unit appears, inside the footprint.
     pub spawn: (i32, i32),
+    /// The exit cell it walks to first choice (bottom right).
     pub primary: (i32, i32),
+    /// The exit cell used when the primary one is occupied (top left).
     pub alternative: (i32, i32),
 }
 
 /// Ticks a finished unit may wait for a free exit before "No space for units" is said (`0x40e2ee`: counter reaches `0xf0`).
 pub const NO_SPACE_TICKS: u32 = 240;
 
+/// The exits of a factory kind (101, 102, 103, 108); `None` for other buildings.
 pub fn factory_exit(kind: i32) -> Option<FactoryExit> {
     match kind {
         101 => Some(FactoryExit { spawn: (1, 1), primary: (3, 3), alternative: (-1, -1) }),
@@ -101,10 +112,14 @@ pub fn rate_row(tutorial_step: Option<u32>, windtrap_levels: u32) -> u32 {
     }
 }
 
+/// A building's production slots as its level record holds them (object words 2-12).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Slots {
+    /// How many slots are active (object word 2).
     pub active: u32,
+    /// The unit kind each slot produces (object words 3-7), 0 = unused.
     pub kinds: [i32; SLOTS],
+    /// The per-slot value (object words 8-12).
     pub values: [i32; SLOTS],
 }
 

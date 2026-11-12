@@ -10,15 +10,17 @@ use crate::gdi::Gdi;
 use crate::intro::Anim;
 use crate::ui::{self, Image};
 use opensow_formats::config::PassedLevels;
-use opensow_formats::{warmonger, Edition};
 use opensow_formats::font::Font;
-use opensow_formats::lang::{self, LangFile};
+use opensow_formats::lang::LangFile;
 use opensow_formats::sprite::{self, rgb565_to_rgb8, Frame, Kind};
+use opensow_formats::{warmonger, Edition};
 use opensow_viewer::render::pack;
 
 /// The design resolution of the map picture (`Briefing.srf`); it is drawn 1:1 at the centre of the screen.
 pub const W: usize = 640;
+/// Height of the map picture's design space.
 pub const H: usize = 480;
+/// Number of lands (missions) of a campaign.
 pub const LANDS: usize = 22;
 /// The size of the backdrop art `Briefing2.srf` (`0x780` x `0x438` in the exe).
 const ART: (usize, usize) = (1920, 1080);
@@ -38,6 +40,7 @@ const TOGGLE: [&str; 2] = ["STATE OF WAR", "WARMONGER"];
 const TOGGLE_Y: i32 = 30;
 const TOGGLE_H: i32 = 22;
 
+/// What the map asks the game to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
     None,
@@ -60,6 +63,7 @@ enum Stage {
     Missing,
 }
 
+/// The campaign map: the 22 lands, the selected land's texts and movie.
 pub struct Lands {
     stage: Stage,
     /// `Briefing2.srf`, the full-screen art (globe on the left), and `Briefing.srf`, the 640x480 map drawn over it.
@@ -75,6 +79,7 @@ pub struct Lands {
     big: Font,
     small: Font,
     gdi: Option<Gdi>,
+    /// Which lands are passed, available or locked.
     pub progress: PassedLevels,
     /// The campaign shown, and (Warmonger) the land texts of its exe, in the order of [`warmonger::LANDS`].
     edition: Edition,
@@ -105,7 +110,12 @@ pub struct Lands {
 }
 
 fn frames(assets: &Assets, name: &str) -> Vec<Frame> {
-    assets.game.resolve(&format!("Data\\Sprites2\\Menu\\{name}.tsp")).and_then(|p| std::fs::read(p).ok()).and_then(|d| sprite::parse(&d, Kind::Color).ok()).unwrap_or_default()
+    assets
+        .game
+        .resolve(&format!("Data\\Sprites2\\Menu\\{name}.tsp"))
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|d| sprite::parse(&d, Kind::Color).ok())
+        .unwrap_or_default()
 }
 
 /// The aspect-preserving rectangle of a 640x480 video in a `w` x `h` window.
@@ -197,7 +207,12 @@ impl Lands {
     /// `video`: play the `mA` animation first (New game); `mute` opens no audio device.
     pub fn new(assets: &mut Assets, progress: PassedLevels, video: bool, mute: bool) -> Lands {
         let language = assets.game.language();
-        let strings = assets.game.resolve(&format!("Data\\Language\\{}", language.file_name())).and_then(|p| std::fs::read(p).ok()).and_then(|d| LangFile::parse(&d).ok()).map(|f| f.with_supplement(language));
+        let strings = assets
+            .game
+            .resolve(&format!("Data\\Language\\{}", language.file_name()))
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|d| LangFile::parse(&d).ok())
+            .map(|f| f.with_supplement(language));
         let mut font = |n: &str| Font::new(assets.art.load(&format!("extras\\fonts\\{n}.ps6")).map(|f| (*f).clone()).unwrap_or_default());
         let (big, small) = (font("font_briefing_big"), font("font_briefing_small"));
         let stage = match video.then(|| Anim::open(&assets.game, "mA")).and_then(Result::ok) {
@@ -221,8 +236,8 @@ impl Lands {
             wm_known: assets.game.warmonger.is_some(),
             mouse: (-1, -1),
             stage,
-            art: load_backdrop(&assets.game, "Briefing2"),
-            bg: load_backdrop(&assets.game, "Briefing"),
+            art: load_backdrop(&assets.game, "Briefing2").map(|i| campaign_tint(i, edition)),
+            bg: load_backdrop(&assets.game, "Briefing").map(|i| campaign_tint(i, edition)),
             blue: frames(assets, "lands_blue"),
             red: frames(assets, "lands_red"),
             points: frames(assets, "lands_points"),
@@ -248,10 +263,12 @@ impl Lands {
         }
     }
 
+    /// Whether a land's briefing movie is playing.
     pub fn playing_video(&self) -> bool {
         matches!(self.stage, Stage::Video(_))
     }
 
+    #[cfg(test)]
     pub fn selected(&self) -> Option<usize> {
         match self.stage {
             Stage::Selected { land, .. } => Some(land),
@@ -259,6 +276,7 @@ impl Lands {
         }
     }
 
+    #[cfg(test)]
     pub fn hovered(&self) -> Option<usize> {
         self.hover
     }
@@ -269,16 +287,19 @@ impl Lands {
         self.once = [false; 4];
     }
 
+    /// Sets the land under the pointer.
     pub fn set_hover(&mut self, land: Option<usize>) {
         self.hover = land;
     }
 
+    /// Stops the briefing movie that is playing.
     pub fn skip_video(&mut self) {
         if self.playing_video() {
             self.stage = Stage::Map;
         }
     }
 
+    /// Advances the map's animations and movie by `dt` seconds.
     pub fn update(&mut self, dt: f64) {
         self.clock += dt;
         if let Some(g) = self.globe.as_mut() {
@@ -316,7 +337,7 @@ impl Lands {
                 if let Some(land) = self.hover {
                     let (a, b) = self.headings(land);
                     let c = self.hover_ticks as i64;
-                    let (_, _, typing_a) = type_lines(&[a.clone()], c);
+                    let (_, _, typing_a) = type_lines(std::slice::from_ref(&a), c);
                     let used = type_lines(&[a], c).1;
                     let (_, _, typing_b) = type_lines(&[b], used);
                     typing = typing_a || typing_b; // briefing-type02 under the headings
@@ -375,6 +396,7 @@ impl Lands {
         (s, (w as f32 / s).ceil() as usize, (h as f32 / s).ceil() as usize)
     }
 
+    /// Updates the land under the pointer for a window position.
     pub fn mouse_moved(&mut self, x: i32, y: i32, w: usize, h: usize) {
         let (s, vw, vh) = Self::natural(w, h);
         let (x, y) = ((x as f32 / s) as i32, (y as f32 / s) as i32);
@@ -618,6 +640,14 @@ impl Lands {
         if let Some(g) = &self.globe {
             if !self.scaled && (w < ART.0 || h < ART.1) {
                 g.draw(buf, w, h, (GLOBE.0 as usize, GLOBE.1 as usize, g.width, g.height));
+                if self.edition == Edition::Warmonger {
+                    // the movie's globe is green like the art: swap red and green over its rectangle too
+                    for y in (GLOBE.1 as usize..GLOBE.1 as usize + g.height).take_while(|&y| y < h) {
+                        for p in buf[y * w..y * w + w].iter_mut().skip(GLOBE.0 as usize).take(g.width) {
+                            *p = (*p & 0xff00_00ff) | ((*p >> 8) & 0xff00) | ((*p & 0xff00) << 8);
+                        }
+                    }
+                }
             }
         }
         match self.stage {
@@ -736,11 +766,12 @@ impl Lands {
                     }
                 }
             } else {
-                // a green bar under the shown campaign
+                // a bar under the shown campaign, in the campaign's colour (green, Warmonger red)
+                let bar = if self.edition == Edition::Warmonger { pack(0xc3, 0x46, 0x46) } else { pack(0x46, 0xc3, 0x46) };
                 for x in r.0.max(0)..(r.0 + r.2).min(w as i32) {
                     for y in (r.1 + r.3 + 3)..(r.1 + r.3 + 5) {
                         if y >= 0 && (y as usize) < h {
-                            buf[y as usize * w + x as usize] = pack(0x46, 0xc3, 0x46);
+                            buf[y as usize * w + x as usize] = bar;
                         }
                     }
                 }
@@ -768,6 +799,7 @@ impl Lands {
         self.stage = Stage::Missing;
     }
 
+    #[cfg(test)]
     pub fn missing(&self) -> bool {
         matches!(self.stage, Stage::Missing)
     }
@@ -842,7 +874,7 @@ impl Lands {
 /// field of `0x03e0` = 31 of 63) on the line and its two neighbours.
 fn glow_line(buf: &mut [u32], w: usize, h: usize, vertical: bool, at: i32, [outer, centre]: [u32; 2]) {
     for (d, v) in [(-1, outer), (0, centre), (1, outer)] {
-        let g = (((v >> 5) & 63) * 255 / 63) as u32;
+        let g = ((v >> 5) & 63) * 255 / 63;
         let (lo, hi) = (0, if vertical { h } else { w } as i32);
         let line = at + d;
         if line < 0 || line >= if vertical { w } else { h } as i32 {
@@ -876,6 +908,17 @@ fn wrap(font: &Font, text: &str, width: i32) -> Vec<String> {
 }
 
 /// A colour-font string with its top edge at `y` (the colour fonts keep their own pixels).
+/// Warmonger's map wears red instead of the base game's green so the two campaigns are told apart at a glance (not in the
+/// original, which has one look). The red and green channels swap: green art turns red, gray/white/blue parts stay as they are.
+fn campaign_tint(mut img: Image, edition: Edition) -> Image {
+    if edition == Edition::Warmonger {
+        for px in img.rgb.chunks_exact_mut(3) {
+            px.swap(0, 1);
+        }
+    }
+    img
+}
+
 fn draw_text(canvas: &mut [u32], w: usize, h: usize, font: &Font, text: &str, x: i32, y: i32) {
     let placed = font.layout(text, 1);
     let top = placed.iter().map(|p| p.y).min().unwrap_or(0);
@@ -987,9 +1030,7 @@ mod tests {
     fn clicking_an_open_land_selects_it_and_accept_starts_the_mission() {
         let Some((_, mut l)) = lands(false) else { return };
         // find a pixel of land 1 and of the locked land 3 in design space and click the window 1:1
-        let hit = |l: &Lands, land: usize| {
-            (0..H as i32).flat_map(|y| (0..W as i32).map(move |x| (x, y))).find(|&p| l.land_at(p) == Some(land))
-        };
+        let hit = |l: &Lands, land: usize| (0..H as i32).flat_map(|y| (0..W as i32).map(move |x| (x, y))).find(|&p| l.land_at(p) == Some(land));
         let locked = hit(&l, 3).expect("land 3 has pixels");
         assert_eq!(l.click(locked.0, locked.1, W, H), Event::None);
         assert_eq!(l.selected(), None, "locked lands cannot be selected");

@@ -15,10 +15,15 @@ use std::sync::OnceLock;
 /// One decoded picture, planar 4:2:0, planes padded to whole macroblocks.
 #[derive(Debug, Clone, Default)]
 pub struct Frame {
+    /// Picture width in pixels.
     pub width: usize,
+    /// Picture height in pixels.
     pub height: usize,
+    /// The luma plane.
     pub y: Vec<u8>,
+    /// The Cb chroma plane (half size in both directions).
     pub cb: Vec<u8>,
+    /// The Cr chroma plane (half size in both directions).
     pub cr: Vec<u8>,
 }
 
@@ -76,15 +81,13 @@ impl Frame {
 }
 
 const ZIGZAG: [u8; 64] = [
-    0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28,
-    35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47,
-    55, 62, 63,
+    0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29,
+    22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
 ];
 
 const DEFAULT_INTRA: [u8; 64] = [
-    8, 16, 19, 22, 26, 27, 29, 34, 16, 16, 22, 24, 27, 29, 34, 37, 19, 22, 26, 27, 29, 34, 34, 38, 22, 22, 26, 27, 29, 34,
-    37, 40, 22, 26, 27, 29, 32, 35, 40, 48, 26, 27, 29, 32, 35, 40, 48, 58, 26, 27, 29, 34, 38, 46, 56, 69, 27, 29, 35, 38,
-    46, 56, 69, 83,
+    8, 16, 19, 22, 26, 27, 29, 34, 16, 16, 22, 24, 27, 29, 34, 37, 19, 22, 26, 27, 29, 34, 34, 38, 22, 22, 26, 27, 29, 34, 37, 40, 22, 26, 27, 29, 32, 35, 40,
+    48, 26, 27, 29, 32, 35, 40, 48, 58, 26, 27, 29, 34, 38, 46, 56, 69, 27, 29, 35, 38, 46, 56, 69, 83,
 ];
 
 // (length, code, run, level), table B.14 of the standard
@@ -269,7 +272,6 @@ const CBP: [(u8, u16, u8); 63] = [
     (9, 0b000000111, 31),
 ];
 
-
 /// (length, code, increment) of table B.1; escape adds 33, stuffing is skipped.
 const MB_ADDRESS: [(u8, u16, u8); 33] = [
     (1, 0b1, 1),
@@ -361,28 +363,10 @@ const MOTION: [(u8, u16, u8); 17] = [
     (10, 0b0000001100, 16),
 ];
 
-const DC_LUMA: [(u8, u16, u8); 9] = [
-    (3, 0b100, 0),
-    (2, 0b00, 1),
-    (2, 0b01, 2),
-    (3, 0b101, 3),
-    (3, 0b110, 4),
-    (4, 0b1110, 5),
-    (5, 0b11110, 6),
-    (6, 0b111110, 7),
-    (7, 0b1111110, 8),
-];
-const DC_CHROMA: [(u8, u16, u8); 9] = [
-    (2, 0b00, 0),
-    (2, 0b01, 1),
-    (2, 0b10, 2),
-    (3, 0b110, 3),
-    (4, 0b1110, 4),
-    (5, 0b11110, 5),
-    (6, 0b111110, 6),
-    (7, 0b1111110, 7),
-    (8, 0b11111110, 8),
-];
+const DC_LUMA: [(u8, u16, u8); 9] =
+    [(3, 0b100, 0), (2, 0b00, 1), (2, 0b01, 2), (3, 0b101, 3), (3, 0b110, 4), (4, 0b1110, 5), (5, 0b11110, 6), (6, 0b111110, 7), (7, 0b1111110, 8)];
+const DC_CHROMA: [(u8, u16, u8); 9] =
+    [(2, 0b00, 0), (2, 0b01, 1), (2, 0b10, 2), (3, 0b110, 3), (4, 0b1110, 4), (5, 0b11110, 5), (6, 0b111110, 6), (7, 0b1111110, 7), (8, 0b11111110, 8)];
 
 /// Prefix-code lookup table indexed by the next `bits` bits.
 struct Vlc {
@@ -435,12 +419,7 @@ struct Tables {
 fn tables() -> &'static Tables {
     static T: OnceLock<Tables> = OnceLock::new();
     T.get_or_init(|| Tables {
-        coeff: Vlc::new(
-            COEFF
-                .iter()
-                .map(|&(l, c, run, level)| (l, c, (run as u16) << 8 | level as u16))
-                .chain([(2, 0b10, EOB), (6, 0b000001, ESCAPE)]),
-        ),
+        coeff: Vlc::new(COEFF.iter().map(|&(l, c, run, level)| (l, c, (run as u16) << 8 | level as u16)).chain([(2, 0b10, EOB), (6, 0b000001, ESCAPE)])),
         cbp: Vlc::new(CBP.iter().map(|&(l, c, v)| (l, c, v as u16))),
         address: Vlc::new(MB_ADDRESS.iter().chain([&MB_ESCAPE, &MB_STUFFING]).map(|&(l, c, v)| (l, c, v as u16))),
         mb_type: [Vlc::small(&MB_TYPE_I), Vlc::small(&MB_TYPE_P), Vlc::small(&MB_TYPE_B)],
@@ -550,6 +529,7 @@ pub struct Stream<'a> {
 }
 
 impl<'a> Stream<'a> {
+    /// A decoder over an MPEG-1 video elementary stream.
     pub fn new(es: &'a [u8]) -> Stream<'a> {
         Stream::from_cow(Cow::Borrowed(es))
     }
@@ -933,7 +913,6 @@ impl Decoder {
     }
 
     /// Write the motion-compensated prediction of one macroblock.
-    #[allow(clippy::too_many_arguments)]
     fn predict_mb(&self, cur: &mut Frame, mx: usize, my: usize, dirs: u8, mv: [[i32; 2]; 2], fwd: Option<&Frame>, bwd: Option<&Frame>) {
         let s = cur.stride();
         let refs = [(dirs & FWD != 0, fwd, mv[0]), (dirs & BWD != 0, bwd, mv[1])];
@@ -980,7 +959,6 @@ fn oddify(v: i32) -> i32 {
 }
 
 /// Half-pel block fetch with the standard's rounding, clamped to the plane.
-#[allow(clippy::too_many_arguments)]
 fn fetch(plane: &[u8], stride: usize, rows: usize, x: usize, y: usize, mvx: i32, mvy: i32, n: usize, out: &mut [u8]) {
     let (ix, fx) = (x as i32 + (mvx >> 1), mvx & 1);
     let (iy, fy) = (y as i32 + (mvy >> 1), mvy & 1);
@@ -1080,7 +1058,7 @@ mod tests {
             self.0.extend(s.bytes().map(|c| c == b'1'));
         }
         fn bytes(mut self) -> Vec<u8> {
-            while self.0.len() % 8 != 0 {
+            while !self.0.len().is_multiple_of(8) {
                 self.0.push(false);
             }
             self.0.chunks(8).map(|c| c.iter().fold(0, |a, &b| a << 1 | b as u8)).collect()
@@ -1106,7 +1084,7 @@ mod tests {
         w.bits(0, 1);
         let mut w = W({
             let mut v = w.0;
-            while v.len() % 8 != 0 {
+            while !v.len().is_multiple_of(8) {
                 v.push(false);
             }
             v

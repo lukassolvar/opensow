@@ -1,6 +1,8 @@
 # Ambient clouds (`CCloud`)
 
-Pure decoration, switched by Options CLOUDS (`State of War_1.cfg` detail, docs/options.md). **Off by default** (first-run detail 0), so a fresh install shows none until CLOUDS is turned on. Port: `formats::clouds` (`Cloud`, `Sky`), exe-verified by `scripts/verify_clouds.py` (constructor, scatter and move run in an emulator, 0 mismatches); `play.rs` draws them, `--clouds D` shows them headless.
+Pure decoration, switched by Options CLOUDS (`State of War_1.cfg` detail, docs/options.md). **Off by default** (first-run detail 0), so a fresh install shows none until CLOUDS is turned on. Port: `formats::clouds` (`Cloud`, `Sky`), exe-verified by `scripts/verify_clouds.py` (constructor, scatter and move run in an emulator, 0 mismatches); `play.rs` draws them, `--clouds D` shows them headless. OpenSOW: same counts, moves and draws (`World::sky_step` once per tick, shadow before the shots in `Play::draw_shots`, clouds after the aircraft); off by default like the exe.
+
+**Differs from the exe:** the visual generator `0x437cd0` is an xorshift in OpenSOW (`World::sky_step`), so the clouds' positions, speeds and pictures have the exe's ranges but not its sequence; a loaded savegame's clouds get picture 0 (`sim/savestate.rs`) instead of a re-rolled one.
 
 ## Object (20 bytes, vtable `0x4878e4`, list `[0x49a3fc]` / count `[0x49a400]`)
 `+4` x, `+8` y (map pixels), `+0xc` speed class 10..=39, `+0x10` picture 0..=4 (frame of `extras\bigexplo\clouds`, array `0x5e95b0`). The save record (`0x414820`) stores x, y, speed only; the picture is re-rolled by the constructor on load.

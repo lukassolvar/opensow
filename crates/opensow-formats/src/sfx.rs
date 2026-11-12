@@ -5,6 +5,7 @@
 //! Known uses: 53 `tt-capture`, 57 `tt-repair`, 58 `tt-Upgrade` (the Advancer's beam sounds, `0x4111b0`), 55 `tt-dest` (order
 //! acknowledged, `0x46e5c0`), 61 `unit-dest` (ground go-to order, `0x41849b`), 68 `airforce-dest` (air strike launched, `0x417221`), 54 `tt-click` (Advancer selected, `0x43ae51`), 72 `turret-place` (turret built), 4-6 `canon` shots, 1-3 `artilery`, 0 `antiair`, 23-28 `explodes\*`.
 
+/// `(effect id, wav path)` of every sound effect the game plays.
 pub const SFX: [(u8, &str); 72] = [
     (0, "sfx/groundunits/antiair/01.wav"),
     (1, "sfx/groundunits/artilery/01.wav"),
@@ -80,6 +81,7 @@ pub const SFX: [(u8, &str); 72] = [
     (72, "sfx/turets/turret-place.wav"),
 ];
 
+/// The wav path of a sound effect id.
 pub fn path(id: u8) -> Option<&'static str> {
     SFX.iter().find(|s| s.0 == id).map(|s| s.1)
 }

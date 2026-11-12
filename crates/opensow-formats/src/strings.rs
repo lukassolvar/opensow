@@ -12,30 +12,41 @@ pub const MAIN_MENU: RangeInclusive<usize> = 0..=5;
 /// Options screen (`0x44b320`): title, then GFX / ACCESSORY / SFX / Radar / Quake / Clouds / HWMOUSE / VBLANK / FX / MUSIC / VOICE /
 /// RESOLUTION / Keys scroll / Mouse scroll.
 pub const OPTIONS_TITLE: usize = 4;
+/// The fourteen option labels listed above, GFX to Mouse scroll.
 pub const OPTIONS_LABELS: RangeInclusive<usize> = 6..=19;
 /// "Language" and the eight language names ENGLISH..CHINESSE_T: no code path of the exe asks for them.
 pub const LANGUAGE_LABEL: usize = 20;
+/// The eight language names.
 pub const LANGUAGE_NAMES: RangeInclusive<usize> = 23..=30;
+/// The OK button.
 pub const OK: usize = 21;
+/// The CANCEL button.
 pub const CANCEL: usize = 22;
+/// "On", the value of a switch.
 pub const ON: usize = 267;
+/// "Off", the value of a switch.
 pub const OFF: usize = 268;
 /// Campaign map (`0x43f8b0`), land `1..=22`: heading, place, briefing, objectives; a locked land shows [`NO_DATA`].
 pub const NO_DATA: usize = 53;
+/// String index of land `land`'s (1..=22) heading.
 pub fn land_heading(land: usize) -> usize {
     30 + land
 }
+/// String index of land `land`'s place name.
 pub fn land_place(land: usize) -> usize {
     53 + land
 }
+/// String index of land `land`'s briefing text.
 pub fn land_briefing(land: usize) -> usize {
     75 + land
 }
+/// String index of land `land`'s objectives.
 pub fn land_objectives(land: usize) -> usize {
     97 + land
 }
 /// Speech / message events 1..=24 (`0x402ec0`, see [`crate::messages`]) use 120..=143; 144 is the game-speed readout label "speed".
 pub const MESSAGES: RangeInclusive<usize> = 120..=143;
+/// The game-speed readout label "speed".
 pub const SPEED: usize = 144;
 /// Building hover line "SATELLITE PROTECTION" (`0x409400`).
 pub const SATELLITE_PROTECTION: usize = 145;
@@ -46,16 +57,23 @@ pub const OBJECT_NAMES: RangeInclusive<usize> = 172..=227;
 /// Weapon names (`0x4321c0`), picked by [`weapon_name`]: 228..=259; 260 = "n/a" (no weapon), 261 = "increase tech-level for 500"
 /// (the object name of kinds >= 1000).
 pub const WEAPON_NAMES: RangeInclusive<usize> = 228..=259;
+/// "n/a": the object has no weapon.
 pub const NO_WEAPON: usize = 260;
+/// "increase tech-level for 500" (the object name of kinds >= 1000).
 pub const TECH_LEVEL_HINT: usize = 261;
 /// Multiplayer level picker (`0x447100`): "Selected level:", then BLUE SIDE, GREEN SIDE, CREDITS, RESEARCH (273..=276); ACCEPT/BACK 352/353.
 pub const SELECTED_LEVEL: usize = 262;
+/// BLUE SIDE, GREEN SIDE, CREDITS, RESEARCH of the level picker.
 pub const SIDE_AND_START: RangeInclusive<usize> = 273..=276;
+/// The ACCEPT button of the level picker.
 pub const ACCEPT: usize = 352;
+/// The BACK button of the level picker.
 pub const BACK: usize = 353;
 /// Multiplayer lobby (`0x446ca0`, `0x4485e0`, `0x434e80`): CREATE SESSION, SHOW ALL SESSIONS, join/leave and lost-session lines.
 pub const SESSION_BUTTONS: RangeInclusive<usize> = 263..=264;
+/// The two lines shown when a player joins or leaves.
 pub const PLAYER_JOINED_LEFT: RangeInclusive<usize> = 265..=266;
+/// The lines shown when the session is lost.
 pub const SESSION_LOST: RangeInclusive<usize> = 277..=279;
 /// Save slots (`0x443ca0`): Empty Savegame..., No Time, No Date, savegame is damaged!!!
 pub const SLOT_TEXTS: RangeInclusive<usize> = 269..=272;
@@ -65,15 +83,19 @@ pub const HINTS: RangeInclusive<usize> = 280..=281;
 pub const INFOBOX_LINES: RangeInclusive<usize> = 282..=301;
 /// Info box description pages, one per object (`0x43c410`): 302..=350.
 pub const DESCRIPTIONS: RangeInclusive<usize> = 302..=350;
+/// The quick-save message.
 pub const QUICK_SAVE: usize = 351;
 /// Statistics screen (`0x44d500`): CAPTURED, LOST, PRODUCED, BUILT, SENT.
 pub const STATISTICS: RangeInclusive<usize> = 354..=358;
 /// Load / save screen (`0x443ad0`): LOAD, SAVE, and the title "Save Game" (363).
 pub const LOAD: usize = 359;
+/// The SAVE label of the load / save screen.
 pub const SAVE: usize = 360;
+/// The save screen's title "Save Game".
 pub const SAVE_TITLE: usize = 363;
 /// Pause banner "P A U S E" (`0x435330`) and the mission clock label "Remaining Time" (`0x430d50`).
 pub const PAUSE: usize = 361;
+/// The mission clock label "Remaining Time".
 pub const REMAINING_TIME: usize = 362;
 
 /// (object kind, string): the exe's switch `0x431ad0` (byte table `0x43214c`, jump table `0x432064`). Kinds 1-15 ground chassis
@@ -81,21 +103,98 @@ pub const REMAINING_TIME: usize = 362;
 /// 30-34 air forces (30 bomber, 31 carryall, 32 fighter, 33 tripler, 34 meteors), 40 Advancer, 41-45 walkers, 46 Rogon bomb, 100-108
 /// buildings, 109-113 top sentries, 115 radar. Any other kind < 1000 has no name.
 pub const OBJECT_KIND_NAMES: [(u16, u16); 56] = [
-    (1, 173), (2, 174), (3, 175), (4, 176), (5, 177), (6, 178), (7, 179), (8, 180),
-    (9, 181), (10, 182), (11, 183), (12, 184), (13, 185), (14, 186), (15, 187), (16, 219),
-    (17, 220), (18, 221), (19, 225), (20, 226), (21, 227), (22, 222), (23, 223), (24, 224),
-    (25, 195), (26, 196), (27, 197), (28, 198), (29, 199), (30, 200), (31, 202), (32, 204),
-    (33, 203), (34, 201), (40, 193), (41, 188), (42, 189), (43, 190), (44, 191), (45, 192),
-    (46, 194), (100, 205), (101, 206), (102, 207), (103, 208), (104, 210), (105, 211), (106, 212),
-    (107, 213), (108, 209), (109, 214), (110, 215), (111, 216), (112, 217), (113, 218), (115, 172),
+    (1, 173),
+    (2, 174),
+    (3, 175),
+    (4, 176),
+    (5, 177),
+    (6, 178),
+    (7, 179),
+    (8, 180),
+    (9, 181),
+    (10, 182),
+    (11, 183),
+    (12, 184),
+    (13, 185),
+    (14, 186),
+    (15, 187),
+    (16, 219),
+    (17, 220),
+    (18, 221),
+    (19, 225),
+    (20, 226),
+    (21, 227),
+    (22, 222),
+    (23, 223),
+    (24, 224),
+    (25, 195),
+    (26, 196),
+    (27, 197),
+    (28, 198),
+    (29, 199),
+    (30, 200),
+    (31, 202),
+    (32, 204),
+    (33, 203),
+    (34, 201),
+    (40, 193),
+    (41, 188),
+    (42, 189),
+    (43, 190),
+    (44, 191),
+    (45, 192),
+    (46, 194),
+    (100, 205),
+    (101, 206),
+    (102, 207),
+    (103, 208),
+    (104, 210),
+    (105, 211),
+    (106, 212),
+    (107, 213),
+    (108, 209),
+    (109, 214),
+    (110, 215),
+    (111, 216),
+    (112, 217),
+    (113, 218),
+    (115, 172),
 ];
 
 /// (object kind, string): the exe's switch `0x4321c0` (byte table `0x4323d0`, jump table `0x432348`); the other kinds say "n/a".
 pub const WEAPON_KIND_NAMES: [(u16, u16); 32] = [
-    (1, 228), (2, 229), (3, 230), (4, 231), (5, 232), (6, 233), (7, 234), (8, 235),
-    (9, 236), (10, 237), (11, 238), (12, 239), (13, 240), (14, 241), (15, 242), (25, 250),
-    (26, 251), (27, 252), (28, 253), (29, 254), (30, 255), (31, 257), (32, 259), (33, 258),
-    (34, 256), (40, 248), (41, 243), (42, 244), (43, 245), (44, 246), (45, 247), (46, 249),
+    (1, 228),
+    (2, 229),
+    (3, 230),
+    (4, 231),
+    (5, 232),
+    (6, 233),
+    (7, 234),
+    (8, 235),
+    (9, 236),
+    (10, 237),
+    (11, 238),
+    (12, 239),
+    (13, 240),
+    (14, 241),
+    (15, 242),
+    (25, 250),
+    (26, 251),
+    (27, 252),
+    (28, 253),
+    (29, 254),
+    (30, 255),
+    (31, 257),
+    (32, 259),
+    (33, 258),
+    (34, 256),
+    (40, 248),
+    (41, 243),
+    (42, 244),
+    (43, 245),
+    (44, 246),
+    (45, 247),
+    (46, 249),
 ];
 
 fn find(table: &[(u16, u16)], kind: u32) -> Option<usize> {

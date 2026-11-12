@@ -13,8 +13,8 @@
 //! A primitive that cannot be recorded (a full-screen backdrop, a direct pixel loop) calls [`taint`]: the frame is then drawn
 //! on the CPU instead.
 
-use crate::scene::GroundRef;
 use crate::render::View;
+use crate::scene::GroundRef;
 use opensow_formats::effects::Blit;
 use opensow_formats::sprite::{rgb565_to_rgb8, Frame};
 use std::cell::{Cell, RefCell};
@@ -40,7 +40,7 @@ pub mod op {
     pub const PLAIN: u32 = 4;
     /// `blend(dst, black, p0)`; `p1 = 1`: not on masked pixels.
     pub const SHADOW: u32 = 5;
-    /// An exe blend (`p0` = [`blit_code`]); `p1 = 1`: not on masked pixels.
+    /// An exe blend (`p0` = [`super::blit_code`]); `p1 = 1`: not on masked pixels.
     pub const BLEND: u32 = 6;
     /// The lens: brightens the picture pixel `2 * p0` right and `3 * p0` down (as it was before this command); `p1` as above.
     pub const LENS: u32 = 7;
@@ -98,21 +98,32 @@ fn blit_of(code: u32) -> Blit {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct Cmd {
+    /// The operation, one of the `op` constants.
     pub op: u32,
+    /// Left edge of the rectangle (screen x).
     pub xs: i32,
+    /// Top edge of the rectangle (screen y).
     pub ys: i32,
+    /// Right edge of the rectangle (exclusive).
     pub xe: i32,
+    /// Bottom edge of the rectangle (exclusive).
     pub ye: i32,
+    /// Start of the command's column map in `maps`.
     pub cols: u32,
+    /// Start of the command's row map in `maps`.
     pub rows: u32,
+    /// First source word.
     pub base: u32,
+    /// Source words per source row.
     pub stride: u32,
+    /// Seven parameter words whose meaning depends on the operation.
     pub p: [u32; 7],
 }
 
 /// Every sprite frame drawn so far, as words `rgb565 | mask << 16`.
 #[derive(Default)]
 pub struct Atlas {
+    /// The frames' words, one frame after the other.
     pub data: Vec<u32>,
     index: HashMap<FrameKey, u32>,
     /// Pictures (`0xRRGGBB` words) by their RGB8 source.
@@ -188,7 +199,9 @@ impl Atlas {
 /// The map picture as words `0xRRGGBB | foreground << 24` (`bg_w` per row).
 #[derive(Default)]
 pub struct Ground {
+    /// The picture's words, row by row.
     pub data: Vec<u32>,
+    /// Words per row.
     pub w: usize,
     key: (usize, usize, usize),
     /// Changes with the map.
@@ -214,8 +227,11 @@ impl Ground {
 /// One recorded frame.
 #[derive(Default)]
 pub struct Recording {
+    /// Frame width in pixels.
     pub w: usize,
+    /// Frame height in pixels.
     pub h: usize,
+    /// The commands, in drawing order.
     pub cmds: Vec<Cmd>,
     /// The sample maps of every command (source column / row per screen column / row, -1 = nothing).
     pub maps: Vec<i32>,
@@ -330,8 +346,18 @@ pub fn stripes(x0: i32, y0: i32, x1: i32, y1: i32) {
 
 /// A sprite command: screen rectangle `x0..x1` x `y0..y1` (unclipped), `col(dx)` / `row(dy)` the frame column / row a screen
 /// column / row shows (called only inside the clipped rectangle).
-#[allow(clippy::too_many_arguments)]
-pub fn sprite(op: u32, f: &Frame, x0: i32, y0: i32, x1: i32, y1: i32, col: impl Fn(i32) -> usize, row: impl Fn(i32) -> usize, p: [u32; 7], mask: Option<usize>) {
+pub fn sprite(
+    op: u32,
+    f: &Frame,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    col: impl Fn(i32) -> usize,
+    row: impl Fn(i32) -> usize,
+    p: [u32; 7],
+    mask: Option<usize>,
+) {
     with_rec(|r, atlas, _| {
         let Some((xs, ys, xe, ye)) = clip(r, x0, y0, x1, y1) else { return };
         if let Some(m) = mask {
@@ -347,7 +373,6 @@ pub fn sprite(op: u32, f: &Frame, x0: i32, y0: i32, x1: i32, y1: i32, col: impl 
 }
 
 /// [`op::MASKED`]: `f` drawn where the mask frame `m` is set (at the same map pixel).
-#[allow(clippy::too_many_arguments)]
 pub fn sprite_masked(f: &Frame, m: &Frame, x0: i32, y0: i32, x1: i32, y1: i32, col: impl Fn(i32) -> usize, row: impl Fn(i32) -> usize) {
     let mb = STATE.with_borrow_mut(|s| s.atlas.add(m));
     let Some(mb) = mb else {
@@ -360,7 +385,6 @@ pub fn sprite_masked(f: &Frame, m: &Frame, x0: i32, y0: i32, x1: i32, y1: i32, c
 
 /// [`op::PICTURE`] from a static RGB8 picture `src_w` wide (kept in the atlas): screen rectangle `x0..x1` x `y0..y1`,
 /// `col(x)` / `row(y)` the picture column / row (-1 = nothing there).
-#[allow(clippy::too_many_arguments)]
 pub fn picture_rgb8(rgb: &[u8], src_w: usize, x0: i32, y0: i32, x1: i32, y1: i32, col: impl Fn(i32) -> i32, row: impl Fn(i32) -> i32, halve: bool) {
     with_rec(|r, atlas, _| {
         let Some((xs, ys, xe, ye)) = clip(r, x0, y0, x1, y1) else { return };
@@ -474,15 +498,20 @@ pub fn cover(bx: i32, by: i32, bw: usize, grid: &[u32], rgb: u32) {
 /// The per-tile command lists of a recording, in segments: a new segment starts at every [`op::LENS`] (which reads the picture
 /// as it was before it). Tile `t` of segment `s` has the command indices `indices[offsets[s * tiles + t] .. offsets[s * tiles + t + 1]]`, ascending.
 pub struct Bins {
+    /// Tiles per row.
     pub tiles_x: usize,
+    /// Tile rows.
     pub tiles_y: usize,
     /// First command of every segment.
     pub segments: Vec<usize>,
+    /// Where each tile's command list starts in `indices` (see the struct docs).
     pub offsets: Vec<u32>,
+    /// The command indices of all tiles, one list after the other.
     pub indices: Vec<u32>,
 }
 
 impl Recording {
+    /// Sorts the frame's commands into screen tiles, so a pixel only looks at the commands that can touch it.
     pub fn bins(&self) -> Bins {
         let (tiles_x, tiles_y) = (self.w.div_ceil(TILE), self.h.div_ceil(TILE));
         let tiles = tiles_x * tiles_y;
@@ -693,7 +722,7 @@ mod tests {
             hot_y: (h / 2) as i16,
             extra: [0; 4],
             pixels: (0..n).map(|i| (i as u16).wrapping_mul(2654).wrapping_add(seed.wrapping_mul(40503))).collect(),
-            mask: (0..n).map(|i| (i * 7 + seed as usize) % 5 != 0).collect(),
+            mask: (0..n).map(|i| !(i * 7 + seed as usize).is_multiple_of(5)).collect(),
             enhanced: Default::default(),
         }
     }
@@ -728,7 +757,9 @@ mod tests {
                 render::blit(buf, w, h, &view, &b, 30, 20, true);
                 render::stamp_frame(&mut mask, w, h, &view, &m, 25, 25);
                 render::blit_shadow_masked(buf, w, h, &view, &a, 28, 26, &mask);
-                for (k, mode) in [Blit::Plain, Blit::Additive, Blit::AddHalf, Blit::Average, Blit::Smoke, Blit::Darken, Blit::Shade, Blit::Lens].into_iter().enumerate() {
+                for (k, mode) in
+                    [Blit::Plain, Blit::Additive, Blit::AddHalf, Blit::Average, Blit::Smoke, Blit::Darken, Blit::Shade, Blit::Lens].into_iter().enumerate()
+                {
                     let masked = (k % 2 == 1).then_some(&mask[..]);
                     render::blit_blend_masked(buf, w, h, &view, &b, 5 + 6 * k as i32, 8 + 4 * k as i32, mode, masked);
                 }

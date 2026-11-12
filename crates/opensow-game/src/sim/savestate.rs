@@ -6,11 +6,13 @@
 
 use super::*;
 use opensow_formats::config::PassedLevels;
+use opensow_formats::kinds;
 use opensow_formats::save::{CameraState, MapCell, MapState, State, StateHead, SLOTS};
 use opensow_formats::saveobj::{Class, Object};
 
 /// A handle as the exe's allocator `0x43a9b0` builds it: `slot | generation << 10 | player << 16 | type << 19 | class << 22`
-/// (class 1 unit, 2 building, 3 bullet, 4 aircraft squad; `type` is 0 for all but units).
+/// (class 1 unit, 2 building, 4 aircraft squad, 5 bullet (built inline at `0x43a194`, the bridge leaves it 0); `type` is 0 for all
+/// but units here, see docs/savegame.md Handles for the exe's building types).
 pub fn handle(class: u32, kind: u32, player: u32, generation: u32, slot: u32) -> u32 {
     slot | generation << 10 | player << 16 | kind << 19 | class << 22
 }
@@ -33,7 +35,7 @@ pub fn unit_handle_type(kind: i32) -> u32 {
 }
 
 fn is_anti_air(kind: i32) -> bool {
-    matches!(kind, 1 | 2 | 3 | 42 | 110)
+    kinds::ANTI_AIR_UNITS.contains(&kind) || kind == kinds::ANTI_AIR_TURRET_TOP
 }
 
 fn player_slot(p: i32) -> usize {
@@ -136,12 +138,33 @@ impl World {
                 quake_y: if k == 0 { self.quake.at.1 as u32 } else { 0 },
             })
             .collect();
-        let map = MapState { version: "VER7".into(), scroll_x: scroll.0 as u32, scroll_y: scroll.1 as u32, width: w as u32, height: h as u32, cells, cameras, items: Vec::new() };
+        let map = MapState {
+            version: "VER7".into(),
+            scroll_x: scroll.0 as u32,
+            scroll_y: scroll.1 as u32,
+            width: w as u32,
+            height: h as u32,
+            cells,
+            cameras,
+            items: Vec::new(),
+        };
 
         // ---- head, players, input, params ----------------------------------------------------------------------------------
         let rng_index = self.game_rng.as_ref().map_or(self.rng_index, |r| r.index()) as u32;
         let (minutes, seconds) = self.timer.map_or((0, 0), |t| (t.0.max(0) as u32, t.1.max(0) as u32));
-        let head = StateHead { level, rng_index, v_5baafc: 1, flag_49a339: false, v_5baad8: 0, v_5baadc: 0, v_5baac4: minutes, v_5baac8: seconds, flag_5baa99: false, v_89cf50: self.carry_counter as u32, len: 0 };
+        let head = StateHead {
+            level,
+            rng_index,
+            v_5baafc: 1,
+            flag_49a339: false,
+            v_5baad8: 0,
+            v_5baadc: 0,
+            v_5baac4: minutes,
+            v_5baac8: seconds,
+            flag_5baa99: false,
+            v_89cf50: self.carry_counter as u32,
+            len: 0,
+        };
         let mut player_words = Vec::new();
         for p in 0..3 {
             let (credits, research) = if p < 2 { (self.credits[p].max(0) as u32, self.research[p].max(0) as u32) } else { (0, 0) };
@@ -216,7 +239,15 @@ impl World {
             b.set(0x69, (s.hp <= 0) as u32);
             b.set(0x120, (s.cell.1 * CELL) as u32);
             // animation state (docs/art.md): 3 working loop, 4 damaged (hp <= max / 2), 5 destroyed, 6 neutral
-            let state = if s.hp <= 0 { 5 } else if s.owner == Owner::Neutral && opensow_formats::buildings::anim(s.kind_id).is_some_and(|a| a.bounds[7] > a.bounds[6]) { 6 } else if s.hp * 2 <= s.max_hp { 4 } else { 3 };
+            let state = if s.hp <= 0 {
+                5
+            } else if s.owner == Owner::Neutral && opensow_formats::buildings::anim(s.kind_id).is_some_and(|a| a.bounds[7] > a.bounds[6]) {
+                6
+            } else if s.hp * 2 <= s.max_hp {
+                4
+            } else {
+                3
+            };
             b.set(0x48, state);
             b.set(0x6c, s.heal.max(0) as u32);
             b.set(0x70, s.max_hp as u32);
@@ -274,10 +305,11 @@ impl World {
         }
         for &(i, p, slot) in &gun_slots {
             let s = &self.structures[i];
-            let kind = 108 + match s.kind {
-                ObjectKind::Turret(n) => n as i32,
-                _ => 1,
-            };
+            let kind = 108
+                + match s.kind {
+                    ObjectKind::Turret(n) => n as i32,
+                    _ => 1,
+                };
             let (cx, cy) = s.center();
             let mut o = self.new_unit(kind, p as i32, true);
             let hd = handle(1, unit_handle_type(kind), p as u32, 0, slot as u32);
@@ -394,7 +426,7 @@ impl World {
         for (&(is_structure, key), &air_id) in &self.air_targets {
             let Some(&ah) = air_handles.get(&air_id) else { continue };
             if is_structure {
-                if let Some(&(_, p, slot)) = gun_slots.iter().find(|g| g.0 == key as usize) {
+                if let Some(&(_, p, slot)) = gun_slots.iter().find(|g| g.0 == key) {
                     if let Some(o) = units[p].1.iter_mut().find(|x| x.0 == slot) {
                         o.1.set(0x80, ah);
                     }
@@ -434,13 +466,18 @@ impl World {
             bullets,
             squads,
             decals,
-            clouds: self.sky.clouds.iter().map(|c| {
-                let mut o = Object::blank(Class::Cloud);
-                o.set(0x4, c.x as u32);
-                o.set(0x8, c.y as u32);
-                o.set(0xc, c.speed);
-                o
-            }).collect(),
+            clouds: self
+                .sky
+                .clouds
+                .iter()
+                .map(|c| {
+                    let mut o = Object::blank(Class::Cloud);
+                    o.set(0x4, c.x as u32);
+                    o.set(0x8, c.y as u32);
+                    o.set(0xc, c.speed);
+                    o
+                })
+                .collect(),
         }
     }
 
@@ -498,7 +535,6 @@ impl World {
     }
 
     /// The scalar fields every unit record has (position, hit points, kind, player, handle, constructor values).
-    #[allow(clippy::too_many_arguments)]
     fn fill_unit(&self, o: &mut Object, hd: u32, kind: i32, player: i32, x: i32, y: i32, hp: i32, max_hp: i32) {
         o.set(0x14, x as u32);
         o.set(0x18, y as u32);
@@ -507,14 +543,14 @@ impl World {
         }
         o.set(0x30, max_hp as u32);
         o.set(0x34, hp.max(0) as u32);
-        o.set(0x38, if kind == 40 { 20 } else { 16 });
+        o.set(0x38, if kind == kinds::ADVANCER { 20 } else { 16 });
         o.set(0x3c, hd);
         o.set(0x40, kind as u32);
         o.set(0x44, player_slot(player) as u32);
-        o.set(0x4b, (kind == 40) as u32);
+        o.set(0x4b, (kind == kinds::ADVANCER) as u32);
         o.set(0x4c, is_anti_air(kind) as u32);
         o.set(0x50, 5);
-        o.set(0x64, if kind == 40 { -23i32 as u32 } else { -25i32 as u32 });
+        o.set(0x64, if kind == kinds::ADVANCER { -23i32 as u32 } else { -25i32 as u32 });
         o.set(0x88, -64i32 as u32);
     }
 
@@ -590,7 +626,7 @@ impl World {
             ch.set(0xa0, ch.local_route.len() as u32);
             ch.route = u.path.iter().map(|&(px, py)| ((px.floor() as i32).div_euclid(CELL) as u32, (py.floor() as i32).div_euclid(CELL) as u32)).collect();
             ch.set(0x8c, ch.route.len() as u32);
-            if u.kind == 40 {
+            if u.kind == kinds::ADVANCER {
                 let idx = ch.children.iter().position(|x| x.0 == 0x104);
                 let mut w = idx.map(|i| ch.children.remove(i).1).unwrap_or_else(|| Object::blank(Class::Weapon));
                 w.set(0x4, u.beam.enabled as u32);
@@ -603,12 +639,19 @@ impl World {
                     let (ax, ay) = st.action_cell();
                     ch.set(0xf4, (ax * CELL + CELL / 2) as u32);
                     ch.set(0xf8, (ay * CELL + CELL / 2) as u32);
-                    ch.set(0xfc, match action { Action::Destroy => 1, Action::Repair => 2, Action::Upgrade => 3 });
+                    ch.set(
+                        0xfc,
+                        match action {
+                            Action::Destroy => 1,
+                            Action::Repair => 2,
+                            Action::Upgrade => 3,
+                        },
+                    );
                     ch.set(0x100, self.building_handle(si).unwrap_or(0));
                 }
             }
             // the order list: a type-2 straight flight first (then the route to its cell), then the rally order (docs/rally.md)
-            let mut order = |x: i32, y: i32| {
+            let order = |x: i32, y: i32| {
                 let mut ord = Object::blank(Class::Order);
                 ord.set(0x4, 1);
                 ord.set(0x8, 1);
@@ -667,7 +710,12 @@ impl World {
         self.sky.clouds = st
             .clouds
             .iter()
-            .map(|o| opensow_formats::clouds::Cloud { x: o.get(0x4).unwrap_or(0) as i32, y: o.get(0x8).unwrap_or(0) as i32, speed: o.get(0xc).unwrap_or(10), picture: 0 })
+            .map(|o| opensow_formats::clouds::Cloud {
+                x: o.get(0x4).unwrap_or(0) as i32,
+                y: o.get(0x8).unwrap_or(0) as i32,
+                speed: o.get(0xc).unwrap_or(10),
+                picture: 0,
+            })
             .collect();
         if let Some(sp) = st.speech.first() {
             let (x, y) = (sp.get(0x4).unwrap_or(u32::MAX) as i32, sp.get(0x8).unwrap_or(u32::MAX) as i32);
@@ -696,7 +744,9 @@ impl World {
             for (slot, b) in objs {
                 let cell = (b.get(0x4).unwrap_or(0) as i32, b.get(0x8).unwrap_or(0) as i32);
                 let kind = b.get(0x94).unwrap_or(0) as i32;
-                let Some(i) = (0..self.structures.len()).find(|&i| !seen[i] && self.structures[i].cell == cell && self.structures[i].kind_id == kind) else { continue };
+                let Some(i) = (0..self.structures.len()).find(|&i| !seen[i] && self.structures[i].cell == cell && self.structures[i].kind_id == kind) else {
+                    continue;
+                };
                 seen[i] = true;
                 if tables[owner].len() <= *slot {
                     tables[owner].resize(slot + 1, None);
@@ -740,7 +790,10 @@ impl World {
             for (slot, b) in objs {
                 if b.get(0x14c) == Some(1) {
                     if let Some(Some(i)) = self.slot_tables[owner].get(*slot).copied() {
-                        self.blinks.insert(i, Blink { timer: b.get(0x150).unwrap_or(0) as i32, on: b.get(0x154).unwrap_or(0) != 0, left: b.get(0x158).unwrap_or(0) as i32 });
+                        self.blinks.insert(
+                            i,
+                            Blink { timer: b.get(0x150).unwrap_or(0) as i32, on: b.get(0x154).unwrap_or(0) != 0, left: b.get(0x158).unwrap_or(0) as i32 },
+                        );
                     }
                 }
             }
@@ -767,7 +820,7 @@ impl World {
                     });
                     continue;
                 }
-                if (109..=113).contains(&kind) {
+                if kinds::TURRET_TOPS.contains(&kind) {
                     if let Some(i) = self.structure_of_handle(o.get(0x68).unwrap_or(0)) {
                         self.turret_look.insert(i, o.get(0x8c).unwrap_or(0) as i32);
                         guns.push((i, o));
@@ -793,10 +846,27 @@ impl World {
             .iter()
             .flat_map(|g| g.1.iter())
             .filter(|(_, o)| o.get(0x2658) == Some(opensow_formats::rogon::BULLET_TYPE as u32))
-            .map(|(_, o)| Nuke { x: o.get(0x269c).unwrap_or(0) as i32, y: o.get(0x26a0).unwrap_or(0) as i32, owner: o.get(0x266c).unwrap_or(0) as i32, ex: opensow_formats::rogon::Explosion::from_parts(o.get(0x26c4).unwrap_or(0) as i32, o.get(0x26c8).unwrap_or(0) as usize) })
+            .map(|(_, o)| Nuke {
+                x: o.get(0x269c).unwrap_or(0) as i32,
+                y: o.get(0x26a0).unwrap_or(0) as i32,
+                owner: o.get(0x266c).unwrap_or(0) as i32,
+                ex: opensow_formats::rogon::Explosion::from_parts(o.get(0x26c4).unwrap_or(0) as i32, o.get(0x26c8).unwrap_or(0) as usize),
+            })
             .collect();
-        self.bullets = st.bullets.iter().flat_map(|g| g.1.iter()).filter(|(_, o)| !(19..=21).contains(&o.get(0x2658).unwrap_or(0)) && o.get(0x2658) != Some(35)).filter_map(|(_, o)| self.bullet_from_record(o)).collect();
-        self.beams = st.bullets.iter().flat_map(|g| g.1.iter()).filter(|(_, o)| (19..=21).contains(&o.get(0x2658).unwrap_or(0))).filter_map(|(_, o)| self.beam_from_record(o)).collect();
+        self.bullets = st
+            .bullets
+            .iter()
+            .flat_map(|g| g.1.iter())
+            .filter(|(_, o)| !(19..=21).contains(&o.get(0x2658).unwrap_or(0)) && o.get(0x2658) != Some(35))
+            .filter_map(|(_, o)| self.bullet_from_record(o))
+            .collect();
+        self.beams = st
+            .bullets
+            .iter()
+            .flat_map(|g| g.1.iter())
+            .filter(|(_, o)| (19..=21).contains(&o.get(0x2658).unwrap_or(0)))
+            .filter_map(|(_, o)| self.beam_from_record(o))
+            .collect();
         let mut aircraft = Vec::new();
         for (side, g) in st.squads.iter().enumerate() {
             for (slot, o) in &g.1 {
@@ -814,7 +884,7 @@ impl World {
                     continue;
                 }
                 let kind = o.get(0x40).unwrap_or(0) as i32;
-                if (109..=113).contains(&kind) {
+                if kinds::TURRET_TOPS.contains(&kind) {
                     if let Some(i) = self.structure_of_handle(o.get(0x68).unwrap_or(0)) {
                         self.air_targets.insert((true, i), ah);
                     }
@@ -913,8 +983,19 @@ impl World {
         let strength = o.get(0x2660).unwrap_or(0) as i32;
         let rate = if action == Action::Repair { strength / 2 } else { strength };
         let count = (o.get(0x268c).unwrap_or(0) as usize).min(15);
-        let frags = (0..count as u32).map(|k| (o.get(0xc + 4 * k).unwrap_or(0) as i32, o.get(0x48 + 4 * k).unwrap_or(0) as i32, o.get(0x84 + 4 * k).unwrap_or(0) as u16)).collect();
-        Some(BeamShot { action, target: self.structure_of_handle(o.get(0x2688).unwrap_or(0))?, side: bullet.owner.max(0) as usize, rate, path: bullet.path, index: bullet.index, trail: bullet.trail, frags })
+        let frags = (0..count as u32)
+            .map(|k| (o.get(0xc + 4 * k).unwrap_or(0) as i32, o.get(0x48 + 4 * k).unwrap_or(0) as i32, o.get(0x84 + 4 * k).unwrap_or(0) as u16))
+            .collect();
+        Some(BeamShot {
+            action,
+            target: self.structure_of_handle(o.get(0x2688).unwrap_or(0))?,
+            side: bullet.owner.max(0) as usize,
+            rate,
+            path: bullet.path,
+            index: bullet.index,
+            trail: bullet.trail,
+            frags,
+        })
     }
 
     fn structure_of_handle(&self, h: u32) -> Option<usize> {
@@ -943,7 +1024,9 @@ impl World {
         let mut path = Vec::new();
         let (mut dest, mut step, mut cool, mut idle) = (None, None, 0, 0);
         let mut line = None;
-        let (mut straight, mut queued, mut beam, mut action): (Option<(i32, i32)>, Option<(i32, i32)>, BeamTimer, Option<(Action, usize)>) = (None, None, BeamTimer::default(), None);
+        let mut straight: Option<(i32, i32)> = None;
+        let mut queued: Option<(i32, i32)> = None;
+        let (mut beam, mut action): (BeamTimer, Option<(Action, usize)>) = (BeamTimer::default(), None);
         if let Some(ch) = o.child(8) {
             let steps = ch.get(0x8).unwrap_or(32).max(1);
             if let Some(p) = params {
@@ -964,9 +1047,14 @@ impl World {
                 straight = list.next().map(|(x, y)| (x.div_euclid(CELL), y.div_euclid(CELL)));
             }
             queued = list.next();
-            if kind == 40 {
+            if kind == kinds::ADVANCER {
                 if let Some(w) = ch.child(0x104) {
-                    beam = BeamTimer { enabled: w.get(0x4).unwrap_or(1) != 0, state: w.get(0x40).unwrap_or(0) as i32, counter: w.get(0x1c).unwrap_or(0) as i32, reload: w.get(0x20).unwrap_or(10) as i32 };
+                    beam = BeamTimer {
+                        enabled: w.get(0x4).unwrap_or(1) != 0,
+                        state: w.get(0x40).unwrap_or(0) as i32,
+                        counter: w.get(0x1c).unwrap_or(0) as i32,
+                        reload: w.get(0x20).unwrap_or(10) as i32,
+                    };
                 }
                 let mode = ch.get(0xfc).unwrap_or(0);
                 let target = self.structure_of_handle(ch.get(0x100).unwrap_or(0));
@@ -1076,7 +1164,12 @@ fn apply_top(a: &mut TopAim, t: &Object) {
     a.target_facing = t.get(0x70).unwrap_or(0);
     let w = t.child(8);
     a.state = code_state(w.and_then(|w| w.get(0x40)).unwrap_or(0));
-    a.set_counters(t.get(0x74).unwrap_or(0) as i32, t.get(0x80).unwrap_or(0) as i32, w.and_then(|w| w.get(0x1c)).unwrap_or(0) as i32, t.get(0x20c).unwrap_or(0));
+    a.set_counters(
+        t.get(0x74).unwrap_or(0) as i32,
+        t.get(0x80).unwrap_or(0) as i32,
+        w.and_then(|w| w.get(0x1c)).unwrap_or(0) as i32,
+        t.get(0x20c).unwrap_or(0),
+    );
 }
 
 /// The Rogon blast (`0x411dc0(0x23, 0, x, y, x+20, y+20, owner)`): a bullet of type 35 whose start / end coordinates are the
@@ -1209,14 +1302,17 @@ mod tests {
         w.timer = Some((12, 34, 1));
         w.ai_strategy = 3;
         w.ai_timer = 777;
-        w.sky.clouds = vec![opensow_formats::clouds::Cloud { x: -50, y: 300, speed: 17, picture: 2 }, opensow_formats::clouds::Cloud { x: 600, y: 40, speed: 33, picture: 4 }];
+        w.sky.clouds = vec![
+            opensow_formats::clouds::Cloud { x: -50, y: 300, speed: 17, picture: 2 },
+            opensow_formats::clouds::Cloud { x: 600, y: 40, speed: 33, picture: 4 },
+        ];
         w
     }
 
     #[test]
     fn orders_beam_ai_timer_and_clouds_survive_the_stream() {
         let mut w = world();
-        let adv = w.add_unit(40, 0, 100, 100);
+        let adv = w.add_unit(kinds::ADVANCER, 0, 100, 100);
         let tank = w.add_unit(7, 0, 200, 200);
         {
             let u = w.units.iter_mut().find(|u| u.id == adv).unwrap();
@@ -1237,7 +1333,7 @@ mod tests {
         assert_eq!(back.timer, Some((12, 34, 1)));
         assert_eq!((back.ai_strategy, back.ai_timer), (3, 777));
         assert_eq!(back.sky.clouds.iter().map(|c| (c.x, c.y, c.speed)).collect::<Vec<_>>(), vec![(-50, 300, 17), (600, 40, 33)]);
-        let a = back.units.iter().find(|u| u.kind == 40).unwrap();
+        let a = back.units.iter().find(|u| u.kind == kinds::ADVANCER).unwrap();
         assert_eq!((a.straight, a.queued, a.beam.state, a.beam.counter, a.idle), (Some((5, 6)), Some((300, 310)), 6, 4, 99));
         let t = back.units.iter().find(|u| u.kind == 7).unwrap();
         assert_eq!((t.straight, t.queued), (None, Some((64, 96))));
@@ -1254,7 +1350,29 @@ mod tests {
 
     fn structure(kind: ObjectKind, kind_id: i32, owner: Owner, cell: (i32, i32)) -> Structure {
         let aim = if let ObjectKind::Turret(n) = kind { TopAim::new(108 + n as i32, 0) } else { None };
-        Structure { object: 0, kind, owner, cell, hp: 500, max_hp: 800, aim, weapon: 0, target: None, slots: Vec::new(), active: 0, kind_id, tally: [0; 3], heal: 0, upgrade: 0, protected: false, attacked: false, sat_cd: 0, advancer: None, rally: None, dying: None }
+        Structure {
+            object: 0,
+            kind,
+            owner,
+            cell,
+            hp: 500,
+            max_hp: 800,
+            aim,
+            weapon: 0,
+            target: None,
+            slots: Vec::new(),
+            active: 0,
+            kind_id,
+            tally: [0; 3],
+            heal: 0,
+            upgrade: 0,
+            protected: false,
+            attacked: false,
+            sat_cd: 0,
+            advancer: None,
+            rally: None,
+            dying: None,
+        }
     }
 
     /// A unit in the middle of a segment: the pixel line to its step cell is the chassis' local route in the stream (the exe's
@@ -1286,7 +1404,6 @@ mod tests {
             assert_eq!(ch.local_route[0], (a.rest.last().unwrap().0 as u32, a.rest.last().unwrap().1 as u32));
             assert_eq!(ch.get(0xa0), Some(ch.local_route.len() as u32));
             // both worlds go on identically
-            let mut back = back;
             for _ in 0..20 {
                 w.step();
                 back.step();
@@ -1337,9 +1454,9 @@ mod tests {
                     }
                 }
             }
-            if (1..=15).contains(&kind) || (40..=46).contains(&kind) {
+            if kinds::GROUND_UNITS.contains(&kind) || (40..=46).contains(&kind) {
                 let art = unit_art(kind).unwrap();
-                assert_eq!(has_chassis, true);
+                assert!(has_chassis);
                 assert_eq!(CHASSIS[get(Part::Chassis, 0x1c) as usize], art.chassis, "chassis sheet of {kind}");
                 assert_eq!(has_top, art.top.is_some());
                 if let Some(t) = art.top {
@@ -1377,7 +1494,10 @@ mod tests {
         assert_eq!((b.timer, b.on, b.left), (3, false, 5));
         assert_eq!(back.turret_look[&1], 123);
         let s = &back.beams[0];
-        assert_eq!((s.action, s.target, s.rate, s.index, s.trail, s.frags.clone(), s.path.points.len()), (Action::Upgrade, 0, 40, 7, 2, vec![(1, -2, 3), (4, 5, 6)], n));
+        assert_eq!(
+            (s.action, s.target, s.rate, s.index, s.trail, s.frags.clone(), s.path.points.len()),
+            (Action::Upgrade, 0, 40, 7, 2, vec![(1, -2, 3), (4, 5, 6)], n)
+        );
         assert_eq!(s.path.points[7..], w.beams[0].path.points[7..]);
         assert!(back.to_state(1, &PassedLevels::initial(), (0, 0)).to_bytes().unwrap() == bytes);
     }

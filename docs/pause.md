@@ -32,12 +32,18 @@ The oval is drawn every frame (`0x45edf0` at the centre) over the frozen game, w
 - In a network game opening/closing sends a packet (`0x42a350` / `0x42a2a0`, a CNet command, docs/network.md); single player only freezes.
 - "P A U S E" is the separate P pause (state `0xf`, below), not part of this menu.
 
+OpenSOW: `ingame::InGameMenu` (`ingame.rs`) with the same frames, items, pages, sounds 35-39 and the tutorial's hidden Load / Save; `Game::ingame_event` acts (Load / Save open `saveui.rs`, Options `options.rs`, the check marks restart through `Action::Restart` (a skirmish restarts its own map) or go to the main menu). No network game, so no packets and no network-hidden items.
+
+**Differs from the exe:** the oval and its frames are scaled like the HUD (window height / 768, never below 1, `InGameMenu::scale`); the exe draws them at their native size.
+
 # The P pause (state `0xf`, `0x435330`)
 
-Code: `Play::draw_pause`, `main.rs` (`Game::key`), `formats::endscreen::pause_rows`; `scripts/verify_against_exe.py` emulates `0x45d3a0` against `opensow scanlines pause`.
+Code: `Play::draw_pause`, `game_input.rs` (`Game::key`), `formats::endscreen::pause_rows`; `scripts/verify_against_exe.py` emulates `0x45d3a0` against `opensow scanlines pause`.
 
 - **Enter**: the P key in a mission (`[player+0x7d] == 1`, scan code 0x19 = P, `0x415d05`; docs/hotkeys.md) calls `0x41f660` (ResetEvent on the mouse event `[0x6b3d0c]`, `[0x5baad7] = 0`), state `0xf` (`0x42c260`) and, in a network game, sends the pause packet `0x42a2a0(1)`. The dispatcher `0x42d020` calls `0x435330` for state 0xf (jump table `0x42d624`, index state-1); state `0x10` (`0x435580`) is the same screen for the other machine's pause in a network game and prints the literal "Waiting for the server".
 - **First frame** (`[0x49a339]` redraw flag): `0x420b40` (SetEvent, `[0x5baad7] = 1`), the game's frame surface `[0x5dde34]` is blitted whole onto the screen surface `[0x5ddec4]`, the surface is locked (`0x466420`) and `0x45d3a0` writes black (0) into **every even pixel row** (rows 0, 2, 4, ...; odd rows are untouched), then unlocked (`0x466970`). HUD and pointer are part of the frame, so everything is dimmed to half the rows.
 - **Text**: `CreateFontA(28, 0, 0, 0, 700, italic 1, 0, 0, charset 0, 0, 0, quality 3, pitch 2, "Times New Roman")`, string id `0x16a` (362, 1-based; the lang dump index 361, "P A U S E", the letters carry their own spaces) drawn by `0x467060` (white text, black shadow at +2,+2, docs/text.md) with the left edge at `W/2 - textwidth/2` (width from `GetTextExtentPoint32W`) and the **top at `H/2`**.
 - **Per frame** (no redraw): `0x420b80` polls the input device, `0x415a00` updates the key flags; `0x4220c0` (network: every player has paused / agrees) or the local P flag `[player + 0x6bed85]` (= `0x7d`) set means resume: `0x42c260(7)`, `[0x6bfa34] = 1` (resets the frame timer so no time is lost), and in a network game `0x42a2a0(0)`. **Nothing else is read**: Esc, the mouse and all other keys (Space included) do nothing while paused, and the simulation, the in-game clock and everything it drives stand still (they only run in state 7).
-- OpenSOW: `Play::paused` freezes the update (as before); `draw_pause` darkens the even rows and prints string 362 (the Times New Roman font is not available, the big bitmap font stands in, scaled like the HUD); while paused `Game::key` accepts only P and the mouse and wheel are ignored.
+- OpenSOW: `Play::paused` freezes the update; `draw_pause` darkens the even rows (`record::stripes` on the GPU path) and prints string 362, scaled like the HUD, left edge `W/2 - width/2`, top at `H/2`; while paused `Game::key` accepts only P and the mouse and wheel are ignored.
+
+**Differs from the exe:** the text is not the exe's 28 px bold italic Times New Roman: in English the big bitmap font stands in (white with a black shadow at +2,+2); for the other languages the system's upright Times New Roman Bold at 28 px (`gdi.rs`, docs/text.md) is drawn without the shadow.

@@ -8,13 +8,18 @@ use crate::{Error, Result};
 
 /// Decoder state: the palettised picture, kept between frames because skipped blocks keep their pixels.
 pub struct Decoder {
+    /// Picture width in pixels.
     pub width: usize,
+    /// Picture height in pixels.
     pub height: usize,
+    /// The palette: up to 256 RGB colours.
     pub palette: Vec<[u8; 3]>,
+    /// The picture: one palette index per pixel, row by row.
     pub pixels: Vec<u8>,
 }
 
 impl Decoder {
+    /// A decoder for pictures of this size and palette; the picture starts all index 0.
     pub fn new(width: usize, height: usize, palette: Vec<[u8; 3]>) -> Decoder {
         Decoder { width, height, palette, pixels: vec![0; width * height] }
     }
@@ -79,6 +84,7 @@ impl Decoder {
         Ok(())
     }
 
+    /// The current picture as 8-bit RGB, three bytes per pixel.
     pub fn to_rgb(&self) -> Vec<u8> {
         self.pixels.iter().flat_map(|&p| self.palette.get(p as usize).copied().unwrap_or([0; 3])).collect()
     }

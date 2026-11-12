@@ -21,7 +21,15 @@ Class object `0x70f814`. Init: music `statistic.wav` (`0x407bb0`, `Data\Sounds\M
 - The screen frees its pictures when the state leaves `0x16` (`0x44d827`).
 
 ## In OpenSOW
-`Game::update` raises `Results` when `World::outcome` is set (speech as before), `draw_banner` paints over the frame of the frozen mission, a click/key after two seconds opens the statistics (`statistic` music), and leaving them calls `results_event(Done)`: won -> `progress.pass` (campaign) and the map, lost and the tutorial -> main menu. The final mission still plays `mO` before the closing message. The stand-ins: the labels use the small bitmap font instead of the 12 px GDI face, and the progress is no longer passed when the mission ends but when the statistics are left (as in the exe).
+`Game::update` raises `Results` when `World::outcome` is set (speech as before), `draw_banner` paints over the frame of the frozen mission, a click/key after two seconds opens the statistics (`statistic` music; the tutorial goes straight to the main menu), and leaving them calls `results_event(Done)`: won -> `progress.pass` (`pass_warmonger` for Warmonger) and the campaign map, a won skirmish, a lost mission and the tutorial -> main menu. The final mission still plays `mO` before the closing message. The progress is passed when the statistics are left (as in the exe). The banner tint (`endscreen::banner_rows` / `tint565`; `record::op::TINT_ROWS` on the GPU path), the bar arithmetic (`endscreen`), the sounds 47 / 48 and the input rules are the exe's.
+
+**Differs from the exe:** the statistics labels use the small bitmap font instead of the exe's 12 px GDI Times New Roman (`Results::draw_layout`).
+
+**Differs from the exe:** the banner picture is scaled like the HUD (window height / 768, never below 1, `Results::draw_banner`); the exe blits it 1:1.
+
+**Differs from the exe:** the statistics page (the 640x480 picture with bars, labels and numbers) is drawn at 640x480 and scaled to the largest centred 4:3 rectangle over the stretched backdrop (`Results::draw_statistics`); the exe draws it 1:1 at the screen centre.
+
+After the final mission's `mO` the port shows its own "Campaign complete!" message, and a won skirmish returns to the main menu (both not in the exe).
 
 ## Open
 - Result code `0x11` of `[0x5baa90]` (state `0x11` after the statistics) and who writes it were not traced.

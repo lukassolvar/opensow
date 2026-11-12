@@ -13,7 +13,9 @@ use crate::{Error, Reader, Result};
 pub const INFO_VERSION: (u16, u16) = (2, 0x1e5);
 /// Header words of the state stream (`0x42a400`).
 pub const STATE_VERSION: (u16, u16) = (1, 0x5a10);
+/// Width of a savegame's thumbnail in pixels.
 pub const THUMB_W: usize = 160;
+/// Height of a savegame's thumbnail in pixels.
 pub const THUMB_H: usize = 120;
 
 /// Decompresses a `.data` file.
@@ -155,6 +157,7 @@ pub struct SaveInfo {
 }
 
 impl SaveInfo {
+    /// Parses a savegame's `.info` file.
     pub fn parse(data: &[u8]) -> Result<SaveInfo> {
         let mut r = Reader::new(data);
         let head = (r.u16("version")?, r.u16("magic")?);
@@ -193,15 +196,18 @@ pub struct StateHead {
     pub v_5baadc: u32,
     /// `[0x5baac4]`, `[0x5baac8]`: the mission countdown's minutes and seconds (docs/ai.md).
     pub v_5baac4: u32,
+    /// `[0x5baac8]`: the mission countdown's seconds.
     pub v_5baac8: u32,
     /// `[0x5baa99] == 1`.
     pub flag_5baa99: bool,
+    /// `[0x89cf50]`: the global carryall counter (docs/air.md).
     pub v_89cf50: u32,
     /// Bytes consumed (the three per-player blocks start here).
     pub len: usize,
 }
 
 impl StateHead {
+    /// Parses the fixed head of the state stream.
     pub fn parse(data: &[u8]) -> Result<StateHead> {
         let mut r = Reader::new(data);
         let head = (r.u16("version")?, r.u16("magic")?);
@@ -218,19 +224,7 @@ impl StateHead {
         let v_5baac8 = r.u32("5baac8")?;
         let flag_5baa99 = r.u8("5baa99")? != 0;
         let v_89cf50 = r.u32("89cf50")?;
-        Ok(StateHead {
-            level,
-            rng_index,
-            v_5baafc,
-            flag_49a339,
-            v_5baad8,
-            v_5baadc,
-            v_5baac4,
-            v_5baac8,
-            flag_5baa99,
-            v_89cf50,
-            len: r.pos(),
-        })
+        Ok(StateHead { level, rng_index, v_5baafc, flag_49a339, v_5baad8, v_5baadc, v_5baac4, v_5baac8, flag_5baa99, v_89cf50, len: r.pos() })
     }
 }
 
@@ -250,13 +244,17 @@ pub struct MapState {
     pub version: String,
     /// Player 0's scroll position in pixels, `[+0x20]` and `[+0x2c]` (the other players' are reset to 0 on load).
     pub scroll_x: u32,
+    /// Player 0's vertical scroll position in pixels, `[+0x2c]`.
     pub scroll_y: u32,
     /// `[+0x40]` columns (inner loop) and `[+0x44]` rows (outer loop); cell `(x, y)` is stored at memory index `x * 128 + y`.
     pub width: u32,
+    /// `[+0x44]`: rows.
     pub height: u32,
+    /// The cells, in file order.
     pub cells: Vec<MapCell>,
     /// The three per-player camera records; empty in level files (marker byte 0).
     pub cameras: Vec<CameraState>,
+    /// The map's sprite list; empty in level files.
     pub items: Vec<Object>,
 }
 
@@ -290,6 +288,7 @@ pub struct CameraState {
     pub scroll_to: bool,
     /// `+8+4k`, `+0x14+4k`.
     pub target_x: u32,
+    /// `+0x14+4k`: y of the scroll target.
     pub target_y: u32,
     /// `+0x54+4k`: shake ticks left (half the duration given to `0x458620`).
     pub quake_left: u32,
@@ -297,10 +296,12 @@ pub struct CameraState {
     pub quake_timer: u32,
     /// `+0x60+4k`, `+0x6c+4k`: the epicentre.
     pub quake_x: u32,
+    /// `+0x6c+4k`: y of the epicentre.
     pub quake_y: u32,
 }
 
 impl MapState {
+    /// Parses the map object from a state stream or a shipped `.map` file.
     pub fn parse(r: &mut Reader) -> Result<MapState> {
         let version = mfc_string(r, "map version")?;
         let scroll_x = r.u32("+0x20")?;
@@ -393,29 +394,41 @@ pub const SLOTS: [usize; 4] = [1000, 300, 500, 30];
 /// A whole state stream, walked section by section (`docs/savegame.md`).
 #[derive(Debug, Clone)]
 pub struct State {
+    /// The fixed head.
     pub head: StateHead,
     /// Per player: three words and the byte arrays of [`PLAYER_BLOCK`].
     pub player_words: Vec<[u32; 3]>,
+    /// Per player: the four byte arrays of [`PLAYER_BLOCK`].
     pub player_arrays: Vec<[Vec<u8>; 4]>,
     /// Three records of two counted `u32` lists.
     pub lists: Vec<[Vec<u32>; 2]>,
+    /// The map object.
     pub map: MapState,
+    /// The `players` section of the stream (docs/savegame.md).
     pub players: Vec<Object>,
+    /// The `stocks` section of the stream (docs/savegame.md).
     pub stocks: Vec<Object>,
+    /// The `params` section of the stream (docs/savegame.md).
     pub params: Vec<Object>,
     /// The campaign record `0x456ac0` writes (`CPassedLevels`): the 4-byte record header (version 1, magic `0x1d6c`) and 313 bytes
     /// (random bytes around a checksum and the 50 obfuscated level states), exactly as `config::PassedLevels::write` makes them
     /// and `PassedLevels::parse` reads them. Kept as bytes so a stream is reproduced exactly.
     pub signature: Vec<u8>,
+    /// The `speech` section of the stream (docs/savegame.md).
     pub speech: Vec<Object>,
     /// 128x128 decal flags, index `x * 128 + y`.
     pub decal_flags: Vec<u8>,
     /// Slot groups per player: units, buildings, bullets, squads, each `(count word, present objects with slot index)`.
     pub units: Vec<(u32, Vec<(usize, Object)>)>,
+    /// The building slots per player, like `units`.
     pub buildings: Vec<(u32, Vec<(usize, Object)>)>,
+    /// The bullet slots per player, like `units`.
     pub bullets: Vec<(u32, Vec<(usize, Object)>)>,
+    /// The squad slots per player, like `units`.
     pub squads: Vec<(u32, Vec<(usize, Object)>)>,
+    /// The scorch decals.
     pub decals: Vec<Object>,
+    /// The ambient clouds.
     pub clouds: Vec<Object>,
 }
 
@@ -533,25 +546,28 @@ impl State {
         }
         tag(&mut r, TAGS[4])?;
         let used = data.len() - r.remaining();
-        Ok((State {
-            head,
-            player_words,
-            player_arrays,
-            lists,
-            map,
-            players,
-            stocks,
-            params,
-            signature,
-            speech,
-            decal_flags,
-            units,
-            buildings,
-            bullets,
-            squads,
-            decals,
-            clouds,
-        }, used))
+        Ok((
+            State {
+                head,
+                player_words,
+                player_arrays,
+                lists,
+                map,
+                players,
+                stocks,
+                params,
+                signature,
+                speech,
+                decal_flags,
+                units,
+                buildings,
+                bullets,
+                squads,
+                decals,
+                clouds,
+            },
+            used,
+        ))
     }
 }
 
@@ -1036,9 +1052,29 @@ mod tests {
     #[test]
     fn info_and_head_round_trip() {
         let thumb: Vec<u16> = (0..THUMB_W * THUMB_H).map(|i| i as u16).collect();
-        let info = SaveInfo { stamp: 77, name: "Quick Save".into(), time: "12:00:01".into(), date: "Nov 02, 2026".into(), weekday: "Mon 12:00".into(), extra: PIXEL_565, thumbnail: thumb };
+        let info = SaveInfo {
+            stamp: 77,
+            name: "Quick Save".into(),
+            time: "12:00:01".into(),
+            date: "Nov 02, 2026".into(),
+            weekday: "Mon 12:00".into(),
+            extra: PIXEL_565,
+            thumbnail: thumb,
+        };
         assert_eq!(SaveInfo::parse(&info.to_bytes()).unwrap(), info);
-        let head = StateHead { level: 3, rng_index: 9, v_5baafc: 1, flag_49a339: true, v_5baad8: 2, v_5baadc: 3, v_5baac4: 4, v_5baac8: 5, flag_5baa99: false, v_89cf50: 6, len: 0 };
+        let head = StateHead {
+            level: 3,
+            rng_index: 9,
+            v_5baafc: 1,
+            flag_49a339: true,
+            v_5baad8: 2,
+            v_5baadc: 3,
+            v_5baac4: 4,
+            v_5baac8: 5,
+            flag_5baa99: false,
+            v_89cf50: 6,
+            len: 0,
+        };
         let b = head.to_bytes();
         let back = StateHead::parse(&b).unwrap();
         assert_eq!(StateHead { len: 0, ..back.clone() }, head);

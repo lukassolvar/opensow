@@ -40,9 +40,11 @@ pub struct NetChassis {
     pub prev: (i32, i32),
     /// `[+0x6c/0x70]` and `[+0x74/0x78]`: the first and second step cell.
     pub step1: (i32, i32),
+    /// `[+0x74/0x78]`: the second step cell.
     pub step2: (i32, i32),
     /// `[+0x30]`, `[+0x34]`: current and wanted facing (both set at once here).
     pub facing: i32,
+    /// `[+0x34]`: the wanted facing.
     pub want: i32,
     /// `[+8]`: facing steps (32, 16, 8).
     pub turn_steps: i32,
@@ -50,9 +52,13 @@ pub struct NetChassis {
     pub cooldown: i32,
     /// Animation: `[+0x4c]` counter, `[+0x50]` reload, `[+0x44]` phase, `[+0x48]` phase count, `[+0x40]` frame.
     pub anim_count: i32,
+    /// `[+0x50]`: the value the animation counter restarts from.
     pub anim_reload: i32,
+    /// `[+0x44]`: the animation phase.
     pub phase: i32,
+    /// `[+0x48]`: the number of animation phases.
     pub phases: i32,
+    /// `[+0x40]`: the sprite frame.
     pub frame: i32,
     /// `[+0x8c]`: length of the global route (`[+0x88]`), cleared when the unit has arrived.
     pub route_len: i32,
@@ -221,14 +227,23 @@ mod tests {
     }
 
     fn chassis() -> NetChassis {
-        NetChassis { pos: (336, 336), dest: (3 * 32 + 16, 3 * 32 + 16), row: vec![1; ROW], handle: 9, turn_steps: 32, phases: 4, anim_reload: 2, ..Default::default() }
+        NetChassis {
+            pos: (336, 336),
+            dest: (3 * 32 + 16, 3 * 32 + 16),
+            row: vec![1; ROW],
+            handle: 9,
+            turn_steps: 32,
+            phases: 4,
+            anim_reload: 2,
+            ..Default::default()
+        }
     }
 
     #[test]
     fn steps_follow_the_clock_and_wrap_the_second() {
         let row: Vec<u8> = (0..60).map(|i| (i % 3) as u8).collect();
         assert_eq!(steps_owed(&row, (5, 0), (5, 0)), 0);
-        assert_eq!(steps_owed(&row, (5, 0), (5, 4)), 0 + 1 + 2 + 0);
+        assert_eq!(steps_owed(&row, (5, 0), (5, 4)), (1 + 2));
         // across the end of a second: ticks 58, 59 of second 5, tick 0 of second 6 (the clock is seconds * 64 + tick)
         assert_eq!(steps_owed(&row, (5, 58), (6, 1)), row[58] as i32 + row[59] as i32 + row[0] as i32);
         assert_eq!(steps_owed(&row, (6, 1), (5, 58)), 0);

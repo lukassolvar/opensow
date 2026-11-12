@@ -18,6 +18,16 @@ The game hides the system cursor and draws its own sprite: `cursor.ps6` (in `spr
 | 10 | air-strike mode (`[+0x1e8]` set, offset 0,0) over the map, the blocked arrow 1 instead over cells the air layer `0x60ac38` marks `0xfffffd` (`0x417257..0x41727b`); drawn by OpenSOW (`Pointer::AirStrike`) | `0x416f80`, `0x41727b` |
 | 0x0b..0x12 | scroll arrows at the screen edge (UL, UR, DR, DL, D, L, R, U), offsets in `Pointer::offset` | `0x416a9c..0x416b68` |
 
+OpenSOW: `Play::pointer` picks the type the same way and `Pointer::frame` / `cursor::phase_at` give the frame; the picture becomes the system cursor (`Play::pointer_cursor`, docs/game.md), `draw_pointer` draws it into the frame for headless screenshots and with `OPENSOW_SOFT_POINTER=1`.
+
+**Differs from the exe:** the exe draws the pointer itself (or, with HW CURSOR, from its mouse thread, docs/options.md); OpenSOW hands the same frame to the system cursor so it moves at the mouse's rate.
+
+**Differs from the exe:** type 5 (the attack pointer with the modifier key) is never chosen; type 4 is shown instead.
+
+**Differs from the exe:** with an Advancer selected OpenSOW never shows the blocked arrow 1 over open ground; the exe tests the air grid `0x6d7a4c` there.
+
+**Differs from the exe:** the scroll arrows appear within 6 px of the window edge (not over the HUD at the right edge); the exe's band is 4 px (x < 4, x > w - 5, docs/options.md).
+
 ## With an Advancer selected, over a building (`0x417b8c..0x417d0a`)
 The same branch issues the order when the left button is released (`0x46b8b0` destroy, `0x46b9f0` repair, `0x46bb30` upgrade), so the pointer always shows what a click does:
 - building not owned by the player (enemy **or neutral**): 7 destroy.
@@ -25,5 +35,7 @@ The same branch issues the order when the left button is released (`0x46b8b0` de
 - own turret (25-29), or any own building while repair mode `[pointer+0x1f0]` is on: damaged (`[b+0x74] < [b+0x70]`) -> 6; else a locked slot (`[b+0x144] < [b+0x140]`) -> 8; else 3.
 - any other own building: locked slot -> 8; else damaged -> 6; else 3.
 - **Repair mode is toggled by a right click on an own building** while an Advancer is selected (`0x417964`; a right click elsewhere deselects, `0x43ad60`). The game also keeps the `R` key.
+
+OpenSOW: same (`advancer::pointer_over_building`, `World::advancer_pointer`; `R` toggles repair mode like `0x416769`).
 
 The Advancer then flies to the building's centre cell (`docs/advancer-actions.md`) and fires there.

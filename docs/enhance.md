@@ -1,6 +1,6 @@
 # Run-time texture enhancement
 
-Nothing derived is stored or shipped: when the camera zooms in (`view.zoom > 1`), the world is drawn from 2x copies of the
+Not in the exe (which has no camera zoom either). Nothing derived is stored or shipped: when the camera zooms in (`view.zoom > 1`), the world is drawn from 2x copies of the
 original art made in memory from the user's own files (`opensow_viewer::upscale`, no new dependencies).
 
 - **Sprites** (`Frame` has a lazy `enhanced` slot): colour is dilated into the transparent border (no dark halo), resampled with
@@ -18,5 +18,7 @@ original art made in memory from the user's own files (`opensow_viewer::upscale`
   blends are unchanged (they run on the enhanced pixels). `--gpu-check` still reports 0 differing pixels.
 - Try it: `opensow-game --play M01 --zoom 2 --size 1920x1080 --screenshot out/x.png` vs the same with `--no-enhance`;
   `cargo run --release -p opensow-viewer --example upscale_preview -- DIR` compares the filters side by side.
-- Options page 2 has the on/off switch (docs/options.md).
+- Options page 2 has the on/off switch (docs/options.md; `enhance_textures` in `opensow.cfg`).
+- **Differs from the exe:** on by default, so any zoom above 1 shows the enhanced art; off (or at zoom 1) the exe's pixels are
+  drawn, just scaled.
 - Ideas not done: deblocking of the JPEG ground, an ML backend behind the same `enhanced()` hook.

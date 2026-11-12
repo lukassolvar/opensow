@@ -7,8 +7,11 @@ use opensow_viewer::render::{blend, pack};
 
 /// A decoded RGB picture (the menu backdrop).
 pub struct Image {
+    /// Width in pixels.
     pub w: usize,
+    /// Height in pixels.
     pub h: usize,
+    /// The pixels, three bytes each, row by row.
     pub rgb: Vec<u8>,
 }
 
@@ -103,11 +106,13 @@ pub fn stretch(buf: &mut [u32], w: usize, h: usize, img: &Image, halve: bool) {
         for x in 0..w {
             let sx = (x * img.w / w).min(img.w - 1);
             let i = (sy * img.w + sx) * 3;
-            buf[y * w + x] = if halve { pack(img.rgb[i] / 2, img.rgb[i + 1] / 2, img.rgb[i + 2] / 2) } else { pack(img.rgb[i], img.rgb[i + 1], img.rgb[i + 2]) };
+            buf[y * w + x] =
+                if halve { pack(img.rgb[i] / 2, img.rgb[i + 1] / 2, img.rgb[i + 2] / 2) } else { pack(img.rgb[i], img.rgb[i + 1], img.rgb[i + 2]) };
         }
     }
 }
 
+/// Blends a colour over a rectangle with opacity `alpha` (0..=255).
 pub fn fill(buf: &mut [u32], w: usize, h: usize, rect: Rect, c: (u8, u8, u8), alpha: u32) {
     opensow_viewer::render::rect(buf, w, h, rect.x, rect.y, rect.x + rect.w, rect.y + rect.h, c, alpha);
 }
@@ -116,7 +121,18 @@ pub fn fill(buf: &mut [u32], w: usize, h: usize, rect: Rect, c: (u8, u8, u8), al
 fn rec(code: u32, f: &Frame, x: i32, y: i32, scale: f32, p0: u32) {
     let (dw, dh) = ((f.width as f32 * scale).round() as i32, (f.height as f32 * scale).round() as i32);
     let (fw, fh) = (f.width as usize, f.height as usize);
-    record::sprite(code, f, x, y, x + dw, y + dh, |dx| (((dx - x) as f32 / scale) as usize).min(fw - 1), |dy| (((dy - y) as f32 / scale) as usize).min(fh - 1), [p0, 0, 0, 0, 0, 0, 0], None);
+    record::sprite(
+        code,
+        f,
+        x,
+        y,
+        x + dw,
+        y + dh,
+        |dx| (((dx - x) as f32 / scale) as usize).min(fw - 1),
+        |dy| (((dy - y) as f32 / scale) as usize).min(fh - 1),
+        [p0, 0, 0, 0, 0, 0, 0],
+        None,
+    );
 }
 
 /// Colour frame with its top-left corner at screen pixel `(x, y)`, scaled by `scale`.
@@ -250,7 +266,18 @@ pub fn text(buf: &mut [u32], w: usize, h: usize, fonts: &(Font, Font), s: &str, 
             let (dw, dh) = ((glyph.width as f32 * scale).ceil() as i32, (glyph.height as f32 * scale).ceil() as i32);
             if record::active() {
                 let (gw, gh) = (glyph.width as usize, glyph.height as usize);
-                record::sprite(op::GLYPH, glyph, gx0, gy0, gx0 + dw, gy0 + dh, |dx| (((dx - gx0) as f32 / scale) as usize).min(gw - 1), |dy| (((dy - gy0) as f32 / scale) as usize).min(gh - 1), [pack(color.0, color.1, color.2), 0, 0, 0, 0, 0, 0], None);
+                record::sprite(
+                    op::GLYPH,
+                    glyph,
+                    gx0,
+                    gy0,
+                    gx0 + dw,
+                    gy0 + dh,
+                    |dx| (((dx - gx0) as f32 / scale) as usize).min(gw - 1),
+                    |dy| (((dy - gy0) as f32 / scale) as usize).min(gh - 1),
+                    [pack(color.0, color.1, color.2), 0, 0, 0, 0, 0, 0],
+                    None,
+                );
                 continue;
             }
             for dy in gy0.max(0)..(gy0 + dh).min(h as i32) {
@@ -266,23 +293,31 @@ pub fn text(buf: &mut [u32], w: usize, h: usize, fonts: &(Font, Font), s: &str, 
     }
 }
 
+/// Width of `s` in pixels at the given scale.
 pub fn text_width(fonts: &(Font, Font), s: &str, scale: f32) -> i32 {
     (fonts.0.measure(s, 1) as f32 * scale) as i32
 }
 
+/// Height of a text line in pixels at the given scale.
 pub fn text_height(fonts: &(Font, Font), scale: f32) -> i32 {
     (fonts.0.line_height() as f32 * scale) as i32
 }
 
+/// A rectangle in window pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
+    /// Left edge.
     pub x: i32,
+    /// Top edge.
     pub y: i32,
+    /// Width.
     pub w: i32,
+    /// Height.
     pub h: i32,
 }
 
 impl Rect {
+    /// Whether the point lies inside the rectangle.
     pub fn contains(&self, px: i32, py: i32) -> bool {
         px >= self.x && py >= self.y && px < self.x + self.w && py < self.y + self.h
     }

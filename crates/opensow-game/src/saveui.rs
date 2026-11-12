@@ -5,17 +5,19 @@
 //! original's (`savegame_<stem>.data` / `.info`, `opensow_formats::save`), but the `.data` stream only carries the level
 //! (the object records of the real state are not decoded far enough to write), so loading restarts that mission.
 
-use opensow_formats::savespark as spark;
-use opensow_formats::Edition;
 use crate::assets::{load_backdrop, Assets};
 use crate::ui::{self, Rect};
-use opensow_formats::lang::{self, LangFile};
+use opensow_formats::lang::LangFile;
 use opensow_formats::save::{self, SaveInfo, StateHead};
+use opensow_formats::savespark as spark;
 use opensow_formats::sprite::{self, Frame, Kind};
+use opensow_formats::Edition;
 use opensow_viewer::render::pack;
 use std::path::PathBuf;
 
+/// Width of the page's design space; it is scaled to the window.
 pub const W: usize = 640;
+/// Height of the page's design space.
 pub const H: usize = 480;
 const ROWS: usize = save::LIST_ROWS;
 /// Widest title in pixels (`0x444a47`: the typed text must stay under 0xc3).
@@ -26,6 +28,7 @@ const GREEN_HI: (u8, u8, u8) = (0x5a, 0xfc, 0x5a);
 const ORANGE: (u8, u8, u8) = (0xde, 0x71, 0x4a);
 const ORANGE_DIM: (u8, u8, u8) = (0xa6, 0x54, 0x37);
 
+/// Whether the page loads or saves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Load,
@@ -36,7 +39,9 @@ pub enum Mode {
 /// `write`, and `also` (the install's own folder) is only read.
 #[derive(Debug, Clone)]
 pub struct Store {
+    /// The folder saves are written to (and read from).
     pub write: PathBuf,
+    /// A second folder that is only read: the install's own `Savegame`.
     pub also: Option<PathBuf>,
     /// The campaign new saves are flagged with (docs/warmonger.md); every edition shares the slots.
     pub edition: Edition,
@@ -45,14 +50,8 @@ pub struct Store {
 impl Store {
     /// `$OPENSOW_SAVE_DIR`, else the per-user data folder; the install's `Savegame` is read as a fallback.
     pub fn locate(game: &opensow_formats::GameDir) -> Store {
-        let write = std::env::var_os("OPENSOW_SAVE_DIR").map(PathBuf::from).unwrap_or_else(|| {
-            let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-            if cfg!(target_os = "macos") {
-                home.join("Library/Application Support/OpenSOW/Savegame")
-            } else {
-                home.join(".local/share/opensow/Savegame")
-            }
-        });
+        // `$OPENSOW_SAVE_DIR` itself, else `Savegame` in the launcher's per-user data folder (`%APPDATA%\OpenSOW` on Windows)
+        let write = std::env::var_os("OPENSOW_SAVE_DIR").map(PathBuf::from).unwrap_or_else(|| opensow_formats::launcher::data_dir().join("Savegame"));
         // the install's own `Savegame` folder only belongs to the base game
         let also = (game.edition == Edition::Original).then(|| game.resolve("Savegame").filter(|p| p.is_dir())).flatten();
         Store { write, also, edition: game.edition }
@@ -131,22 +130,43 @@ impl Store {
         Some(info.thumbnail.iter().map(|&p| save::thumb_to_565(p, info.extra)).collect())
     }
 
-    /// The level of a slot, the campaign it belongs to and the game snapshot it carries (empty for a save of the original game or an
-    /// old one of ours: the level restarts then); `None` when the file is missing or not a savegame.
-    pub fn level_of(&self, slot: usize) -> Option<(String, Edition, Vec<u8>)> {
+    /// What a slot holds (`Saved`); `None` when the file is missing or not a savegame.
+    pub fn level_of(&self, slot: usize) -> Option<Saved> {
         let data = save::huff_decode(&self.read(slot, "data")?).ok()?;
-        Some((level_from_state(&data)?, edition_from_state(&data), snapshot_from_state(&data)))
+        let skirmish = split_state(&data).and_then(|(used, ..)| extension_skirmish(data.get(used..)?)).unwrap_or_default();
+        Some(Saved { level: level_from_state(&data)?, edition: edition_from_state(&data), snapshot: snapshot_from_state(&data), skirmish })
     }
 
     /// Writes `.data` then `.info` (the exe's order, `0x428bb0`).
-    pub fn write(&self, slot: usize, title: &str, level: &str, snapshot: &[u8], thumb: &[u16]) -> std::io::Result<()> {
+    /// `skirmish`: the game's description of a running skirmish (opaque here, empty in a mission), see [`Saved::skirmish`].
+    pub fn write(&self, slot: usize, title: &str, level: &str, snapshot: &[u8], skirmish: &[u8], thumb: &[u16]) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.write)?;
-        let data = save::huff_encode(&state_bytes(level, self.edition, snapshot));
+        let mut state = state_bytes(level, self.edition, snapshot);
+        if !skirmish.is_empty() {
+            state.extend_from_slice(&(skirmish.len() as u32).to_le_bytes());
+            state.extend_from_slice(skirmish);
+        }
+        let data = save::huff_encode(&state);
         std::fs::write(self.write.join(Self::name(slot, "data")), &data)?;
         let (time, date, weekday) = clock_strings(std::time::SystemTime::now());
-        let info = SaveInfo { stamp: save::data_checksum(&data), name: title.to_owned(), time, date, weekday, extra: save::PIXEL_565, thumbnail: thumb.to_vec() };
+        let info =
+            SaveInfo { stamp: save::data_checksum(&data), name: title.to_owned(), time, date, weekday, extra: save::PIXEL_565, thumbnail: thumb.to_vec() };
         std::fs::write(self.write.join(Self::name(slot, "info")), info.to_bytes())
     }
+}
+
+/// What a slot holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Saved {
+    /// The level name: a mission (`M03`), a shipped skirmish map (`03-Gold`) or a custom one (`custom/<stem>`).
+    pub level: String,
+    /// The campaign the save belongs to (docs/warmonger.md).
+    pub edition: Edition,
+    /// The payload for `Play::restore` (empty for a save of the original game or an old one of ours: the level restarts then).
+    pub snapshot: Vec<u8>,
+    /// A skirmish's map, lobby setup, side and difficulty as the game wrote them (JSON of `SkirmishRun`); empty in a mission and in
+    /// saves made before it was stored.
+    pub skirmish: Vec<u8>,
 }
 
 /// A save payload as `Play::snapshot` produces it and `Play::restore` takes it: `u32 n`, the `n` bytes of the original's state stream
@@ -173,7 +193,23 @@ pub fn state_bytes(level: &str, edition: Edition, payload: &[u8]) -> Vec<u8> {
     let number = level.trim_start_matches(|c: char| !c.is_ascii_digit()).parse::<u32>().unwrap_or(0);
     let (mut o, ours) = match unpack_payload(payload).filter(|(s, _)| !s.is_empty()) {
         Some((stream, ours)) => (stream.to_vec(), ours),
-        None => (StateHead { level: number, rng_index: 0, v_5baafc: 0, flag_49a339: false, v_5baad8: 0, v_5baadc: 0, v_5baac4: 0, v_5baac8: 0, flag_5baa99: false, v_89cf50: 0, len: 0 }.to_bytes(), &[][..]),
+        None => (
+            StateHead {
+                level: number,
+                rng_index: 0,
+                v_5baafc: 0,
+                flag_49a339: false,
+                v_5baad8: 0,
+                v_5baadc: 0,
+                v_5baac4: 0,
+                v_5baac8: 0,
+                flag_5baa99: false,
+                v_89cf50: 0,
+                len: 0,
+            }
+            .to_bytes(),
+            &[][..],
+        ),
     };
     save::put_mfc_string(&mut o, "OpenSOW4");
     save::put_mfc_string(&mut o, level);
@@ -183,8 +219,21 @@ pub fn state_bytes(level: &str, edition: Edition, payload: &[u8]) -> Vec<u8> {
     o
 }
 
-/// The extension: `(level name, campaign, our snapshot)`.
+/// The extension: `(level name, campaign, our snapshot)`. A skirmish save continues with `u32 n` + `n` bytes of its description
+/// ([`Saved::skirmish`]); readers that stop after the snapshot (older builds) ignore it.
 fn extension(tail: &[u8]) -> Option<(String, Edition, Vec<u8>)> {
+    extension_parts(tail).map(|(e, _)| e)
+}
+
+fn extension_skirmish(tail: &[u8]) -> Option<Vec<u8>> {
+    extension_parts(tail).and_then(|(_, s)| s)
+}
+
+/// The two parts of this port's extension block of a save: `(level, campaign, extra state)` and, for a skirmish, its
+/// stored setup.
+type ExtensionParts = ((String, Edition, Vec<u8>), Option<Vec<u8>>);
+
+fn extension_parts(tail: &[u8]) -> Option<ExtensionParts> {
     let mut r = opensow_formats::Reader::new(tail);
     if opensow_formats::saveobj::mfc_string(&mut r, "tag").ok()? != "OpenSOW4" {
         return None;
@@ -192,7 +241,9 @@ fn extension(tail: &[u8]) -> Option<(String, Edition, Vec<u8>)> {
     let name = opensow_formats::saveobj::mfc_string(&mut r, "level").ok()?;
     let edition = if r.u8("edition").ok()? == 1 { Edition::Warmonger } else { Edition::Original };
     let n = r.u32("length").ok()? as usize;
-    Some((name, edition, r.bytes(n, "snapshot").ok()?.to_vec()))
+    let snapshot = r.bytes(n, "snapshot").ok()?.to_vec();
+    let skirmish = r.u32("skirmish length").ok().and_then(|n| r.bytes(n as usize, "skirmish").ok()).map(<[u8]>::to_vec);
+    Some(((name, edition, snapshot), skirmish))
 }
 
 /// Splits a state stream into the exe-layout part and the level number its head holds: `(length, number, genuine)` where
@@ -255,15 +306,25 @@ fn civil(secs: i64) -> (String, String, String) {
 /// The language strings the page uses (exe index = file index + 1).
 #[derive(Debug, Clone, Default)]
 pub struct Texts {
+    /// Title of the load page.
     pub load_title: String,
+    /// Title of the save page.
     pub save_title: String,
+    /// The cancel button.
     pub cancel: String,
+    /// The load button.
     pub load: String,
+    /// The save button.
     pub save: String,
+    /// Name given to a quick save.
     pub quick_save: String,
+    /// Text of an empty slot.
     pub empty: String,
+    /// Shown where a slot has no time.
     pub no_time: String,
+    /// Shown where a slot has no date.
     pub no_date: String,
+    /// Text of a slot whose files are damaged.
     pub damaged: String,
 }
 
@@ -288,19 +349,24 @@ impl Texts {
 /// One list row: `valid` means the files exist and the checksum matches (only those can be loaded).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Slot {
+    /// The slot can be loaded.
     pub valid: bool,
+    /// The save's name.
     pub title: String,
+    /// When it was saved: the time, as text.
     pub time: String,
+    /// When it was saved: the date, as text.
     pub date: String,
 }
 
+/// What a click on the page asks the game to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     None,
     /// CANCEL or Esc: the in-game page resumes the mission (state 7), the one from the main menu goes back (state 0x1c).
     Cancel,
-    /// LOAD on a valid row: this level of this campaign, with the saved game snapshot (empty = start the level over).
-    Load(String, Edition, Vec<u8>),
+    /// LOAD on a valid row: what the slot holds.
+    Load(Saved),
     /// LOAD where the state cannot be read: the exe returns to the main menu.
     LoadFailed(usize),
     /// SAVE: written; the game resumes and says "01-game-saved".
@@ -308,6 +374,7 @@ pub enum Event {
     SaveFailed(String),
 }
 
+/// What the pointer is over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
     Row(usize),
@@ -315,13 +382,22 @@ pub enum Hit {
     Cancel,
 }
 
+/// The load / save page: the list of slots, the selection and the buttons.
+/// A piece of text of a list row: `(text, x, y, colour)`.
+type RowText = (String, i32, i32, (u8, u8, u8));
+
 pub struct SaveUi {
+    /// Load or save.
     pub mode: Mode,
+    /// Where the savegame files are.
     pub store: Store,
+    /// The page's texts in the current language.
     pub text: Texts,
+    /// The list rows.
     pub slots: Vec<Slot>,
     /// The row under the pointer (`[+4]`) and the clicked row (`[+0xc]`).
     pub hover: Option<usize>,
+    /// The clicked row (`[+0xc]`).
     pub selected: Option<usize>,
     hover_btn: Option<Hit>,
     /// 160x120 RGB565: the screenshot taken when the page opened (save) or the selected slot's (load).
@@ -329,6 +405,8 @@ pub struct SaveUi {
     level: String,
     /// The running game (`World::snapshot` + camera) a save stores; set by the game when it opens the page.
     pub snapshot: Vec<u8>,
+    /// The running skirmish's description ([`Saved::skirmish`]); set by the game with `snapshot`.
+    pub skirmish: Vec<u8>,
     needs_capture: bool,
     bg: Option<crate::ui::Image>,
     bg_full: Option<crate::ui::Image>,
@@ -346,7 +424,7 @@ pub struct SaveUi {
     utitle: Option<crate::gdi::Gdi>,
     ubtn: Option<crate::gdi::Gdi>,
     /// Row texts `(text, x, y, colour)` of the last render, drawn by `draw` on the scaled page.
-    texts: std::cell::RefCell<Vec<(String, i32, i32, (u8, u8, u8))>>,
+    texts: std::cell::RefCell<Vec<RowText>>,
     /// Effect ids for the game to play: 30 hover, 38 LOAD/SAVE, 39 CANCEL, 32 typing, 40 screenshot.
     pub sounds: Vec<u8>,
     /// The decorative sparks running along the table lines (`0x443210`, bullet type 33; `opensow_formats::savespark`).
@@ -391,8 +469,18 @@ impl SaveUi {
     /// `level` is the running mission (what a save stores); `tick` is not needed to open.
     pub fn new(assets: &mut Assets, mode: Mode, level: &str, store: Store) -> SaveUi {
         let language = assets.game.language();
-        let strings = assets.game.resolve(&format!("Data\\Language\\{}", language.file_name())).and_then(|p| std::fs::read(p).ok()).and_then(|d| LangFile::parse(&d).ok()).map(|f| f.with_supplement(language));
-        let frames = assets.game.resolve("Data\\Sprites2\\Menu\\loadsave_b.tsp").and_then(|p| std::fs::read(p).ok()).and_then(|d| sprite::parse(&d, Kind::Color).ok()).unwrap_or_default();
+        let strings = assets
+            .game
+            .resolve(&format!("Data\\Language\\{}", language.file_name()))
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|d| LangFile::parse(&d).ok())
+            .map(|f| f.with_supplement(language));
+        let frames = assets
+            .game
+            .resolve("Data\\Sprites2\\Menu\\loadsave_b.tsp")
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|d| sprite::parse(&d, Kind::Color).ok())
+            .unwrap_or_default();
         let mut ui = SaveUi::with_parts(mode, level, store, Texts::from(strings.as_ref()), frames, assets.font("medium"), assets.font("big"));
         ui.gdi = crate::gdi::Gdi::load();
         ui.utitle = crate::gdi::Gdi::for_language(language, 28.0);
@@ -404,9 +492,47 @@ impl SaveUi {
         ui
     }
 
-    pub fn with_parts(mode: Mode, level: &str, store: Store, text: Texts, frames: Vec<Frame>, fonts: std::rc::Rc<(opensow_formats::font::Font, opensow_formats::font::Font)>, big: std::rc::Rc<(opensow_formats::font::Font, opensow_formats::font::Font)>) -> SaveUi {
+    /// Builds the page from ready-made parts (texts, slots, fonts); tests use it to avoid the install.
+    pub fn with_parts(
+        mode: Mode,
+        level: &str,
+        store: Store,
+        text: Texts,
+        frames: Vec<Frame>,
+        fonts: std::rc::Rc<(opensow_formats::font::Font, opensow_formats::font::Font)>,
+        big: std::rc::Rc<(opensow_formats::font::Font, opensow_formats::font::Font)>,
+    ) -> SaveUi {
         let slots = (0..ROWS).map(|i| store.slot(i, &text)).collect();
-        SaveUi { mode, store, text, slots, hover: None, selected: None, hover_btn: None, thumb: vec![0; save::THUMB_W * save::THUMB_H], level: level.to_owned(), snapshot: Vec::new(), needs_capture: mode == Mode::Save, bg: None, bg_full: None, frames, fonts, big, limit_font: None, tick: 0, canvas: vec![0; W * H], gdi: None, utitle: None, ubtn: None, texts: Default::default(), sounds: Vec::new(), sparks: Vec::new(), spark_frame: None, spark_rng: 0x2545_f491 }
+        SaveUi {
+            mode,
+            store,
+            text,
+            slots,
+            hover: None,
+            selected: None,
+            hover_btn: None,
+            thumb: vec![0; save::THUMB_W * save::THUMB_H],
+            level: level.to_owned(),
+            snapshot: Vec::new(),
+            skirmish: Vec::new(),
+            needs_capture: mode == Mode::Save,
+            bg: None,
+            bg_full: None,
+            frames,
+            fonts,
+            big,
+            limit_font: None,
+            tick: 0,
+            canvas: vec![0; W * H],
+            gdi: None,
+            utitle: None,
+            ubtn: None,
+            texts: Default::default(),
+            sounds: Vec::new(),
+            sparks: Vec::new(),
+            spark_frame: None,
+            spark_rng: 0x2545_f491,
+        }
     }
 
     /// The level a save stores (headless screenshots have no running mission).
@@ -419,6 +545,7 @@ impl SaveUi {
         self.needs_capture
     }
 
+    /// Takes the thumbnail for the next save from a drawn frame.
     pub fn capture(&mut self, pixels: &[u32], w: usize, h: usize) {
         self.thumb = save::grab_thumbnail(pixels, w, h);
         self.needs_capture = false;
@@ -445,6 +572,7 @@ impl SaveUi {
         self.frame_rect(f, (320, 240)).unwrap_or(Rect { x: 151, y: 430, w: 113, h: 47 })
     }
 
+    /// What lies at a point of the design space.
     pub fn hit_at(&self, p: (i32, i32)) -> Option<Hit> {
         if self.cancel_rect().contains(p.0, p.1) {
             return Some(Hit::Cancel);
@@ -478,6 +606,7 @@ impl SaveUi {
 
     // ---- input ----
 
+    /// Updates the hovered row and button for a pointer position in the window.
     pub fn mouse_moved(&mut self, x: i32, y: i32, w: usize, h: usize) {
         let hit = self.hit_at(Self::to_design(x, y, w, h));
         let row = if let Some(Hit::Row(i)) = hit { Some(i) } else { None };
@@ -494,6 +623,7 @@ impl SaveUi {
         self.hover_btn = btn;
     }
 
+    /// A click at a window position: selects a row or presses a button.
     pub fn click(&mut self, x: i32, y: i32, w: usize, h: usize) -> Event {
         match self.hit_at(Self::to_design(x, y, w, h)) {
             Some(Hit::Cancel) => self.cancel(),
@@ -522,14 +652,14 @@ impl SaveUi {
                 }
                 self.sounds.push(38);
                 match self.store.level_of(row) {
-                    Some((level, edition, snapshot)) => Event::Load(level, edition, snapshot),
+                    Some(saved) => Event::Load(saved),
                     None => Event::LoadFailed(row),
                 }
             }
             Mode::Save => {
                 self.sounds.push(38);
                 let title = self.slots[row].title.clone();
-                match self.store.write(row, &title, &self.level, &self.snapshot, &self.thumb) {
+                match self.store.write(row, &title, &self.level, &self.snapshot, &self.skirmish, &self.thumb) {
                     Ok(()) => Event::Saved,
                     Err(e) => Event::SaveFailed(e.to_string()),
                 }
@@ -574,7 +704,10 @@ impl SaveUi {
         }
         let joined = format!("{}{typed}", self.slots[row].title);
         // the exe measures with the bitmap face font02_light and spacing -4 (`0x444a25`: push 9, push -4, `0x45ed50`), not with the GDI face it draws
-        let width = self.limit_font.as_ref().map_or_else(|| self.gdi.as_ref().map_or_else(|| ui::text_width(&self.fonts, &joined, 1.0), |g| g.width(&joined)), |f| f.measure(&joined, -4));
+        let width = self
+            .limit_font
+            .as_ref()
+            .map_or_else(|| self.gdi.as_ref().map_or_else(|| ui::text_width(&self.fonts, &joined, 1.0), |g| g.width(&joined)), |f| f.measure(&joined, -4));
         if width < MAX_TITLE_PX {
             self.slots[row].title = joined;
             self.sounds.push(32); // save-type
@@ -589,6 +722,7 @@ impl SaveUi {
         }
     }
 
+    /// Advances the page's animations by `ticks` game ticks.
     pub fn update(&mut self, ticks: u32) {
         let first = self.tick;
         self.tick = self.tick.wrapping_add(ticks);
@@ -745,6 +879,7 @@ impl SaveUi {
         self.canvas = canvas;
     }
 
+    /// Draws the page scaled into the `w` x `h` frame buffer.
     pub fn draw(&mut self, buf: &mut [u32], w: usize, h: usize) {
         opensow_viewer::record::cpu(|| self.render());
         crate::ui::clear(buf, w, h, 0);
@@ -759,14 +894,14 @@ impl SaveUi {
                 let row = |y: i32| if crop { (y0 + y as usize) as i32 } else { (y as usize * bg.h / h).min(bg.h - 1) as i32 };
                 opensow_viewer::record::picture_rgb8(&bg.rgb, bg.w, 0, 0, w as i32, h as i32, col, row, false);
             } else {
-            for y in 0..h {
-                let sy = if crop { y0 + y } else { (y * bg.h / h).min(bg.h - 1) };
-                for x in 0..w {
-                    let sx = if crop { x0 + x } else { (x * bg.w / w).min(bg.w - 1) };
-                    let i = (sy * bg.w + sx) * 3;
-                    buf[y * w + x] = pack(bg.rgb[i], bg.rgb[i + 1], bg.rgb[i + 2]);
+                for y in 0..h {
+                    let sy = if crop { y0 + y } else { (y * bg.h / h).min(bg.h - 1) };
+                    for x in 0..w {
+                        let sx = if crop { x0 + x } else { (x * bg.w / w).min(bg.w - 1) };
+                        let i = (sy * bg.w + sx) * 3;
+                        buf[y * w + x] = pack(bg.rgb[i], bg.rgb[i + 1], bg.rgb[i + 2]);
+                    }
                 }
-            }
             }
         }
         crate::ui::page(buf, w, h, &self.canvas, W, H, ox as usize, oy as usize, s);
@@ -809,8 +944,8 @@ mod tests {
         Texts::from(None)
     }
 
-    fn ui(mode: Mode, dir: &PathBuf) -> SaveUi {
-        SaveUi::with_parts(mode, "M03", Store { write: dir.clone(), also: None, edition: Edition::Original }, texts(), Vec::new(), fonts(), fonts())
+    fn ui(mode: Mode, dir: &std::path::Path) -> SaveUi {
+        SaveUi::with_parts(mode, "M03", Store { write: dir.to_path_buf(), also: None, edition: Edition::Original }, texts(), Vec::new(), fonts(), fonts())
     }
 
     #[test]
@@ -846,7 +981,19 @@ mod tests {
         assert_eq!(StateHead::parse(&s).unwrap().level, 3);
         assert_eq!(level_from_state(&s).as_deref(), Some("M03"));
         // a genuine stream has no marker: the number gives the level
-        let head = StateHead { level: 7, rng_index: 0, v_5baafc: 0, flag_49a339: false, v_5baad8: 0, v_5baadc: 0, v_5baac4: 0, v_5baac8: 0, flag_5baa99: false, v_89cf50: 0, len: 0 };
+        let head = StateHead {
+            level: 7,
+            rng_index: 0,
+            v_5baafc: 0,
+            flag_49a339: false,
+            v_5baad8: 0,
+            v_5baadc: 0,
+            v_5baac4: 0,
+            v_5baac8: 0,
+            flag_5baa99: false,
+            v_89cf50: 0,
+            len: 0,
+        };
         assert_eq!(level_from_state(&head.to_bytes()).as_deref(), Some("M07"));
         assert_eq!(level_from_state(&[1, 2, 3]), None);
     }
@@ -859,7 +1006,19 @@ mod tests {
             assert!(snapshot_from_state(&s).is_empty(), "a level-only file restarts the level");
         }
         // a stream without the extension (the original's) and garbage are the base game's
-        let head = StateHead { level: 7, rng_index: 0, v_5baafc: 0, flag_49a339: false, v_5baad8: 0, v_5baadc: 0, v_5baac4: 0, v_5baac8: 0, flag_5baa99: false, v_89cf50: 0, len: 0 };
+        let head = StateHead {
+            level: 7,
+            rng_index: 0,
+            v_5baafc: 0,
+            flag_49a339: false,
+            v_5baad8: 0,
+            v_5baadc: 0,
+            v_5baac4: 0,
+            v_5baac8: 0,
+            flag_5baa99: false,
+            v_89cf50: 0,
+            len: 0,
+        };
         assert_eq!((level_from_state(&head.to_bytes()).as_deref(), edition_from_state(&head.to_bytes())), (Some("M07"), Edition::Original));
         assert_eq!((level_from_state(&[1, 2, 3]), edition_from_state(&[1, 2, 3])), (None, Edition::Original));
         // the extension gives level, campaign and snapshot back
@@ -871,6 +1030,12 @@ mod tests {
         tail.extend([7, 8, 9]);
         assert_eq!(extension(&tail), Some(("M12".to_owned(), Edition::Warmonger, vec![7, 8, 9])));
         assert_eq!(extension(&tail[..tail.len() - 1]), None, "a truncated snapshot is rejected");
+        assert_eq!(extension_skirmish(&tail), None, "no skirmish block");
+        // a skirmish block after the snapshot: the older reader still sees the same extension
+        tail.extend(2u32.to_le_bytes());
+        tail.extend(*b"{}");
+        assert_eq!(extension(&tail), Some(("M12".to_owned(), Edition::Warmonger, vec![7, 8, 9])));
+        assert_eq!(extension_skirmish(&tail), Some(b"{}".to_vec()));
     }
 
     #[test]
@@ -918,7 +1083,7 @@ mod tests {
         l.select(4);
         assert_eq!(l.sounds, vec![40]);
         assert_eq!(l.thumb[0], save::rgb565(0, 255, 0));
-        assert_eq!(l.confirm(), Event::Load("M03".into(), Edition::Original, Vec::new()));
+        assert_eq!(l.confirm(), Event::Load(Saved { level: "M03".into(), edition: Edition::Original, snapshot: Vec::new(), skirmish: Vec::new() }));
         // corrupt the data: the row turns into "damaged" and cannot be loaded
         let data = dir.join("savegame_052.data");
         let mut bytes = std::fs::read(&data).unwrap();

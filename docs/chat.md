@@ -28,4 +28,10 @@ The comparison is a chain of `text[i] == c` with a length test before each chara
 
 ## OpenSOW
 
-`Play::chat_*` (open / type / send), `World::apply_cheat`, `World::say_chat`. While the line is open it takes every key press (no hotkeys, no dev panel). A line that is not a cheat becomes a chat line of the local player, drawn in the message queue in light blue and expiring like a message (480 ticks). A cheat is not echoed. Not traced: where the original draws the typed line (OpenSOW puts it above the message slots) and whether a single-player line that is no cheat is shown at all; the network match is not playable yet, so nothing is sent.
+`Play::chat_*` (open / type / backspace / recall / cancel / send), `World::apply_cheat`, `World::say_chat`; the phrases, prefix match, amounts and codes are the exe's (`formats::cheats`), the width limit is `cheats::MAX_LINE_WIDTH`. While the line is open it takes every key press (no hotkeys, no dev panel). A line that is not a cheat becomes a chat line of the local player, drawn in the message queue in light blue and expiring like a message (480 ticks). A cheat is not echoed. Not traced: where the original draws the typed line (OpenSOW puts it above the message slots, white on a dimmed box) and whether a single-player line that is no cheat is shown at all; the network match is not playable yet, so nothing is sent.
+
+**Differs from the exe:** only printable ASCII (0x20..0x7e) is appended (`Play::chat_type`); the exe takes every character from 0x20 on.
+
+**Differs from the exe:** Esc drops the text and closes the line (`Play::chat_cancel`); the exe's character handler only clears the text (`0x426d0d`), whether its key handler also closes the line was not traced.
+
+**Differs from the exe:** the protected value `[0x5baae8]` and the counters' XOR checksums are not modelled; a cheat changes the counter only.

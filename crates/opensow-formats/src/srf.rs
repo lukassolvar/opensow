@@ -8,10 +8,7 @@ const DQT: [u8; 2] = [0xFF, 0xDB];
 
 /// Returns a standard JPEG byte stream for an SRF file.
 pub fn to_jpeg(srf: &[u8]) -> Result<Vec<u8>> {
-    let start = srf
-        .windows(2)
-        .position(|w| w == DQT)
-        .ok_or_else(|| Error::Invalid("no JPEG DQT marker in SRF".into()))?;
+    let start = srf.windows(2).position(|w| w == DQT).ok_or_else(|| Error::Invalid("no JPEG DQT marker in SRF".into()))?;
     let mut out = Vec::with_capacity(srf.len() - start + 2);
     out.extend([0xFF, 0xD8]);
     out.extend(&srf[start..]);
@@ -24,10 +21,7 @@ pub fn to_jpeg(srf: &[u8]) -> Result<Vec<u8>> {
 /// Encoders differ in segment order (some write SOF first), which is why they are re-sequenced.
 /// Baseline and progressive JPEGs both occur in the install (IJL decodes either).
 pub fn from_jpeg(template: &[u8], jpeg: &[u8]) -> Result<Vec<u8>> {
-    let head = template
-        .windows(2)
-        .position(|w| w == DQT)
-        .ok_or_else(|| Error::Invalid("no JPEG DQT marker in template SRF".into()))?;
+    let head = template.windows(2).position(|w| w == DQT).ok_or_else(|| Error::Invalid("no JPEG DQT marker in template SRF".into()))?;
     if jpeg.get(..2) != Some(&[0xFF, 0xD8]) {
         return Err(Error::Invalid("not a JPEG (no SOI)".into()));
     }

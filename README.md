@@ -1,57 +1,146 @@
 # OpenSOW
 
-An open-source, cross-platform (macOS / arm64 / Linux / Windows) reimplementation of the
-2001 RTS **State of War**, written in Rust, for preserving a community favourite.
+An open-source, cross-platform (macOS, Windows, Linux) reimplementation of **State of War**, the
+2001 real-time strategy game, written in Rust.
 
-**OpenSOW contains no game data.** You need your own legitimate copy (e.g. from Steam).
-Point it at the install with `OPENSOW_GAME_DIR`, or it will look at the default Steam depot path.
+[![Sponsor](https://img.shields.io/badge/sponsor-GitHub%20Sponsors-ea4aaa?logo=githubsponsors)](https://github.com/sponsors/lukassolvar)
 
-## Layout
+![](docs/screenshots/skirmish-battle.jpg)
 
-- `crates/opensow-formats` - parsers for the game's file formats (archive, SRF images, sprites, ...)
-- `crates/opensow-tools` - `opensow` CLI: `where`, `check`, `unpack`, `srf`, `sprite`
-- `crates/opensow-viewer` - `opensow-viewer` level viewer (winit + softbuffer, CPU rendered); also a library used by the game
-- `crates/opensow-game` - `opensow-game`: playable prototype (menus + skirmish), see `docs/game.md`
-- `docs/formats.md` - reverse-engineering notes on each file format
+## Introduction
 
-## Try it
+OpenSOW rebuilds the State of War engine so the game runs natively on today's machines, using the
+data from your own copy.
+
+- **Faithful to the original**: game rules, AI and file formats are decoded from the original
+  executable; every known deviation is documented in [docs/](docs/).
+- **Runs everywhere**: native builds, any resolution up to 4K, no Wine.
+- **Preserves and extends**: both campaigns in one game, plus skirmish, a map editor and optional
+  enhancements.
+
+### AI-assisted decompilation and rebuild
+
+OpenSOW is built with AI coding agents. They disassemble the original executable, port each
+routine to Rust, and verify the port by running the original code in an emulator and comparing the
+results ([scripts/verify_against_exe.py](scripts/verify_against_exe.py)).
+
+### Support the project
+
+If you enjoy OpenSOW, support it through [GitHub Sponsors](https://github.com/sponsors/lukassolvar).
+Even a small one-time donation is very much appreciated: it buys me a coffee to keep working on
+these projects.
+
+## Disclaimer
+
+OpenSOW is an unofficial fan project, not affiliated with the original developers, publishers or
+Steam. "State of War" is a trademark of its owners. **This repository and its releases contain no
+game data**: you need your own copy of State of War (for example from Steam); Warmonger is
+optional. OpenSOW is provided as is, without warranty.
+
+## New features
+
+### Both campaigns in one game
+
+Switch between the State of War and Warmonger campaigns on the campaign map, each with its own
+progress.
+
+![](docs/screenshots/campaign-sow.jpg)
+
+![](docs/screenshots/campaign-warmonger.jpg)
+
+### Skirmish mode
+
+Play against the computer on all 14 multiplayer maps of both games, or on your own maps.
+
+- Set both sides' credits, research, air forces and turrets, or swap sides.
+- Four computer levels: Easy, Normal, Hard and Brutal.
+- The computer plays like a player: turrets, Advancer captures, carryall drops and air strikes.
+
+![](docs/screenshots/skirmish-setup.jpg)
+
+![](docs/screenshots/skirmish-match.jpg)
+
+![](docs/screenshots/skirmish-custom.jpg)
+
+#### Collecting stars
+
+Earn stars by beating the computer on each map on Easy, Normal, Hard or Brutal.
+
+### Map editor
+
+Make your own skirmish maps and missions in the game:
+
+- any of the game's terrains, with buildings, turrets and units for either side;
+- win rules: destroy the enemy HQ, destroy everything, or **escort** a convoy to a goal;
+- **timers**: hold out, time limit, or reinforcements;
+- your maps appear on the skirmish screen's Custom tab.
+
+![](docs/screenshots/map-editor-start.jpg)
+
+![](docs/screenshots/map-editor-lagoon.jpg)
+
+![](docs/screenshots/map-editor-escort.jpg)
+
+### Extra options
+
+Optional enhancements: sharper textures when zoomed in, soft shadows, explosion glow, better
+sound, turret range while placing, and map zoom.
+
+![](docs/screenshots/options-enhancements.jpg)
+
+![](docs/screenshots/enhanced-zoom.jpg)
+
+Also: resolutions up to 4K, five interface languages, and a launcher that finds your games, holds
+the settings and updates itself.
+
+![](docs/screenshots/launcher.jpg)
+
+## How to run
+
+1. Download the archive for your system from the
+   [latest release](https://github.com/lukassolvar/opensow/releases/latest)
+   (`macos-aarch64`, `macos-x86_64`, `windows-x86_64`, `linux-x86_64` or `linux-aarch64`).
+2. Unpack it and start **opensow-launcher**.
+3. If the launcher does not find your game, click **Locate game**.
+4. Press **Play**.
+
+Controls: [docs/controls.md](docs/controls.md) and [docs/hotkeys.md](docs/hotkeys.md).
+
+## How to install and develop
+
+You need a stable Rust toolchain and your own install of State of War.
 
 ```bash
-cargo run --release -p opensow-tools -- check          # parse every asset in your install
-cargo run --release -p opensow-tools -- sprite "$OPENSOW_GAME_DIR/Data/units/1C_blue.ps6" unit.png
+git clone https://github.com/lukassolvar/opensow.git
 ```
 
-## Play the prototype
+Set `OPENSOW_GAME_DIR` to your install (on macOS the Steam location is found automatically), then
+run the launcher or the game:
 
 ```bash
-cargo run --release -p opensow-game                      # menus -> New game -> pick a mission
-cargo run --release -p opensow-game -- --screenshot out/menu.png --hover 0          # headless render of a screen
-cargo run --release -p opensow-game -- --screenshot out/m01.png --play M01 --select-all --move 38,27 --ticks 2300 --report
+cargo run --release -p opensow-launcher
 ```
-Main menu uses the game's own button art. In a mission: left click / drag select, right click move, WASD/arrows or screen edge scroll, wheel zoom, Q select all, Space pause, Esc menu. Production, capturing, air strikes and AI are not implemented yet (see `docs/game.md`).
-
-## Level viewer
 
 ```bash
-cargo run --release -p opensow-viewer -- M05            # interactive window
-cargo run --release -p opensow-viewer -- M01 --screenshot out/m01.png --overlay blocked,objects,markers
+cargo run --release -p opensow-game -- --windowed
 ```
-Keys: arrows/WASD or drag = pan, wheel or +/- = zoom, B blocked cells, G grid, O objects (squares for things without art), M markers, X sprites, N/P next/previous level, K play the walk cycle, `--aim N` turns tops independently, `--shot x1,y1,x2,y2,type` draws a bullet path, V loop the fire/recoil sequences, Home fit, Esc quit.
 
-## Status
+Check that every file of your install parses (expect 0 failures):
 
-| Format | Status |
-|---|---|
-| `sprites.info/.data` archive | done |
-| `.srf` / `.srfa` images | done |
-| `.ps6` / `.tsp` / `.sha` sprites | done |
-| `.map` / `.til` / `.tmi` / `.edt` / `.net` | done (object/marker kind meanings unknown) |
-| level viewer | done (terrain, blocked cells, building, turret and unit sprites with shadows; air forces are stock counts, not drawn) |
-| `.msk` / `.ps6` fonts | done (ASCII only; see docs/fonts.md) |
-| language files (`lang.dat`, `lang*.txt`) | done (see docs/text.md) |
-| `.po1/.po2` weapon fire points | done (viewer overlay F shows muzzles) |
-| projectiles, damage, weapon stats, bullet paths | done (`opensow weapons`, `opensow path`; docs/projectiles.md) |
-| verification against the original exe | `scripts/verify_against_exe.py` (emulator) |
-| GDI-path text rendering | todo |
-| playable prototype (menus, selection, movement, combat, win/lose) | done, with placeholders (docs/game.md) |
-| economy/production, Advancer actions, air strikes, AI, audio, networking | todo |
+```bash
+cargo run --release -p opensow-tools -- check
+```
+
+The code is split into `crates/opensow-formats` (file formats and decoded game rules),
+`opensow-viewer` (map drawing), `opensow-game`, `opensow-tools` and `opensow-launcher`. Start with
+[docs/architecture.md](docs/architecture.md); the status is in [docs/roadmap.md](docs/roadmap.md).
+
+## Contributing
+
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first; above all, no game data
+in the repository, and game behaviour comes from the original executable.
+
+## Licence
+
+MIT or [Apache 2.0](LICENSE-APACHE), at your option ([LICENSE-MIT](LICENSE-MIT)). This covers
+OpenSOW's code only; the game's data stays the property of its owners.

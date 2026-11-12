@@ -15,25 +15,54 @@ use opensow_formats::font::Font;
 use opensow_formats::level::UnitKind;
 use std::rc::Rc;
 
+/// A pair of bitmap fonts: inner mask and outline mask.
 pub type Fonts = Rc<(Font, Font)>;
 
+/// The game-speed multipliers the panel cycles through.
 pub const SPEEDS: [u32; 4] = [1, 2, 5, 10];
 
 /// Unit kinds that can be placed, with the short label of their button.
 pub const KINDS: [(i32, &str); 22] = [
-    (1, "AA 1"), (2, "AA 2"), (3, "AA 3"),
-    (4, "ART 1"), (5, "ART 2"), (6, "ART 3"),
-    (7, "CAN 1"), (8, "CAN 2"), (9, "CAN 3"),
-    (10, "FLM 1"), (11, "FLM 2"), (12, "FLM 3"),
-    (13, "SPC 1"), (14, "SPC 2"), (15, "SPC 3"),
-    (40, "ADV"), (41, "WLK 1"), (42, "WLK 2"), (43, "WLK 3"), (44, "WLK 4"), (45, "WLK 5"), (46, "POD"),
+    (1, "AA 1"),
+    (2, "AA 2"),
+    (3, "AA 3"),
+    (4, "ART 1"),
+    (5, "ART 2"),
+    (6, "ART 3"),
+    (7, "CAN 1"),
+    (8, "CAN 2"),
+    (9, "CAN 3"),
+    (10, "FLM 1"),
+    (11, "FLM 2"),
+    (12, "FLM 3"),
+    (13, "SPC 1"),
+    (14, "SPC 2"),
+    (15, "SPC 3"),
+    (40, "ADV"),
+    (41, "WLK 1"),
+    (42, "WLK 2"),
+    (43, "WLK 3"),
+    (44, "WLK 4"),
+    (45, "WLK 5"),
+    (46, "POD"),
 ];
 
 /// Turrets and buildings that can be placed (object kinds, `ObjectKind::from_id`), with the label of their button.
 pub const STRUCTS: [(i32, &str); 14] = [
-    (25, "TUR 1"), (26, "TUR 2"), (27, "TUR 3"), (28, "TUR 4"), (29, "TUR 5"),
-    (100, "HQ"), (101, "LFAC"), (102, "MFAC"), (103, "HFAC"),
-    (104, "AIR"), (105, "GOLD"), (106, "LAB"), (107, "WIND"), (108, "WFAC"),
+    (25, "TUR 1"),
+    (26, "TUR 2"),
+    (27, "TUR 3"),
+    (28, "TUR 4"),
+    (29, "TUR 5"),
+    (100, "HQ"),
+    (101, "LFAC"),
+    (102, "MFAC"),
+    (103, "HFAC"),
+    (104, "AIR"),
+    (105, "GOLD"),
+    (106, "LAB"),
+    (107, "WIND"),
+    (108, "WFAC"),
 ];
 
 /// Whether an armed kind is a turret or building (placed with `World::dev_place_structure`) rather than a unit.
@@ -46,6 +75,7 @@ pub const AIR: [&str; 5] = ["BOMBER", "ASTEROID", "CARRYALL", "TRIPLER", "FIGHTE
 
 const COLUMNS: usize = 4;
 
+/// The things on the panel that can be pointed at or clicked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Item {
     Badge,
@@ -62,12 +92,18 @@ pub enum Item {
     Air(usize),
 }
 
+/// The developer panel (key `` ` `` or F12): cheats, game speed and placing things.
 #[derive(Debug, Clone)]
 pub struct DevTools {
+    /// The panel is shown.
     pub visible: bool,
+    /// Every tech-level and turret is unlocked.
     pub unlock_all: bool,
+    /// The player's units take no damage.
     pub invulnerable: bool,
+    /// The player's credits and research stay at the maximum.
     pub rich: bool,
+    /// The enemy does nothing.
     pub freeze_enemy: bool,
     /// Ticks per second multiplier (one of [`SPEEDS`]).
     pub speed: u32,
@@ -77,6 +113,7 @@ pub struct DevTools {
     pos: Option<(i32, i32)>,
     /// Pointer offset inside the panel while the title bar is dragged.
     drag: Option<(i32, i32)>,
+    /// The item under the pointer.
     pub hover: Option<Item>,
     /// The item a left press started on (it fires when the button is released over it).
     pressed: Option<Item>,
@@ -84,7 +121,19 @@ pub struct DevTools {
 
 impl Default for DevTools {
     fn default() -> Self {
-        DevTools { visible: false, unlock_all: false, invulnerable: false, rich: false, freeze_enemy: false, speed: 1, side: 0, pos: None, drag: None, hover: None, pressed: None }
+        DevTools {
+            visible: false,
+            unlock_all: false,
+            invulnerable: false,
+            rich: false,
+            freeze_enemy: false,
+            speed: 1,
+            side: 0,
+            pos: None,
+            drag: None,
+            hover: None,
+            pressed: None,
+        }
     }
 }
 
@@ -97,6 +146,7 @@ struct Laid {
 }
 
 impl DevTools {
+    /// The switches as the simulation's cheat flags.
     pub fn cheats(&self) -> Cheats {
         Cheats { invulnerable: self.invulnerable, rich: self.rich, freeze_enemy: self.freeze_enemy }
     }
@@ -106,6 +156,7 @@ impl DevTools {
         self.unlock_all || self.invulnerable || self.rich || self.freeze_enemy || self.speed != 1
     }
 
+    /// Shows or hides the panel.
     pub fn toggle_visible(&mut self) {
         self.visible ^= true;
         self.drag = None;
@@ -145,7 +196,7 @@ impl DevTools {
         items.push((Rect { x: px + pw - row - u(2), y: y + u(2), w: row, h: row }, Item::Close));
         y += title.h + pad;
         let x0 = px + pad;
-        let mut head = |heads: &mut Vec<(&'static str, i32, i32)>, y: &mut i32, text: &'static str| {
+        let head = |heads: &mut Vec<(&'static str, i32, i32)>, y: &mut i32, text: &'static str| {
             heads.push((text, x0, *y));
             *y += th + u(4);
         };
@@ -368,7 +419,13 @@ impl DevTools {
                     if hot && usable {
                         ui::fill(buf, w, h, r, (60, 220, 90), 60);
                     }
-                    let colour = if !usable { (90, 100, 90) } else if on { yellow } else { white };
+                    let colour = if !usable {
+                        (90, 100, 90)
+                    } else if on {
+                        yellow
+                    } else {
+                        white
+                    };
                     ui::text(buf, w, h, &fonts, &text, r.x + (r.w - ui::text_width(&fonts, &text, s)) / 2, label_y(r), s, colour, ink);
                     if hot {
                         if let Item::Air(_) = item {
@@ -395,7 +452,12 @@ impl DevTools {
 }
 
 fn frame(buf: &mut [u32], w: usize, h: usize, r: Rect, c: (u8, u8, u8)) {
-    for edge in [Rect { x: r.x, y: r.y, w: r.w, h: 1 }, Rect { x: r.x, y: r.y + r.h - 1, w: r.w, h: 1 }, Rect { x: r.x, y: r.y, w: 1, h: r.h }, Rect { x: r.x + r.w - 1, y: r.y, w: 1, h: r.h }] {
+    for edge in [
+        Rect { x: r.x, y: r.y, w: r.w, h: 1 },
+        Rect { x: r.x, y: r.y + r.h - 1, w: r.w, h: 1 },
+        Rect { x: r.x, y: r.y, w: 1, h: r.h },
+        Rect { x: r.x + r.w - 1, y: r.y, w: 1, h: r.h },
+    ] {
         ui::fill(buf, w, h, edge, c, 255);
     }
 }

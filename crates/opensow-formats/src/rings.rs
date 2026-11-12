@@ -15,6 +15,7 @@ const STEPS: usize = 145;
 /// The eight neighbour offsets used when the search range is 1 (table at `0x6b3c70`).
 pub const NEIGHBOURS: [(i16, i16); 8] = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)];
 
+/// The target-search offset list: cell offsets around a centre, grouped into rings of growing distance (docs/projectiles.md).
 #[derive(Debug, Clone)]
 pub struct Rings {
     /// All offsets, ring after ring, starting with the centre.
@@ -24,6 +25,7 @@ pub struct Rings {
 }
 
 impl Rings {
+    /// Builds the list the way the exe does (`0x436230`).
     pub fn generate() -> Rings {
         const SIZE: usize = 300;
         const MID: i32 = 150;

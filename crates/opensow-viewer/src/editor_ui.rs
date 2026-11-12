@@ -10,15 +10,21 @@ use opensow_formats::level::Marker;
 use opensow_formats::maptweak::{template, Production, Side, Thing, MAX_LINES};
 use opensow_formats::sprite::{rgb565_to_rgb8, Frame};
 
+/// A rectangle in screen pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Rect {
+    /// Left edge.
     pub x: i32,
+    /// Top edge.
     pub y: i32,
+    /// Width.
     pub w: i32,
+    /// Height.
     pub h: i32,
 }
 
 impl Rect {
+    /// Whether the point lies inside the rectangle.
     pub fn contains(&self, x: i32, y: i32) -> bool {
         x >= self.x && y >= self.y && x < self.x + self.w && y < self.y + self.h
     }
@@ -27,11 +33,17 @@ impl Rect {
 /// What a click on a widget does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
+    /// Open the previous map.
     MapPrev,
+    /// Open the next map.
     MapNext,
+    /// Save the edits.
     Save,
+    /// Undo.
     Undo,
+    /// Redo.
     Redo,
+    /// Throw away every edit of this map.
     Revert,
     /// Stop placing (back to select and move).
     SelectTool,
@@ -41,8 +53,11 @@ pub enum Hit {
     PlaceSide(Side),
     /// Owner of the selection.
     SelOwner(Side),
+    /// Delete the selection.
     Delete,
+    /// Scroll the palette up.
     ScrollUp,
+    /// Scroll the palette down.
     ScrollDown,
     /// Palette tab: 0 buildings, 1 turrets, 2 units.
     Tab(usize),
@@ -92,15 +107,30 @@ enum Style {
 
 enum Look {
     Card,
-    Text { s: String, colour: (u8, u8, u8) },
-    Button { label: String, pic: Option<Pic>, style: Style, enabled: bool },
-    Picture { pic: Pic, dim: bool, frame: Option<(u8, u8, u8)> },
+    Text {
+        s: String,
+        colour: (u8, u8, u8),
+    },
+    Button {
+        label: String,
+        pic: Option<Pic>,
+        style: Style,
+        enabled: bool,
+    },
+    Picture {
+        pic: Pic,
+        dim: bool,
+        frame: Option<(u8, u8, u8)>,
+    },
     /// Two bars: blue's and green's share of the Advancer reach.
     Balance([f32; 2]),
 }
 
+/// One thing on the editor's panel: a button, label or picture with its rectangle.
 pub struct Widget {
+    /// Where it is drawn.
     pub r: Rect,
+    /// What a click on it does; `None` for a widget that is only shown.
     pub hit: Option<Hit>,
     /// Shown next to the mouse while it is over the widget.
     pub tip: Option<String>,
@@ -114,9 +144,11 @@ struct Icon {
     px: Vec<Option<u32>>,
 }
 
+/// The editor's side panel: its fonts, icons and what it currently shows.
 pub struct Ui {
     /// The medium and the big mask font of the game (the big one on windows 900+ px high).
     pub fonts: (Font, Font),
+    /// The game's big font pair (inner and outline masks), used on windows 900 px high or more.
     pub big: (Font, Font),
     /// The palette tab shown.
     pub tab: usize,
@@ -232,7 +264,11 @@ impl Ui {
 
     /// The font pair for a window `h` px high.
     fn font(&self, h: usize) -> &(Font, Font) {
-        if h >= 900 && self.big.0.glyph_count() > 0 { &self.big } else { &self.fonts }
+        if h >= 900 && self.big.0.glyph_count() > 0 {
+            &self.big
+        } else {
+            &self.fonts
+        }
     }
 
     /// The sidebar's widgets for a window `w` x `h` (the panel is the right `panel_width(w, h)` columns).
@@ -242,7 +278,16 @@ impl Ui {
         let pw = panel_width(w, h) as i32;
         let pad = if big { 16 } else { 10 };
         let lh = font.line_height().max(10) + 4;
-        let mut l = Layout { out: Vec::new(), font, x0: w as i32 - pw + pad, inner: pw - 2 * pad, lh, bh: lh + if big { 16 } else { 10 }, gap: if big { 10 } else { 6 }, y: pad };
+        let mut l = Layout {
+            out: Vec::new(),
+            font,
+            x0: w as i32 - pw + pad,
+            inner: pw - 2 * pad,
+            lh,
+            bh: lh + if big { 16 } else { 10 },
+            gap: if big { 10 } else { 6 },
+            y: pad,
+        };
         let (x0, inner, bh, gap) = (l.x0, l.inner, l.bh, l.gap);
         let message: Vec<String> = if ed.message.is_empty() { Vec::new() } else { wrap(font, &ed.message, inner) };
         let bottom = h as i32 - pad - message.len() as i32 * lh - if message.is_empty() { 0 } else { gap };
@@ -270,8 +315,24 @@ impl Ui {
         let wts = [4, 4, 2, 2];
         let (rs, rr) = (l.cell(x0, inner, &wts, 0, l.y, bh), l.cell(x0, inner, &wts, 1, l.y, bh));
         let named = l.labels_fit(&[rs, rr], &["Save", "Revert"], Pic::Glyph(Glyph::Save));
-        l.button(rs, Hit::Save, if named { "Save" } else { "" }, Some(Pic::Glyph(Glyph::Save)), if dirty { Style::On(None) } else { Style::Plain }, dirty, "Save this map's edits to data/skirmish-maps.txt");
-        l.button(rr, Hit::Revert, if named { "Revert" } else { "" }, Some(Pic::Glyph(Glyph::Revert)), Style::Plain, n > 0, "Back to the shipped map (can be undone)");
+        l.button(
+            rs,
+            Hit::Save,
+            if named { "Save" } else { "" },
+            Some(Pic::Glyph(Glyph::Save)),
+            if dirty { Style::On(None) } else { Style::Plain },
+            dirty,
+            "Save this map's edits to data/skirmish-maps.txt",
+        );
+        l.button(
+            rr,
+            Hit::Revert,
+            if named { "Revert" } else { "" },
+            Some(Pic::Glyph(Glyph::Revert)),
+            Style::Plain,
+            n > 0,
+            "Back to the shipped map (can be undone)",
+        );
         let r = l.cell(x0, inner, &wts, 2, l.y, bh);
         l.button(r, Hit::Undo, "", Some(Pic::Glyph(Glyph::Undo)), Style::Plain, ed.can_undo(), "Undo");
         let r = l.cell(x0, inner, &wts, 3, l.y, bh);
@@ -288,7 +349,12 @@ impl Ui {
         let y = l.y;
         l.push(Rect { x: x0 + gap, y: y + 2, w: sq, h: sq }, None, Some(tip), Look::Picture { pic: Pic::Swatch(SIDE_TINT[1]), dim: false, frame: None });
         l.text_at(x0 + gap + sq + 6, y, bw, &b, (230, 230, 230), Some(tip));
-        l.push(Rect { x: x0 + inner - gap - sq, y: y + 2, w: sq, h: sq }, None, Some(tip), Look::Picture { pic: Pic::Swatch(SIDE_TINT[2]), dim: false, frame: None });
+        l.push(
+            Rect { x: x0 + inner - gap - sq, y: y + 2, w: sq, h: sq },
+            None,
+            Some(tip),
+            Look::Picture { pic: Pic::Swatch(SIDE_TINT[2]), dim: false, frame: None },
+        );
         l.text_at(x0 + inner - gap - sq - 6 - gw, y, gw, &g, (230, 230, 230), Some(tip));
         let (bx0, bx1) = (x0 + gap + sq + 14 + bw, x0 + inner - gap - sq - 14 - gw);
         l.push(Rect { x: bx0, y: y + lh / 2 - 3, w: (bx1 - bx0).max(10), h: 7 }, None, Some(tip), Look::Balance(reach));
@@ -308,7 +374,15 @@ impl Ui {
                     l.push(Rect { x: left, y: l.y, w: pic, h: pic }, None, None, Look::Picture { pic: Pic::Item(i, shown), dim: false, frame: Some(EDGE) });
                 }
                 let del = bh - 4;
-                l.button(Rect { x: left + width - del, y: l.y, w: del, h: del }, Hit::Delete, "", Some(Pic::Glyph(Glyph::Trash)), Style::Danger, true, "Delete it");
+                l.button(
+                    Rect { x: left + width - del, y: l.y, w: del, h: del },
+                    Hit::Delete,
+                    "",
+                    Some(Pic::Glyph(Glyph::Trash)),
+                    Style::Danger,
+                    true,
+                    "Delete it",
+                );
                 let tx = left + pic + gap;
                 let tw = left + width - del - gap - tx;
                 let ty = l.y + (pic - 3 * lh) / 2;
@@ -318,7 +392,12 @@ impl Ui {
                 let mut x = tx;
                 for (k, d) in f.iter().enumerate() {
                     let v = d.map_or("-".into(), |v| format!("{v:.0}"));
-                    l.push(Rect { x, y: ty + 2 * lh + 3, w: sq - 2, h: sq - 2 }, None, Some(tip), Look::Picture { pic: Pic::Swatch(SIDE_TINT[k + 1]), dim: false, frame: None });
+                    l.push(
+                        Rect { x, y: ty + 2 * lh + 3, w: sq - 2, h: sq - 2 },
+                        None,
+                        Some(tip),
+                        Look::Picture { pic: Pic::Swatch(SIDE_TINT[k + 1]), dim: false, frame: None },
+                    );
                     let vw = font.measure(&v, 1);
                     l.text_at(x + sq + 2, ty + 2 * lh, vw, &v, (225, 225, 225), Some(tip));
                     x += sq + vw + 2 * gap;
@@ -329,7 +408,15 @@ impl Ui {
                 let named = l.labels_fit(&cells, &SIDE_NAMES, Pic::Swatch(PANEL));
                 for k in 0..3 {
                     let style = if side == SIDES[k] { Style::On(Some(SIDE_TINT[k])) } else { Style::Plain };
-                    l.button(cells[k], Hit::SelOwner(SIDES[k]), if named { SIDE_NAMES[k] } else { "" }, Some(Pic::Swatch(SIDE_TINT[k])), style, !(sides_only && k == 0), &format!("Make it {}", SIDE_NAMES[k].to_lowercase()));
+                    l.button(
+                        cells[k],
+                        Hit::SelOwner(SIDES[k]),
+                        if named { SIDE_NAMES[k] } else { "" },
+                        Some(Pic::Swatch(SIDE_TINT[k])),
+                        style,
+                        !(sides_only && k == 0),
+                        &format!("Make it {}", SIDE_NAMES[k].to_lowercase()),
+                    );
                 }
                 l.y += bh;
             }
@@ -345,8 +432,24 @@ impl Ui {
         let show_lines = self.production && lines.is_some();
         let (rp, rl) = (l.cell(x0, inner, &[1, 1], 0, l.y, bh), l.cell(x0, inner, &[1, 1], 1, l.y, bh));
         let named = l.labels_fit(&[rp, rl], &["Place", "Production"], Pic::Slot(7));
-        l.button(rp, Hit::Lower(false), if named { "Place" } else { "" }, Some(Pic::Glyph(Glyph::Plus)), if show_lines { Style::Plain } else { Style::On(None) }, true, "Place new buildings, turrets and units");
-        l.button(rl, Hit::Lower(true), if named { "Production" } else { "" }, Some(Pic::Slot(7)), if show_lines { Style::On(None) } else { Style::Plain }, lines.is_some(), "The selected building's production lines");
+        l.button(
+            rp,
+            Hit::Lower(false),
+            if named { "Place" } else { "" },
+            Some(Pic::Glyph(Glyph::Plus)),
+            if show_lines { Style::Plain } else { Style::On(None) },
+            true,
+            "Place new buildings, turrets and units",
+        );
+        l.button(
+            rl,
+            Hit::Lower(true),
+            if named { "Production" } else { "" },
+            Some(Pic::Slot(7)),
+            if show_lines { Style::On(None) } else { Style::Plain },
+            lines.is_some(),
+            "The selected building's production lines",
+        );
         l.y += bh + gap + 4;
         match (show_lines, lines) {
             (true, Some((family, p))) => production_view(&mut l, family, &p, bottom),
@@ -366,7 +469,15 @@ impl Ui {
         let named = l.labels_fit(&cells, &SIDE_NAMES, Pic::Swatch(PANEL));
         for k in 0..3 {
             let style = if ed.side == SIDES[k] { Style::On(Some(SIDE_TINT[k])) } else { Style::Plain };
-            l.button(cells[k], Hit::PlaceSide(SIDES[k]), if named { SIDE_NAMES[k] } else { "" }, Some(Pic::Swatch(SIDE_TINT[k])), style, true, &format!("New things are {}", SIDE_NAMES[k].to_lowercase()));
+            l.button(
+                cells[k],
+                Hit::PlaceSide(SIDES[k]),
+                if named { SIDE_NAMES[k] } else { "" },
+                Some(Pic::Swatch(SIDE_TINT[k])),
+                style,
+                true,
+                &format!("New things are {}", SIDE_NAMES[k].to_lowercase()),
+            );
         }
         l.y += bh + gap;
         let unit_side = if ed.side == Side::Neutral { Side::Blue } else { ed.side };
@@ -376,13 +487,29 @@ impl Ui {
         let names: Vec<&str> = TABS.iter().map(|t| t.0).collect();
         let named = l.labels_fit(&cells, &names, Pic::Slot(0));
         for (k, name) in names.iter().enumerate() {
-            l.button(cells[k], Hit::Tab(k), if named { name } else { "" }, Some(tab_pics[k]), if self.tab == k { Style::On(None) } else { Style::Plain }, true, name);
+            l.button(
+                cells[k],
+                Hit::Tab(k),
+                if named { name } else { "" },
+                Some(tab_pics[k]),
+                if self.tab == k { Style::On(None) } else { Style::Plain },
+                true,
+                name,
+            );
         }
         l.y += th + gap;
         if ed.placing {
             let thing = palette()[ed.palette];
             l.text_at(x0, l.y + (bh - l.lh) / 2 + 2, inner - bh - gap, &format!("Placing {}", display_name(thing)), (120, 230, 120), None);
-            l.button(Rect { x: x0 + inner - bh, y: l.y, w: bh, h: bh }, Hit::SelectTool, "", Some(Pic::Glyph(Glyph::Cross)), Style::Plain, true, "Stop placing (or right click)");
+            l.button(
+                Rect { x: x0 + inner - bh, y: l.y, w: bh, h: bh },
+                Hit::SelectTool,
+                "",
+                Some(Pic::Glyph(Glyph::Cross)),
+                Style::Plain,
+                true,
+                "Stop placing (or right click)",
+            );
             l.y += bh + gap;
         }
         // the palette grid of the tab fills what is left
@@ -419,7 +546,6 @@ impl Ui {
         self.widgets(w, h, ed, map_name, can_switch).into_iter().find(|wd| wd.hit.is_some() && wd.r.contains(x, y)).and_then(|wd| wd.hit)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn picture(&self, buf: &mut [u32], w: usize, h: usize, pic: Pic, r: Rect, dim: bool, colour: (u8, u8, u8)) {
         match pic {
             Pic::Item(i, side) => {
@@ -563,14 +689,36 @@ fn production_view(l: &mut Layout, family: Lines, p: &Production, bottom: i32) {
                 l.push(r, Some(Hit::Line(LineChange::LevelSlot(k))), Some(tip), Look::Button { label: String::new(), pic: Some(pic), style, enabled: true });
             }
             l.y += size + gap;
-            stepper(l, "Unlocked", p.active, (LineChange::Active(false), LineChange::Active(true)), (p.active > 0, p.active < n), "Levels producing from the start; the Advancer unlocks the others");
+            stepper(
+                l,
+                "Unlocked",
+                p.active,
+                (LineChange::Active(false), LineChange::Active(true)),
+                (p.active > 0, p.active < n),
+                "Levels producing from the start; the Advancer unlocks the others",
+            );
             if n > 1 {
-                l.button(Rect { x: x0, y: l.y, w: inner, h: bh }, Hit::Line(LineChange::Levels(false)), "Remove last level", Some(Pic::Glyph(Glyph::Minus)), Style::Plain, true, "");
+                l.button(
+                    Rect { x: x0, y: l.y, w: inner, h: bh },
+                    Hit::Line(LineChange::Levels(false)),
+                    "Remove last level",
+                    Some(Pic::Glyph(Glyph::Minus)),
+                    Style::Plain,
+                    true,
+                    "",
+                );
                 l.y += bh + gap;
             }
         }
         _ => {
-            stepper(l, "Active", p.active, (LineChange::Active(false), LineChange::Active(true)), (p.active > 0, p.active < n), "Lines producing from the start (bright); the Advancer unlocks the others (dim)");
+            stepper(
+                l,
+                "Active",
+                p.active,
+                (LineChange::Active(false), LineChange::Active(true)),
+                (p.active > 0, p.active < n),
+                "Lines producing from the start (bright); the Advancer unlocks the others (dim)",
+            );
             let what = match family {
                 Lines::Air => "air force",
                 Lines::Walkers => "walker",
@@ -585,9 +733,14 @@ fn production_view(l: &mut Layout, family: Lines, p: &Production, bottom: i32) {
             for (k, &(kind, rise)) in p.lines.iter().enumerate() {
                 let on = (k as i32) < p.active;
                 let name = line_label(kind, rise);
-                let ground = family == Lines::Ground && (1..=15).contains(&kind);
+                let ground = family == Lines::Ground && opensow_formats::kinds::GROUND_UNITS.contains(&kind);
                 let tip = format!("{name}{}", if on { ": produces from the start" } else { ": the Advancer unlocks it" });
-                l.push(Rect { x: x0, y: l.y, w: pic, h: pic }, None, Some(&tip), Look::Picture { pic: Pic::Slot(kind), dim: !on, frame: Some(if on { (90, 190, 110) } else { EDGE }) });
+                l.push(
+                    Rect { x: x0, y: l.y, w: pic, h: pic },
+                    None,
+                    Some(&tip),
+                    Look::Picture { pic: Pic::Slot(kind), dim: !on, frame: Some(if on { (90, 190, 110) } else { EDGE }) },
+                );
                 let rx = x0 + pic + gap;
                 let rw = x0 + inner - rx;
                 if tall {
@@ -601,16 +754,56 @@ fn production_view(l: &mut Layout, family: Lines, p: &Production, bottom: i32) {
                     let t = (kind - 1) % 3 + 1;
                     let tiers = if rise > 0 { format!("T{t}-{}", (t + rise).min(3)) } else { format!("T{t}") };
                     let cw = l.font.measure("T1-3", 1) + 16;
-                    l.button(Rect { x, y: by, w: cw, h: small }, Hit::Line(LineChange::Tiers(k)), &tiers, None, Style::Plain, true, "Start tier - highest tier research can raise it to. Click to change.");
+                    l.button(
+                        Rect { x, y: by, w: cw, h: small },
+                        Hit::Line(LineChange::Tiers(k)),
+                        &tiers,
+                        None,
+                        Style::Plain,
+                        true,
+                        "Start tier - highest tier research can raise it to. Click to change.",
+                    );
                     x += cw + gap;
                 }
-                l.button(Rect { x, y: by, w: small, h: small }, Hit::Line(LineChange::Kind(k, false)), "", Some(Pic::Glyph(Glyph::Left)), Style::Plain, true, &format!("Previous {what}"));
-                l.button(Rect { x: x + small + 4, y: by, w: small, h: small }, Hit::Line(LineChange::Kind(k, true)), "", Some(Pic::Glyph(Glyph::Right)), Style::Plain, true, &format!("Next {what}"));
-                l.button(Rect { x: x0 + inner - small, y: by, w: small, h: small }, Hit::Line(LineChange::Remove(k)), "", Some(Pic::Glyph(Glyph::Cross)), Style::Danger, n > 1, "Remove this line");
+                l.button(
+                    Rect { x, y: by, w: small, h: small },
+                    Hit::Line(LineChange::Kind(k, false)),
+                    "",
+                    Some(Pic::Glyph(Glyph::Left)),
+                    Style::Plain,
+                    true,
+                    &format!("Previous {what}"),
+                );
+                l.button(
+                    Rect { x: x + small + 4, y: by, w: small, h: small },
+                    Hit::Line(LineChange::Kind(k, true)),
+                    "",
+                    Some(Pic::Glyph(Glyph::Right)),
+                    Style::Plain,
+                    true,
+                    &format!("Next {what}"),
+                );
+                l.button(
+                    Rect { x: x0 + inner - small, y: by, w: small, h: small },
+                    Hit::Line(LineChange::Remove(k)),
+                    "",
+                    Some(Pic::Glyph(Glyph::Cross)),
+                    Style::Danger,
+                    n > 1,
+                    "Remove this line",
+                );
                 l.y += pic + gap;
             }
             if (n as usize) < MAX_LINES {
-                l.button(Rect { x: x0, y: l.y, w: inner, h: bh }, Hit::Line(LineChange::Add), "Add line", Some(Pic::Glyph(Glyph::Plus)), Style::Ghost, true, "A new production line (five at most)");
+                l.button(
+                    Rect { x: x0, y: l.y, w: inner, h: bh },
+                    Hit::Line(LineChange::Add),
+                    "Add line",
+                    Some(Pic::Glyph(Glyph::Plus)),
+                    Style::Ghost,
+                    true,
+                    "A new production line (five at most)",
+                );
                 l.y += bh + gap;
             }
         }
@@ -662,10 +855,12 @@ fn glyph(buf: &mut [u32], w: usize, h: usize, g: Glyph, r: Rect, c: (u8, u8, u8)
         }
     };
     let arc = |cx: f32, cy: f32, rr: f32, a0: f32, a1: f32| -> Vec<(f32, f32)> {
-        (0..=14).map(|k| {
-            let a = (a0 + (a1 - a0) * k as f32 / 14.0).to_radians();
-            (cx + rr * a.cos(), cy + rr * a.sin())
-        }).collect()
+        (0..=14)
+            .map(|k| {
+                let a = (a0 + (a1 - a0) * k as f32 / 14.0).to_radians();
+                (cx + rr * a.cos(), cy + rr * a.sin())
+            })
+            .collect()
     };
     match g {
         Glyph::Plus => {
@@ -680,7 +875,13 @@ fn glyph(buf: &mut [u32], w: usize, h: usize, g: Glyph, r: Rect, c: (u8, u8, u8)
             poly(&[(0.75, 0.25), (0.25, 0.75)]);
         }
         Glyph::Undo | Glyph::Redo => {
-            let m = |pts: Vec<(f32, f32)>| -> Vec<(f32, f32)> { if g == Glyph::Redo { pts.into_iter().map(|(x, y)| (1.0 - x, y)).collect() } else { pts } };
+            let m = |pts: Vec<(f32, f32)>| -> Vec<(f32, f32)> {
+                if g == Glyph::Redo {
+                    pts.into_iter().map(|(x, y)| (1.0 - x, y)).collect()
+                } else {
+                    pts
+                }
+            };
             poly(&m(arc(0.52, 0.55, 0.26, -90.0, 90.0)));
             poly(&m(vec![(0.52, 0.81), (0.3, 0.81)]));
             poly(&m(vec![(0.52, 0.29), (0.22, 0.29)]));
@@ -797,12 +998,30 @@ mod tests {
     fn ui_and_editor() -> (Ui, Editor) {
         use opensow_formats::level::{Level, Object, HEADER_WORDS};
         use opensow_formats::map::{Cell, Map};
-        let glyph = || Frame { width: 6, height: 9, hot_x: 0, hot_y: 0, extra: [0; 4], pixels: vec![0; 54], mask: vec![true; 54], enhanced: Default::default() };
+        let glyph =
+            || Frame { width: 6, height: 9, hot_x: 0, hot_y: 0, extra: [0; 4], pixels: vec![0; 54], mask: vec![true; 54], enhanced: Default::default() };
         let font = || Font::new((0..94).map(|_| glyph()).collect());
-        let ui = Ui { fonts: (font(), font()), big: (font(), font()), tab: 2, production: false, icons: [Vec::new(), Vec::new(), Vec::new()], slots: Vec::new(), scroll: 0 };
+        let ui = Ui {
+            fonts: (font(), font()),
+            big: (font(), font()),
+            tab: 2,
+            production: false,
+            icons: [Vec::new(), Vec::new(), Vec::new()],
+            slots: Vec::new(),
+            scroll: 0,
+        };
         let mut raw = [0i32; 19];
         (raw[0], raw[1], raw[14], raw[16], raw[17]) = (123, 100, 0, 1, 1);
-        let hq = |owner: i32, x: i32| Object { kind: 100, cell_x: x, cell_y: 1, raw: { let mut r = raw; (r[14], r[16]) = (owner, x); r } };
+        let hq = |owner: i32, x: i32| Object {
+            kind: 100,
+            cell_x: x,
+            cell_y: 1,
+            raw: {
+                let mut r = raw;
+                (r[14], r[16]) = (owner, x);
+                r
+            },
+        };
         let building = |kind: i32, x: i32, p: Production| {
             let mut o = hq(2, x);
             (o.kind, o.raw[1]) = (kind, kind);
@@ -812,7 +1031,8 @@ mod tests {
         let factory = building(102, 10, Production { active: 2, lines: vec![(7, 1), (13, 1), (4, 1), (1, 0), (10, 2)] });
         let mine = building(105, 20, Production { active: 1, lines: vec![(16, 0), (17, 0)] });
         let level = Level { version: 4, header: [0; HEADER_WORDS], objects: vec![hq(0, 1), hq(1, 30), factory, mine], markers: Vec::new() };
-        let cells = (0..40 * 30).map(|i| Cell { x: (i % 40) as u8, y: (i / 40) as u8, blocked: false, border: false, no_build: false, no_marks: false }).collect();
+        let cells =
+            (0..40 * 30).map(|i| Cell { x: (i % 40) as u8, y: (i / 40) as u8, blocked: false, border: false, no_build: false, no_marks: false }).collect();
         let mut ed = Editor::new("Test", level, &[], &Map { a: 0, b: 0, width: 40, height: 30, cells });
         ed.message = "A long message that wraps over more than one line of the narrow panel".into();
         (ui, ed)
@@ -821,7 +1041,12 @@ mod tests {
     fn check(ws: &[Widget], w: usize, h: usize, what: &str) {
         let x0 = (w - panel_width(w, h)) as i32;
         for wd in ws {
-            assert!(wd.r.x >= x0 && wd.r.x + wd.r.w <= w as i32 && wd.r.y >= 0 && wd.r.y + wd.r.h <= h as i32, "{w}x{h} {what}: {:?} {:?} outside the panel", wd.r, wd.hit);
+            assert!(
+                wd.r.x >= x0 && wd.r.x + wd.r.w <= w as i32 && wd.r.y >= 0 && wd.r.y + wd.r.h <= h as i32,
+                "{w}x{h} {what}: {:?} {:?} outside the panel",
+                wd.r,
+                wd.hit
+            );
         }
         let clickable: Vec<&Widget> = ws.iter().filter(|wd| wd.hit.is_some()).collect();
         for (i, a) in clickable.iter().enumerate() {

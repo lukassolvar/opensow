@@ -7,11 +7,14 @@
 use crate::intro::Sound;
 use opensow_formats::{wav, GameDir};
 
+/// The background music: one track at a time, restarted when the output fails.
 pub struct Music {
     sound: Option<Sound>,
+    /// The track that is playing (its file stem), empty when none.
     pub current: String,
     /// The options menu's MUSIC row: switch and volume 0..=100.
     pub on: bool,
+    /// Volume, 0..=100.
     pub volume: i32,
     /// The track asked for, started again when the switch comes back on.
     wanted: String,
@@ -21,6 +24,7 @@ pub struct Music {
 }
 
 impl Music {
+    /// No track, music on, full volume.
     pub fn new() -> Music {
         Music { sound: None, current: String::new(), on: true, volume: 100, wanted: String::new(), game: None, retry_at: None }
     }
@@ -79,6 +83,7 @@ impl Music {
         self.play(&game, &wanted);
     }
 
+    /// Stops the track.
     pub fn stop(&mut self) {
         if let Some(s) = self.sound.take() {
             s.player.stop();
@@ -89,7 +94,7 @@ impl Music {
 
 /// A cheap 0..n pick for track choice (the exe uses its visual random generator; the sequence need not match).
 pub fn pick(n: u32) -> u32 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos() / 1000) % n.max(1)
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_micros()) % n.max(1)
 }
 
 #[cfg(test)]

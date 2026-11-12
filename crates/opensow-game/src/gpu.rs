@@ -35,6 +35,7 @@ fn fs(o: Out) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// The window's GPU presenter: scales the frame into the window and presents it with vsync.
 pub struct Gpu {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -101,18 +102,33 @@ impl Gpu {
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
                     count: None,
                 },
-                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
-        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("present"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
+        let pl =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("present"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("present"),
             layout: Some(&pl),
             vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs"), buffers: &[], compilation_options: Default::default() },
-            fragment: Some(wgpu::FragmentState { module: &shader, entry_point: Some("fs"), targets: &[Some(format.into())], compilation_options: Default::default() }),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs"),
+                targets: &[Some(format.into())],
+                compilation_options: Default::default(),
+            }),
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
@@ -145,7 +161,10 @@ impl Gpu {
         let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("frame"),
             layout: &self.layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }, wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) }],
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+            ],
         });
         self.frame = Some((texture, size, group));
     }
@@ -162,7 +181,10 @@ impl Gpu {
             let texture = &frame.as_ref().unwrap().0;
             // the picture's words are 0x00RRGGBB (bit 24 = the screen mask, landing in the unused alpha byte): BGRA bytes
             enc.copy_buffer_to_texture(
-                wgpu::TexelCopyBufferInfo { buffer: picture, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(stride as u32 * 4), rows_per_image: Some(size.1) } },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: picture,
+                    layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(stride as u32 * 4), rows_per_image: Some(size.1) },
+                },
                 wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
                 wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
             );

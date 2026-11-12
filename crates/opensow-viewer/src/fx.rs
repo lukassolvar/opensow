@@ -28,10 +28,12 @@ pub fn set(soft_shadows: bool, contact: bool, glow: bool, turret_shadows: bool) 
     TURRET_SHADOWS.store(turret_shadows, Ordering::Relaxed);
 }
 
+/// Whether soft shadows are drawn: the switch is on and the world is being drawn enhanced.
 pub fn soft_shadows() -> bool {
     SOFT_SHADOWS.load(Ordering::Relaxed) && upscale::in_world()
 }
 
+/// Whether contact shadows are drawn: the switch is on and the world is being drawn enhanced.
 pub fn contact() -> bool {
     CONTACT.load(Ordering::Relaxed) && upscale::in_world()
 }
@@ -49,6 +51,7 @@ pub fn turret_shadow_offset(sprite_height: u16) -> (i32, i32) {
     ((0.32 * h).round() as i32, -((0.11 * h).round() as i32))
 }
 
+/// Whether the explosion glow is drawn: the switch is on and the world is being drawn enhanced.
 pub fn glow_on() -> bool {
     GLOW.load(Ordering::Relaxed) && upscale::in_world()
 }
@@ -99,7 +102,11 @@ pub fn cover_grid(buf: &mut [u32], w: usize, h: usize, bx: i32, by: i32, bw: usi
 
 /// `(1 - t)^2` for `t` in 0..1 (0 outside): a soft falloff.
 fn falloff(t: f32) -> f32 {
-    if t >= 1.0 { 0.0 } else { (1.0 - t) * (1.0 - t) }
+    if t >= 1.0 {
+        0.0
+    } else {
+        (1.0 - t) * (1.0 - t)
+    }
 }
 
 /// A soft dark ellipse centred on map pixel `(mx, my)` with half-sizes `(rx, ry)` map pixels and peak alpha `peak`.
@@ -248,7 +255,8 @@ mod tests {
     fn soft_shadow_keeps_the_darkness_and_blurs_the_edge() {
         use opensow_formats::sprite::Frame;
         let (w, h) = (60, 60);
-        let frame = Frame { width: 20, height: 20, hot_x: 0, hot_y: 0, extra: [0; 4], pixels: vec![0; 400], mask: vec![true; 400], enhanced: Default::default() };
+        let frame =
+            Frame { width: 20, height: 20, hot_x: 0, hot_y: 0, extra: [0; 4], pixels: vec![0; 400], mask: vec![true; 400], enhanced: Default::default() };
         let view = View { x: 0.0, y: 0.0, zoom: 1.0 };
         let grey = crate::render::pack(200, 200, 200);
         let mut hard = vec![grey; w * h];

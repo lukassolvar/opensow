@@ -20,6 +20,9 @@
 pub fn facing(ax: i32, ay: i32, bx: i32, by: i32, steps: u32) -> u32 {
     let dx = bx.wrapping_sub(ax);
     let dy = ay.wrapping_sub(by);
+    // The pi literal is kept exactly as ported: the emulator checks of this function were made with this value, and
+    // `std::f64::consts::PI` differs from it in the last digits.
+    #[allow(clippy::approx_constant)]
     let t = ((dy.unsigned_abs() as f64) / (dx.unsigned_abs() as f64)).atan() * 180.0 / 3.1415926535;
     let theta = match (dx >= 0, dy >= 0) {
         (true, true) => t,
@@ -32,7 +35,11 @@ pub fn facing(ax: i32, ay: i32, bx: i32, by: i32, steps: u32) -> u32 {
     match steps {
         32 => {
             let s = trunc((theta + 5.625) / 11.25);
-            if (0..32).contains(&s) { (8 - s).rem_euclid(32) as u32 } else { 8 }
+            if (0..32).contains(&s) {
+                (8 - s).rem_euclid(32) as u32
+            } else {
+                8
+            }
         }
         16 => {
             let s = trunc((theta + 11.25) / 22.5);
@@ -44,7 +51,11 @@ pub fn facing(ax: i32, ay: i32, bx: i32, by: i32, steps: u32) -> u32 {
         }
         8 => {
             let s = trunc((theta + 22.5) / 45.0);
-            if (0..=8).contains(&s) { (2 - s).rem_euclid(8) as u32 } else { 2 }
+            if (0..=8).contains(&s) {
+                (2 - s).rem_euclid(8) as u32
+            } else {
+                2
+            }
         }
         _ => 0,
     }
@@ -57,7 +68,17 @@ pub fn turn_step(current: u32, target: u32, steps: u32) -> u32 {
     }
     let (c, t, n) = (current as i32, target as i32, steps as i32);
     let d = (t - c).abs();
-    let step = if d < n - d { if t > c { 1 } else { -1 } } else if t <= c { 1 } else { -1 };
+    let step = if d < n - d {
+        if t > c {
+            1
+        } else {
+            -1
+        }
+    } else if t <= c {
+        1
+    } else {
+        -1
+    };
     let mut next = c + step;
     if next < 0 {
         next = n - 1;
@@ -101,7 +122,7 @@ mod tests {
         assert_eq!(facing(o.0, o.1, 0, -10, 16), 0); // north
         assert_eq!(facing(o.0, o.1, 0, 10, 16), 8); // south
         assert_eq!(facing(o.0, o.1, -10, 0, 16), 12); // west
-        // a hair south of east lands in the sector that the original maps to 5 instead of 4
+                                                      // a hair south of east lands in the sector that the original maps to 5 instead of 4
         assert_eq!(facing(o.0, o.1, 100, 1, 16), 5);
         assert_eq!(facing(o.0, o.1, 100, 1, 32), 8); // the 32-step path handles the same case correctly
         assert_eq!(facing(o.0, o.1, 100, -1, 16), 4);

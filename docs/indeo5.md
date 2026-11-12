@@ -6,6 +6,8 @@ compensation was needed. Every frame is bit-identical to FFmpeg (used as an orac
 venv, never in the repo); the test `indeo5_decodes_the_whole_ma_video_like_the_reference_decoder` decodes all
 frames and pins plane sums of four. Unsupported (returns an error): inter frames, slices, transparency,
 scalable (wavelet) pictures, custom transforms, quantiser inheritance, other quantiser matrices.
+OpenSOW plays `mA` with this decoder (`intro::Anim`, docs/video.md).
+**Differs from the exe:** the exe has Windows' Indeo 5 codec decode the movie through DirectShow; OpenSOW uses `indeo5.rs`. Only the subset that `mA` needs is decoded, so any other Indeo 5 file returns an error.
 
 ## Bitstream (bits read LSB first)
 Frame: `psc(5)=0x1f`, `type(3)` (0 intra), `number(8)`. GOP header: `gop_flags(8)` (bit0 size present), `size(16)` (bytes

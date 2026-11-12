@@ -9,3 +9,14 @@ publish = false
 
 [workspace.dependencies]
 opensow-formats = { path = "crates/opensow-formats" }
+
+# Lints shared by every crate (each crate opts in with `[lints] workspace = true`).
+[workspace.lints.clippy]
+# Decoders and exe ports index several arrays with one loop counter, as the original code does;
+# rewriting those loops as iterator chains makes them harder to compare with the disassembly.
+needless_range_loop = "allow"
+# `chunks_exact(2)` reads better than `as_chunks::<2>().0.iter()` in the byte parsers.
+chunks_exact_to_as_chunks = "allow"
+# Drawing primitives take the frame buffer as `(buf, w, h)` plus their own parameters. Bundling those into a
+# canvas type is a planned refactor; until then the argument-count lint would fire on most of them.
+too_many_arguments = "allow"

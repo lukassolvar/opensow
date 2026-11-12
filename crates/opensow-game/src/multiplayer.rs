@@ -4,22 +4,26 @@
 
 use crate::assets::{load_backdrop, Assets};
 use crate::ui::{self, Image};
-use opensow_formats::lang::{self, LangFile};
+use opensow_formats::lang::LangFile;
 use opensow_formats::level::Level;
 use opensow_formats::sprite::{self, Frame, Kind};
 use opensow_viewer::render::pack;
 
 /// Design resolution; frames are placed relative to its centre (top-left = centre - hotspot).
 pub const W: usize = 640;
+/// Height of the design space.
 pub const H: usize = 480;
 
 /// The session name the host creates (`0x44e500`, string at `0x48fc44`) and the two player names (`0x48fc78`, `0x48fc98`).
 pub const SESSION_NAME: &str = "State of War session";
+/// The host's player name.
 pub const HOST_NAME: &str = "Player1";
+/// The guest's player name.
 pub const GUEST_NAME: &str = "Player2";
 
 /// The DirectPlay service providers a Windows install lists (names as DirectPlay 4 reports them); the stub offers these.
-pub const STUB_CONNECTIONS: [&str; 4] = ["Internet TCP/IP Connection For DirectPlay", "IPX Connection For DirectPlay", "Modem Connection For DirectPlay", "Serial Connection For DirectPlay"];
+pub const STUB_CONNECTIONS: [&str; 4] =
+    ["Internet TCP/IP Connection For DirectPlay", "IPX Connection For DirectPlay", "Modem Connection For DirectPlay", "Serial Connection For DirectPlay"];
 
 /// Which connection the exe picks by itself (`0x44f270`): the first whose name is longer than 35 characters and has `TCP/I` at
 /// characters 9..14; none matching gives 0.
@@ -34,14 +38,19 @@ pub const AIR_ROWS: [&str; 5] = ["Fighter", "Bomber", "Tripler", "Carryall", "As
 const ROW_GROUP: [usize; 5] = [4, 0, 3, 2, 1];
 /// The carryall's group in the level header (`air::HEADER_ORDER`: bomber, asteroid, carryall, tripler, fighter).
 const CARRYALL_GROUP: usize = 2;
+/// Most aircraft of one kind a side can start with.
 pub const MAX_AIR: i32 = 20;
+/// Most starting credits.
 pub const MAX_CREDITS: i32 = 19000;
+/// Most starting research points.
 pub const MAX_RESEARCH: i32 = 2000;
 
 /// What one side brings to the match (the exe keeps both in the table at `0x71cac0`, 4 bytes per side per field).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SideSetup {
+    /// Starting credits.
     pub credits: i32,
+    /// Starting research points.
     pub research: i32,
     /// Starting air forces in [`AIR_ROWS`] order.
     pub air: [i32; 5],
@@ -50,6 +59,7 @@ pub struct SideSetup {
 }
 
 impl SideSetup {
+    /// An empty setup: nothing, with every turret allowed.
     pub fn new() -> SideSetup {
         SideSetup { credits: 0, research: 0, air: [0; 5], turrets: [true; 5] }
     }
@@ -62,8 +72,9 @@ impl Default for SideSetup {
 }
 
 /// Both sides' values; the defaults come from the selected map (`0x41c440` fills them from the `.net` header).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Setup {
+    /// Blue's and green's setup.
     pub sides: [SideSetup; 2],
 }
 
@@ -86,16 +97,24 @@ impl Setup {
     /// The default of a skirmish: [`Setup::from_level`], and the turret tiers the map's own header allows (First Spark offers tiers 1 and 2
     /// only; the sim reads those bytes, `World::from_level`) instead of the lobby's all-available assumption.
     pub fn skirmish_default(level: &Level) -> Setup {
+        let mut s = Setup::of_map(level);
+        for side in 0..2 {
+            // skirmishes start without carryalls (a map's own stock, e.g. 3 each on Ice Blizzard, let the computer drop
+            // squads into the player's base at once); air bases still build them and the lobby can add some
+            if let Some(row) = ROW_GROUP.iter().position(|&g| g == CARRYALL_GROUP) {
+                s.sides[side].air[row] = 0;
+            }
+        }
+        s
+    }
+
+    /// [`Setup::from_level`] with the turret tiers the map's header allows: a custom map's setup as its maker left it.
+    pub fn of_map(level: &Level) -> Setup {
         let mut s = Setup::from_level(level);
         for side in 0..2 {
             for t in 0..5 {
                 let b = 84 + 10 * side + t;
                 s.sides[side].turrets[t] = (level.header[b / 4 + 2] >> (8 * (b % 4))) & 0xff != 0;
-            }
-            // skirmishes start without carryalls (a map's own stock, e.g. 3 each on Ice Blizzard, let the computer drop
-            // squads into the player's base at once); air bases still build them and the lobby can add some
-            if let Some(row) = ROW_GROUP.iter().position(|&g| g == CARRYALL_GROUP) {
-                s.sides[side].air[row] = 0;
             }
         }
         s
@@ -157,6 +176,7 @@ impl Setup {
     }
 }
 
+/// The pages of the multiplayer menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     /// Which kind of connection (only visible when no TCP/IP provider exists, see [`preferred_connection`]).
@@ -166,6 +186,7 @@ pub enum Page {
     Lobby,
 }
 
+/// What the pointer is over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
     Continue,
@@ -183,16 +204,23 @@ pub enum Hit {
     Connection(usize),
 }
 
+/// What a click asks the game to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     None,
     /// Back to the main menu (state `0x1c`).
     Leave,
     /// ACCEPT by the host: both machines start `map` (the original sends the setup with the start flag and calls state 7).
-    Start { map: String, local: usize, setup: Setup },
+    Start {
+        map: String,
+        local: usize,
+        setup: Setup,
+    },
 }
 
+/// The multiplayer menu: connection, session list, lobby with the map and both sides' setup, and the chat.
 pub struct NetMenu {
+    /// The page shown.
     pub page: Page,
     connections: Vec<String>,
     /// Selected connection (`[+0x10]`), -1 when none.
@@ -202,11 +230,15 @@ pub struct NetMenu {
     sess_sel: i32,
     /// Level names (`data\levels\*.net` without the extension).
     pub maps: Vec<String>,
+    /// Index of the chosen map in `maps`.
     pub map: usize,
+    /// Both sides' starting values.
     pub setup: Setup,
     /// This machine's side: 0 blue (host), 1 green.
     pub local: usize,
+    /// The chat lines.
     pub chat: Vec<String>,
+    /// The chat line being typed.
     pub input: String,
     /// Another player is in the session.
     pub peer: bool,
@@ -245,17 +277,25 @@ pub fn display_names(maps: &[String], game: &opensow_formats::GameDir) -> Vec<St
             }
             next += 1;
             let title = m.split_once('-').map_or(m.as_str(), |(_, t)| t);
-            let title: Vec<String> = title.split_whitespace().map(|w| {
-                let mut c = w.chars();
-                c.next().map_or(String::new(), |f| f.to_uppercase().chain(c).collect())
-            }).collect();
+            let title: Vec<String> = title
+                .split_whitespace()
+                .map(|w| {
+                    let mut c = w.chars();
+                    c.next().map_or(String::new(), |f| f.to_uppercase().chain(c).collect())
+                })
+                .collect();
             format!("{next:02}-{}", title.join(" "))
         })
         .collect()
 }
 
 fn load(assets: &Assets, name: &str) -> Vec<Frame> {
-    assets.game.resolve(&format!("Data\\Sprites2\\Menu\\{name}.tsp")).and_then(|p| std::fs::read(p).ok()).and_then(|d| sprite::parse(&d, Kind::Color).ok()).unwrap_or_default()
+    assets
+        .game
+        .resolve(&format!("Data\\Sprites2\\Menu\\{name}.tsp"))
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|d| sprite::parse(&d, Kind::Color).ok())
+        .unwrap_or_default()
 }
 
 fn fit(w: usize, h: usize) -> (f32, f32, f32) {
@@ -294,9 +334,15 @@ impl NetMenu {
         NetMenu::with_connections(assets, names)
     }
 
+    /// Builds the menu with the given list of connection kinds.
     pub fn with_connections(assets: &mut Assets, connections: Vec<String>) -> NetMenu {
         let language = assets.game.language();
-        let strings = assets.game.resolve(&format!("Data\\Language\\{}", language.file_name())).and_then(|p| std::fs::read(p).ok()).and_then(|d| LangFile::parse(&d).ok()).map(|f| f.with_supplement(language));
+        let strings = assets
+            .game
+            .resolve(&format!("Data\\Language\\{}", language.file_name()))
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|d| LangFile::parse(&d).ok())
+            .map(|f| f.with_supplement(language));
         let mut maps: Vec<String> = assets
             .game
             .level_files()
@@ -386,7 +432,9 @@ impl NetMenu {
             return;
         }
         self.map = i;
-        if let Some(level) = self.game.resolve(&format!("Data\\Levels\\{}.net", self.maps[i])).and_then(|p| std::fs::read(p).ok()).and_then(|d| Level::parse(&d).ok()) {
+        if let Some(level) =
+            self.game.resolve(&format!("Data\\Levels\\{}.net", self.maps[i])).and_then(|p| std::fs::read(p).ok()).and_then(|d| Level::parse(&d).ok())
+        {
             self.setup = Setup::from_level(&level);
         }
     }
@@ -399,6 +447,7 @@ impl NetMenu {
         self.sounds.push(29);
     }
 
+    /// The other player left the session.
     #[allow(dead_code)]
     pub fn peer_left(&mut self) {
         self.peer = false;
@@ -407,12 +456,14 @@ impl NetMenu {
         self.sounds.push(29);
     }
 
+    /// A typed character goes into the chat line (lobby only).
     pub fn typed(&mut self, c: char) {
         if self.page == Page::Lobby && !c.is_control() && self.input.len() < 60 {
             self.input.push(c);
         }
     }
 
+    /// Removes the last character of the chat line.
     pub fn backspace(&mut self) {
         self.input.pop();
     }
@@ -522,6 +573,7 @@ impl NetMenu {
         }
     }
 
+    /// Updates what the pointer is over.
     pub fn mouse_moved(&mut self, x: i32, y: i32, w: usize, h: usize) {
         let (ox, oy, s) = fit(w, h);
         self.cursor = (((x as f32 - ox) / s) as i32, ((y as f32 - oy) / s) as i32);
@@ -532,11 +584,13 @@ impl NetMenu {
         self.hover = hover;
     }
 
+    /// What the pointer is over.
     #[allow(dead_code)]
     pub fn hovered(&self) -> Option<Hit> {
         self.hover
     }
 
+    /// A click at a window position.
     pub fn click(&mut self, x: i32, y: i32, w: usize, h: usize) -> Event {
         let (ox, oy, s) = fit(w, h);
         let p = (((x as f32 - ox) / s) as i32, ((y as f32 - oy) / s) as i32);
@@ -810,6 +864,7 @@ impl NetMenu {
         }
     }
 
+    /// Draws the menu scaled into the `w` x `h` frame buffer.
     pub fn draw(&mut self, buf: &mut [u32], w: usize, h: usize) {
         opensow_viewer::record::cpu(|| self.render());
         crate::ui::clear(buf, w, h, 0);

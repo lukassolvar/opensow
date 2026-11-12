@@ -14,73 +14,105 @@ pub const FRAME_RATES: [f64; 9] = [0.0, 23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 5
 /// Picture coding types by the 3-bit field.
 pub const PICTURE_TYPES: [&str; 5] = ["?", "I", "P", "B", "D"];
 
+/// What the first audio frame header of an MPEG stream says.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct MpegAudio {
+    /// MPEG audio layer (1, 2 or 3).
     pub layer: u8,
+    /// Bit rate in kbit/s.
     pub bitrate_kbps: u32,
+    /// Samples per second.
     pub sample_rate: u32,
+    /// Number of channels.
     pub channels: u8,
 }
 
+/// Summary of an MPEG-1 system stream (the `.sgv` movies M01-M22, mI, mO), gathered by walking its packs.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Mpeg {
+    /// Number of packs.
     pub packs: u32,
+    /// Number of video packets.
     pub video_packets: u32,
+    /// Number of audio packets.
     pub audio_packets: u32,
+    /// Number of padding packets.
     pub padding_packets: u32,
+    /// Number of packets of any other stream.
     pub other_packets: u32,
+    /// Picture width in pixels.
     pub width: u16,
+    /// Picture height in pixels.
     pub height: u16,
+    /// Index into [`FRAME_RATES`].
     pub frame_rate_code: u8,
     /// Video bit rate in bits per second (0x3ffff = variable).
     pub bit_rate: Option<u32>,
     /// Mux rate in bytes per second (50 per unit).
     pub mux_rate: u32,
+    /// Number of groups of pictures.
     pub gops: u32,
     /// Pictures by type I, P, B, D.
     pub pictures: [u32; 4],
+    /// The audio stream, when the movie has one.
     pub audio: Option<MpegAudio>,
     /// System clock reference of the last pack, seconds (90 kHz clock).
     pub duration: f64,
 }
 
 impl Mpeg {
+    /// Frames per second, 0 for an unknown code.
     pub fn frame_rate(&self) -> f64 {
         FRAME_RATES.get(self.frame_rate_code as usize).copied().unwrap_or(0.0)
     }
 }
 
+/// One stream of an AVI file.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AviStream {
     /// `vids` or `auds`.
     pub kind: [u8; 4],
     /// Codec fourcc (video) or format tag as text (audio).
     pub handler: [u8; 4],
+    /// Time scale: `rate / scale` is frames (or samples) per second.
     pub scale: u32,
+    /// Rate, see `scale`.
     pub rate: u32,
+    /// Length of the stream in `scale / rate` units.
     pub length: u32,
     /// Video: width, height, bit count; audio: channels, sample rate, bits.
     pub format: [u32; 3],
+    /// Number of data chunks of this stream.
     pub chunks: u32,
     /// The stream format chunk as stored (BITMAPINFO with its palette, or WAVEFORMAT).
     pub strf: Vec<u8>,
 }
 
+/// Summary of an AVI file (the `.sgv` movies mA and mB).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Avi {
+    /// Microseconds per frame, from the main header.
     pub micros_per_frame: u32,
+    /// Total number of frames.
     pub frames: u32,
+    /// Picture width in pixels.
     pub width: u32,
+    /// Picture height in pixels.
     pub height: u32,
+    /// The streams, in file order.
     pub streams: Vec<AviStream>,
 }
 
+/// A parsed `.sgv` movie: MPEG-1 or AVI, told apart by the first four bytes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Video {
+    /// An MPEG-1 system stream.
     Mpeg(Mpeg),
+    /// An AVI file.
     Avi(Avi),
 }
 
+/// Walks a `.sgv` file and summarises it.
 pub fn parse(data: &[u8]) -> Result<Video> {
     match data.get(..4) {
         Some([0, 0, 1, 0xba]) => parse_mpeg(data).map(Video::Mpeg),
@@ -91,11 +123,7 @@ pub fn parse(data: &[u8]) -> Result<Video> {
 
 fn scr(b: &[u8]) -> Option<f64> {
     // 0010 xxx1 xxxxxxxx xxxxxxx1 xxxxxxxx xxxxxxx1 (33 bits at 90 kHz)
-    let v = (((b[0] >> 1) & 7) as u64) << 30
-        | (b[1] as u64) << 22
-        | ((b[2] >> 1) as u64) << 15
-        | (b[3] as u64) << 7
-        | (b[4] >> 1) as u64;
+    let v = (((b[0] >> 1) & 7) as u64) << 30 | (b[1] as u64) << 22 | ((b[2] >> 1) as u64) << 15 | (b[3] as u64) << 7 | (b[4] >> 1) as u64;
     (b[0] & 0xf0 == 0x20).then_some(v as f64 / 90_000.0)
 }
 
@@ -356,7 +384,7 @@ fn walk_riff(r: &mut Reader, end: usize, a: &mut Avi) -> Result<()> {
                         let rate = r.u32("rate")?;
                         r.bytes(6, "align")?;
                         let bits = r.u16("bits")? as u32;
-                        s.handler = (tag as u32).to_le_bytes();
+                        s.handler = tag.to_le_bytes();
                         s.format = [ch, rate, bits];
                     }
                 }

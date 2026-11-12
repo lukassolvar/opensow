@@ -19,7 +19,9 @@ pub struct Anim {
     clock: f64,
     /// Index of the frame in `rgb`, if any.
     index: Option<usize>,
+    /// Picture width in pixels.
     pub width: usize,
+    /// Picture height in pixels.
     pub height: usize,
     rgb: Vec<u32>,
     /// Play once and stop at the last frame instead of looping.
@@ -31,11 +33,13 @@ pub struct Anim {
 }
 
 impl Anim {
+    /// Opens the AVI movie `name` of the install's levels folder.
     pub fn open(game: &GameDir, name: &str) -> Result<Anim, String> {
         let file = game.resolve(&format!("data\\levels\\{name}.sgv")).ok_or_else(|| format!("{name}.sgv not found"))?;
         Anim::from_bytes(std::fs::read(file).map_err(|e| e.to_string())?)
     }
 
+    /// Opens an AVI movie from the bytes of its file.
     pub fn from_bytes(data: Vec<u8>) -> Result<Anim, String> {
         let video::Video::Avi(avi) = video::parse(&data).map_err(|e| e.to_string())? else { return Err("not an AVI".into()) };
         let s = avi.streams.first().ok_or("no video stream")?;
@@ -51,7 +55,22 @@ impl Anim {
             let pcm: Vec<f32> = video::avi_chunks(&data, 1).ok()?.concat().chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0).collect();
             Some((a.format[0] as u16, a.format[1], pcm))
         });
-        let mut a = Anim { data, indeo, dec, chunks, fps: 1e6 / avi.micros_per_frame as f64, clock: 0.0, index: None, width, height, rgb: vec![0; width * height], once: false, ended: false, audio, sound: None };
+        let mut a = Anim {
+            data,
+            indeo,
+            dec,
+            chunks,
+            fps: 1e6 / avi.micros_per_frame as f64,
+            clock: 0.0,
+            index: None,
+            width,
+            height,
+            rgb: vec![0; width * height],
+            once: false,
+            ended: false,
+            audio,
+            sound: None,
+        };
         a.show(0)?;
         Ok(a)
     }
@@ -69,6 +88,7 @@ impl Anim {
         self.ended
     }
 
+    /// Advances the movie's clock by `dt` seconds and decodes the frame that is due.
     pub fn update(&mut self, dt: f64) {
         self.clock += dt;
         let mut want = (self.clock * self.fps) as usize;
@@ -160,14 +180,17 @@ pub fn open_output(on_error: impl Fn() + Clone + Send + 'static) -> Result<rodio
     Err(last.expect("at least one attempt"))
 }
 
+/// A movie's sound output.
 pub struct Sound {
     _device: rodio::MixerDeviceSink,
+    /// The player the soundtrack is queued on.
     pub player: rodio::Player,
     /// Set when the output stream reported an error (the device was unplugged or switched, the system slept...): rodio's player then
     /// goes on "playing" into a dead stream, so the owner has to open a new one (`Music::tick`).
     pub failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// A movie being played: an MPEG-1 `.sgv` with its soundtrack.
 pub struct Intro {
     /// File stem, e.g. `mI`, `mO` or `M01`.
     pub name: String,
@@ -202,6 +225,7 @@ impl Intro {
         Ok(intro)
     }
 
+    /// Opens a movie from the bytes of its file (no sound).
     pub fn from_bytes(data: &[u8]) -> Result<Intro, String> {
         let es = video::video_stream(data).map_err(|e| e.to_string())?;
         let mut stream = mpeg1::Stream::owned(es);
@@ -223,6 +247,7 @@ impl Intro {
         self.sound.is_some()
     }
 
+    /// Whether the movie has played to its end.
     pub fn finished(&self) -> bool {
         self.ended
     }

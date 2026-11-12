@@ -1,5 +1,7 @@
 # Art export / import (upscaling workflow)
 
+Not in the exe: an OpenSOW tool for local experiments (nothing runs unless you call it).
+
 `opensow export <dir>` writes ONE flat directory with every colour sprite frame (`.ps6`/`.tsp`, RGBA PNG, e.g.
 `units__1a_blue__0008.png`), every background (`.srf` -> JPG, e.g. `levels__m01.jpg`) and `manifest.csv`
 (file, frame, size, hotspot, `targets`). `targets` lists every place the identical file lives
@@ -17,8 +19,9 @@ so one edit is written to all copies. Not exported: shadows/masks (`.sha`, `.msk
   Nothing touches the installation; back it up and copy the overlay over it.
 
 Verified (tests/real_data.rs): `sprite::encode` and `megafile::build` reproduce every installed sprite file and the
-archive byte for byte; `srf::from_jpeg(to_jpeg(x))` reproduces every `.srf`/`.srfa`; an untouched export imports as
-"0 files changed".
+archive byte for byte (`sprite_encoder_and_archive_builder_reproduce_the_install`); `srf::from_jpeg(to_jpeg(x))`
+reproduces every `.srf`/`.srfa` (`srf_wrapper_reproduces_the_install`). Checked by hand, no test: an untouched export
+imports as "0 files changed".
 
 NOT verified: that the original game accepts other frame/background sizes. It lays things out from the original
 sizes (e.g. bg SRF size == map cells*32), so upscaled art needs engine support (draw scale) - OpenSOW's own

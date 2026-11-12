@@ -19,12 +19,18 @@
 //! (pixel = 32 per cell). The exe's loader (`0x41da00`) spawns each marker as a unit at `(x>>5, y>>5)`.
 
 use crate::air::{AirStock, HEADER_ORDER};
+use crate::kinds;
 use crate::{Error, Reader, Result};
 
+/// Magic number in the upper half of header word 0.
 pub const MAGIC: u16 = 9870;
+/// First word of every object record.
 pub const OBJECT_TAG: i32 = 123;
+/// First word of every unit marker record.
 pub const MARKER_TAG: i32 = 224;
+/// The word that ends the file.
 pub const FOOTER: u32 = 7656;
+/// Number of 32-bit words in the header.
 pub const HEADER_WORDS: usize = 94;
 
 /// What an [`Object`] is, from its kind number.
@@ -39,35 +45,47 @@ pub const HEADER_WORDS: usize = 94;
 pub enum ObjectKind {
     /// Kinds 25..=29 = `tur_01`..`tur_05` (HP 900/1250/1540/2100/2600); `1..=5`.
     Turret(u8),
+    /// Kind 100.
     Headquarters,
+    /// Kind 101.
     LightFactory,
+    /// Kind 102.
     MediumFactory,
+    /// Kind 103.
     HeavyFactory,
+    /// Kind 104.
     AirBase,
+    /// Kind 105.
     GoldMine,
+    /// Kind 106.
     ResearchLab,
+    /// Kind 107, the windtrap (`Wind` in the exe's name table).
     Wind,
+    /// Kind 108.
     WalkerFactory,
+    /// Any other kind number, kept as read.
     Unknown(i32),
 }
 
 impl ObjectKind {
+    /// The kind an object's kind number (object word 1) stands for.
     pub fn from_id(id: i32) -> ObjectKind {
         match id {
             25..=29 => ObjectKind::Turret((id - 24) as u8),
-            100 => ObjectKind::Headquarters,
-            101 => ObjectKind::LightFactory,
-            102 => ObjectKind::MediumFactory,
-            103 => ObjectKind::HeavyFactory,
-            104 => ObjectKind::AirBase,
-            105 => ObjectKind::GoldMine,
-            106 => ObjectKind::ResearchLab,
-            107 => ObjectKind::Wind,
-            108 => ObjectKind::WalkerFactory,
+            kinds::HEADQUARTERS => ObjectKind::Headquarters,
+            kinds::LIGHT_FACTORY => ObjectKind::LightFactory,
+            kinds::MEDIUM_FACTORY => ObjectKind::MediumFactory,
+            kinds::HEAVY_FACTORY => ObjectKind::HeavyFactory,
+            kinds::AIR_BASE => ObjectKind::AirBase,
+            kinds::GOLD_MINE => ObjectKind::GoldMine,
+            kinds::RESEARCH_LAB => ObjectKind::ResearchLab,
+            kinds::WINDTRAP => ObjectKind::Wind,
+            kinds::WALKER_FACTORY => ObjectKind::WalkerFactory,
             other => ObjectKind::Unknown(other),
         }
     }
 
+    /// Whether this is one of the nine buildings (not a turret, not an unknown kind).
     pub fn is_building(self) -> bool {
         !matches!(self, ObjectKind::Turret(_) | ObjectKind::Unknown(_))
     }
@@ -77,6 +95,7 @@ impl ObjectKind {
         matches!(self, ObjectKind::LightFactory | ObjectKind::MediumFactory | ObjectKind::HeavyFactory | ObjectKind::WalkerFactory)
     }
 
+    /// English name for listings and the viewer.
     pub fn name(self) -> String {
         match self {
             ObjectKind::Turret(n) => format!("Turret {n}"),
@@ -99,25 +118,36 @@ impl ObjectKind {
 /// the one the briefing says to seize) has 2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Owner {
+    /// Owner 0: the first player (blue).
     Player,
+    /// Owner 1: the second player (green).
     Enemy,
+    /// Owner 2: nobody; such a building can be captured by either side.
     Neutral,
+    /// Any other owner number, kept as read.
     Unknown(i32),
 }
 
+/// A building or turret placed on the map (an object record of the level file).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Object {
+    /// Kind number (object word 1), see [`ObjectKind`] and [`crate::kinds`].
     pub kind: i32,
+    /// Cell column of the object (object word 16).
     pub cell_x: i32,
+    /// Cell row of the object (object word 17).
     pub cell_y: i32,
+    /// All 19 words of the record as stored, including the ones above.
     pub raw: [i32; 19],
 }
 
 impl Object {
+    /// The object's kind as an enum.
     pub fn object_kind(&self) -> ObjectKind {
         ObjectKind::from_id(self.kind)
     }
 
+    /// The object's owner (object word 14).
     pub fn owner(&self) -> Owner {
         match self.raw[14] {
             0 => Owner::Player,
@@ -146,7 +176,7 @@ impl Object {
 /// Marker kind of the Advancer (always 2 per two-player map, 4 on "Cross of Fire").
 /// Confirmed from the manual ("two Headquarters and two Advancers" per side on that map) and from the
 /// exe: the loader skips kind 40 when a per-player flag is set, and the unit constructor gives it 800 HP.
-pub const MARKER_ADVANCER: i32 = 40;
+pub const MARKER_ADVANCER: i32 = crate::kinds::ADVANCER;
 
 /// What a [`Marker`] spawns. Decoded from the exe's script loader (`0x41da00`, which calls the unit
 /// constructor `0x46bd30` with `(cell_x, cell_y, player, kind)`) and its per-kind tables.
@@ -155,7 +185,12 @@ pub enum UnitKind {
     /// Kinds 1..=15: five classes of three tiers. `class = (kind-1)/3` (0..5), `tier = (kind-1)%3 + 1`.
     /// Classes in order: anti-air, artillery, cannon, flamer, special (see [`crate::units`]);
     /// levels place only tier 1 and 2 markers.
-    Ground { class: u8, tier: u8 },
+    Ground {
+        /// Weapon class, 0..5: anti-air, artillery, cannon, flamer, special.
+        class: u8,
+        /// Tier, 1..=3.
+        tier: u8,
+    },
     /// Kind 40: "the most important unit in the game" (manual): repairs/destroys turrets and captures buildings.
     Advancer,
     /// Kinds 41..=45 are the five walker robots (`5W1`..`5W5` tops on the `chW` legs); 46 is a bare `chN`
@@ -163,14 +198,16 @@ pub enum UnitKind {
     Special(u8),
     /// Kinds 109..=113 exist in the exe but the script loader never spawns them (walkers/specials created at runtime).
     RuntimeOnly(i32),
+    /// Any other kind number, kept as read.
     Unknown(i32),
 }
 
 impl UnitKind {
+    /// The kind a unit's kind number stands for.
     pub fn from_id(id: i32) -> UnitKind {
         match id {
             1..=15 => UnitKind::Ground { class: ((id - 1) / 3) as u8, tier: ((id - 1) % 3 + 1) as u8 },
-            40 => UnitKind::Advancer,
+            kinds::ADVANCER => UnitKind::Advancer,
             41..=46 => UnitKind::Special(id as u8),
             109..=113 => UnitKind::RuntimeOnly(id),
             other => UnitKind::Unknown(other),
@@ -192,6 +229,7 @@ impl UnitKind {
         }
     }
 
+    /// English name for listings and the viewer.
     pub fn name(self) -> String {
         match self {
             UnitKind::Ground { class, tier } => format!("Ground unit class {class} tier {tier}"),
@@ -203,20 +241,26 @@ impl UnitKind {
     }
 }
 
+/// A unit placed on the map (a marker record of the level file); the loader spawns it when the level starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Marker {
+    /// Unit kind number (marker word 1), see [`UnitKind`].
     pub kind: i32,
     /// Player index passed to the unit constructor (0 = first player/blue, 1 = second/green).
     pub player: i32,
+    /// Horizontal position in pixels (32 per cell).
     pub x: i32,
+    /// Vertical position in pixels (32 per cell).
     pub y: i32,
 }
 
 impl Marker {
+    /// The marker's unit kind as an enum.
     pub fn unit_kind(&self) -> UnitKind {
         UnitKind::from_id(self.kind)
     }
 
+    /// Whether this marker spawns an Advancer.
     pub fn is_advancer(&self) -> bool {
         self.kind == MARKER_ADVANCER
     }
@@ -227,12 +271,16 @@ impl Marker {
     }
 }
 
+/// A parsed level file (`.edt` campaign mission or `.net` multiplayer map): header, objects and unit markers.
 #[derive(Debug, Clone)]
 pub struct Level {
+    /// File format version, the lower half of header word 0.
     pub version: u16,
     /// Header words; word 0 packs `version | magic << 16`.
     pub header: [i32; HEADER_WORDS],
+    /// The buildings and turrets, in file order.
     pub objects: Vec<Object>,
+    /// The units to spawn, in file order.
     pub markers: Vec<Marker>,
 }
 
@@ -256,7 +304,19 @@ impl Level {
         std::array::from_fn(|g| AirStock { force: HEADER_ORDER[g], counts: [self.header[5 + 3 * g], self.header[6 + 3 * g], self.header[4 + 3 * g]] })
     }
 
+    /// A level file exactly: nothing may follow the footer.
     pub fn parse(data: &[u8]) -> Result<Level> {
+        let (level, used) = Level::parse_prefix(data)?;
+        if used != data.len() {
+            return Err(Error::Invalid(format!("level tail: {} bytes after the footer", data.len() - used)));
+        }
+        Ok(level)
+    }
+
+    /// The level at the start of `data` and how many bytes it took. The exe's loader (`0x41da00`, an MFC `CArchive` read) stops at
+    /// the footer tag `0x1de8` and never reads further, so bytes after it are ignored by the original: custom maps keep the
+    /// port's own data there (`custommap.rs`).
+    pub fn parse_prefix(data: &[u8]) -> Result<(Level, usize)> {
         let mut r = Reader::new(data);
         let version = r.u16("level version")?;
         let magic = r.u16("level magic")?;
@@ -283,14 +343,31 @@ impl Level {
             markers.push(Marker { kind: w[1], player: w[2], x: w[3], y: w[4] });
         }
         let footer = r.u32("level footer")?;
-        if footer != FOOTER || r.remaining() != 0 {
-            return Err(Error::Invalid(format!(
-                "level tail: footer {footer}, {} bytes left (record layout mismatch at {:#x})",
-                r.remaining(),
-                r.pos()
-            )));
+        if footer != FOOTER {
+            return Err(Error::Invalid(format!("level tail: footer {footer}, {} bytes left (record layout mismatch at {:#x})", r.remaining(), r.pos())));
         }
-        Ok(Level { version, header, objects, markers })
+        Ok((Level { version, header, objects, markers }, r.pos()))
+    }
+
+    /// The level file: the inverse of [`Level::parse`] (byte-identical for every shipped `.edt` / `.net`, `tests/real_data.rs`).
+    /// Object records are written from `raw` with the tag, kind and cell taken from the fields.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut d = Vec::with_capacity(HEADER_WORDS * 4 + self.objects.len() * 76 + self.markers.len() * 20 + 4);
+        d.extend(self.version.to_le_bytes());
+        d.extend(MAGIC.to_le_bytes());
+        for w in &self.header[1..] {
+            d.extend(w.to_le_bytes());
+        }
+        for o in &self.objects {
+            let mut raw = o.raw;
+            (raw[0], raw[1], raw[16], raw[17]) = (OBJECT_TAG, o.kind, o.cell_x, o.cell_y);
+            d.extend(raw.iter().flat_map(|v| v.to_le_bytes()));
+        }
+        for m in &self.markers {
+            d.extend([MARKER_TAG, m.kind, m.player, m.x, m.y].iter().flat_map(|v| v.to_le_bytes()));
+        }
+        d.extend(FOOTER.to_le_bytes());
+        d
     }
 }
 
@@ -359,6 +436,17 @@ mod tests {
         assert_eq!(UnitKind::max_hp(100), None);
         let m = Marker { kind: 40, player: 0, x: 1872, y: 1776 };
         assert_eq!((m.cell(), m.is_advancer()), ((58, 55), true));
+    }
+
+    #[test]
+    fn writes_what_it_reads_and_keeps_a_tail_apart() {
+        let d = sample();
+        assert_eq!(Level::parse(&d).unwrap().to_bytes(), d);
+        let mut tailed = d.clone();
+        tailed.extend(b"OSOW tail");
+        assert!(Level::parse(&tailed).is_err(), "a plain level ends at its footer");
+        let (l, used) = Level::parse_prefix(&tailed).unwrap();
+        assert_eq!((used, l.objects.len()), (d.len(), 1));
     }
 
     #[test]

@@ -2,20 +2,25 @@
 
 use crate::{Error, Reader, Result};
 
+/// A decoded `.wav` file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Wav {
+    /// Number of channels.
     pub channels: u16,
+    /// Samples per second.
     pub sample_rate: u32,
     /// Interleaved 16-bit samples.
     pub pcm: Vec<i16>,
 }
 
 impl Wav {
+    /// Length of the sound in seconds.
     pub fn seconds(&self) -> f64 {
         self.pcm.len() as f64 / (self.channels.max(1) as f64 * self.sample_rate.max(1) as f64)
     }
 }
 
+/// Parses a 16-bit PCM `.wav` file.
 pub fn parse(data: &[u8]) -> Result<Wav> {
     let mut r = Reader::new(data);
     if r.bytes(4, "RIFF")? != b"RIFF" {

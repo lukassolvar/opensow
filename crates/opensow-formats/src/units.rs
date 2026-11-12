@@ -7,12 +7,15 @@
 //!   `[1AA 1A 1C 1F 1S, 2AA .. 2S, 3AA .. 3S, 1I, tur_01 tur_02 tur_03 tur_05, 5W1 .. 5W5]`
 //!   (draw code at `0x479a80`: sprite = `top[idx*150 + frame]`).
 
+use crate::kinds;
 use crate::level::UnitKind;
 
+/// Chassis sprite names, indexed by the exe's chassis type `[obj+0x1c]`.
 pub const CHASSIS: [&str; 6] = ["chA", "chB", "chC", "chI1", "chW", "chN"];
+/// Weapon top sprite names, indexed by the exe's top index `[obj+0x54]`.
 pub const TOPS: [&str; 25] = [
-    "1AA", "1A", "1C", "1F", "1S", "2AA", "2A", "2C", "2F", "2S", "3AA", "3A", "3C", "3F", "3S", "1I", "tur_01", "tur_02", "tur_03",
-    "tur_05", "5W1", "5W2", "5W3", "5W4", "5W5",
+    "1AA", "1A", "1C", "1F", "1S", "2AA", "2A", "2C", "2F", "2S", "3AA", "3A", "3C", "3F", "3S", "1I", "tur_01", "tur_02", "tur_03", "tur_05", "5W1", "5W2",
+    "5W3", "5W4", "5W5",
 ];
 
 /// Weapon classes of ground units, in kind order (kinds 1-3 = AA, 4-6 = A, ...).
@@ -22,8 +25,10 @@ pub const CLASSES: [&str; 5] = ["Anti-air", "Artillery", "Cannon", "Flamer", "Sp
 /// (An earlier version of this table gave kind 6 the light chassis; that came from a case that was read past its end.)
 const GROUND_CHASSIS: [u8; 15] = [0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2];
 
+/// The sprite names a unit kind is drawn with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnitArt {
+    /// The chassis sprite's name.
     pub chassis: &'static str,
     /// `None` for kind 46, which is a bare chassis (`chN`, a round hazard-marked pod).
     pub top: Option<&'static str>,
@@ -36,9 +41,9 @@ pub fn unit_art(kind: i32) -> Option<UnitArt> {
             let (class, tier) = (((kind - 1) / 3) as usize, ((kind - 1) % 3) as usize);
             (GROUND_CHASSIS[(kind - 1) as usize] as usize, Some(tier * 5 + class))
         }
-        40 => (3, Some(15)),
+        kinds::ADVANCER => (3, Some(15)),
         41..=45 => (4, Some(20 + (kind - 41) as usize)),
-        46 => (5, None),
+        kinds::POD => (5, None),
         _ => return None,
     };
     Some(UnitArt { chassis: CHASSIS[chassis], top: top.map(|t| TOPS[t]) })
@@ -49,7 +54,9 @@ pub fn unit_art(kind: i32) -> Option<UnitArt> {
 /// of the frame), `None` for a sheet that is not there. They come from the install, so they are not part of any table in the code.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SheetSizes {
+    /// Header words of each chassis sheet, in [`CHASSIS`] order.
     pub chassis: [Option<(u16, u16)>; 6],
+    /// Header words of each top sheet, in [`TOPS`] order.
     pub tops: [Option<(u16, u16)>; 25],
 }
 

@@ -28,6 +28,7 @@ pub const AA_UNDER_FIRE: f32 = 3.0;
 /// ... and four keep the building safe for good (the Advancer is killed before it reaches the building); bought only when
 /// the credits are comfortable and no building needs ground guns.
 pub const AA_SOLID: f32 = 4.0;
+/// Credits the side must have before it buys the fourth anti-air turret.
 pub const SOLID_CREDITS: i32 = 1200;
 /// Enemy units within this many cells of a building's edge press on it.
 const NEAR: f32 = 9.0;
@@ -39,17 +40,21 @@ fn price(tier: u32) -> i32 {
 /// An own building that is not a turret.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Site {
+    /// Object kind number.
     pub kind_id: i32,
+    /// Origin cell.
     pub cell: (i32, i32),
     /// An enemy Advancer works on it or hovers close by.
     pub advancer: bool,
 }
 
 impl Site {
+    /// Footprint in cells.
     pub fn size(&self) -> (i32, i32) {
         footprint(self.kind_id).map_or((1, 1), |(w, h, _)| (w, h))
     }
 
+    /// The middle of the footprint, in cells.
     pub fn centre(&self) -> (f32, f32) {
         let (w, h) = self.size();
         (self.cell.0 as f32 + w as f32 / 2.0, self.cell.1 as f32 + h as f32 / 2.0)
@@ -83,7 +88,9 @@ impl Site {
 /// An own turret (finished or still healing in).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Gun {
+    /// Which turret it is (1-5).
     pub tier: u32,
+    /// The cell it stands on.
     pub cell: (i32, i32),
     /// An enemy Advancer is working on this turret.
     pub attacked: bool,
@@ -102,19 +109,26 @@ fn gun_centre(tier: u32, cell: (i32, i32)) -> (f32, f32) {
 /// An enemy ground unit: its cell, how much it counts (1 per tank, more for walkers) and the building it is after.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Foe {
+    /// The cell it stands on.
     pub cell: (i32, i32),
+    /// How much it counts: 1 per tank, more for walkers.
     pub weight: f32,
+    /// The building (site index) it is after, if known.
     pub target: Option<usize>,
 }
 
 /// What the planner sees.
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
+    /// The side's buildings.
     pub sites: Vec<Site>,
+    /// The side's turrets.
     pub guns: Vec<Gun>,
+    /// The enemy's ground units.
     pub foes: Vec<Foe>,
     /// Centre of the enemy base (its HQ), the direction a gun faces when no unit shows it.
     pub enemy_base: Option<(i32, i32)>,
+    /// The side's credits.
     pub credits: i32,
     /// Turret tiers 1..5 this side may build.
     pub flags: [bool; 5],
@@ -125,7 +139,10 @@ pub struct Snapshot {
 /// The decision.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Plan {
-    Build { tier: u32, cell: (i32, i32) },
+    Build {
+        tier: u32,
+        cell: (i32, i32),
+    },
     /// Something is wanted but the money is not there yet: wait.
     Save,
     Idle,
@@ -134,6 +151,7 @@ pub enum Plan {
 /// One building's situation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Need {
+    /// Index of the building in `Snapshot::sites`.
     pub site: usize,
     /// Enemy pressure (unit weights) on it.
     pub danger: f32,
@@ -152,6 +170,7 @@ pub struct Need {
 }
 
 impl Need {
+    /// Whether the building needs help now: it is under pressure or an enemy Advancer is at it.
     pub fn urgent(&self, s: &Snapshot) -> bool {
         self.danger > 0.0 || s.sites[self.site].advancer
     }
@@ -189,7 +208,13 @@ pub fn needs(s: &Snapshot) -> Vec<Need> {
             let from = if danger > 0.0 { Some((fx / danger, fy / danger)) } else { s.enemy_base.map(mid) };
             let full = covering.iter().filter(|g| g.tier != 2).count() >= MAX_PER_SITE;
             let ground = if danger > 0.0 && !full { (1.5 * danger).min(16.0) - cover } else { 0.0 };
-            let goal = if !b.advancer { 0.0 } else if covering.iter().any(|g| g.attacked) { AA_UNDER_FIRE } else { AA_MIN };
+            let goal = if !b.advancer {
+                0.0
+            } else if covering.iter().any(|g| g.attacked) {
+                AA_UNDER_FIRE
+            } else {
+                AA_MIN
+            };
             let air = (goal - aa).max(0.0);
             let air_solid = if b.advancer { (AA_SOLID - aa).max(0.0) } else { 0.0 };
             Need { site: i, danger, cover, ground, air, air_solid, guns: covering.len(), from }
@@ -248,7 +273,7 @@ pub fn place(s: &Snapshot, need: &Need, tier: u32, ok: impl Fn(u32, (i32, i32)) 
             // a gun that also covers other buildings is worth more (anti-air most of all)
             let others = s.sites.iter().enumerate().filter(|&(k, o)| k != need.site && dist(p, o.centre()) <= RANGE[(tier - 1) as usize] + o.half()).count();
             score += others as f32 * if tier == 2 { 1.0 } else { 0.6 };
-            if best.map_or(true, |(bs, _)| score > bs + 1e-4) {
+            if best.is_none_or(|(bs, _)| score > bs + 1e-4) {
                 best = Some((score, cell));
             }
         }
@@ -316,7 +341,10 @@ mod tests {
         move |t, c| {
             let cells: Vec<(i32, i32)> = if t >= 4 { vec![c, (c.0, c.1 + 1)] } else { vec![c] };
             cells.iter().all(|&p| {
-                p.0 >= 0 && p.1 >= 0 && p.0 < 64 && p.1 < 64
+                p.0 >= 0
+                    && p.1 >= 0
+                    && p.0 < 64
+                    && p.1 < 64
                     && !s.sites.iter().any(|b| b.gap(p) == 0)
                     && !s.guns.iter().any(|g| g.cell == p || (g.tier >= 4 && (g.cell.0, g.cell.1 + 1) == p))
             })

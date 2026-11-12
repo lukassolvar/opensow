@@ -5,19 +5,25 @@
 //! the eight spots, `0x40aa04..0x40ace6`) in an emulator and compares it with [`plan`] / [`Building::spots`].
 
 use crate::buildings::{advancer_offset, blocked_cells, footprint};
+use crate::kinds;
 
 /// A unit slot of the exe's handle table: the cell of its pixel position, its owner `[+0x44]` and kind `[+0x40]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Slot {
+    /// The cell of the unit's pixel position.
     pub cell: (i32, i32),
+    /// `[+0x44]`: the owner.
     pub owner: i32,
+    /// `[+0x40]`: the unit kind.
     pub kind: i32,
 }
 
 /// An own building that is not a turret.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Building {
+    /// The building's kind.
     pub kind_id: i32,
+    /// The building's origin cell.
     pub cell: (i32, i32),
 }
 
@@ -39,7 +45,16 @@ impl Building {
         let (w, h) = self.size();
         let (x, y) = self.cell;
         let r0 = blocked_cells(self.kind_id).iter().map(|&(_, dy)| dy).min().unwrap_or(h);
-        [(x + w - 1, y + r0 - 2), (x + w + 1, y + r0), (x + w + 1, y + h - 1), (x + w - 1, y + h + 1), (x, y + h + 1), (x - 2, y + h - 1), (x - 2, y + r0), (x, y + r0 - 2)]
+        [
+            (x + w - 1, y + r0 - 2),
+            (x + w + 1, y + r0),
+            (x + w + 1, y + h - 1),
+            (x + w - 1, y + h + 1),
+            (x, y + h + 1),
+            (x - 2, y + h - 1),
+            (x - 2, y + r0),
+            (x, y + r0 - 2),
+        ]
     }
 }
 
@@ -54,7 +69,7 @@ pub fn threat(b: &Building, slots: &[Slot], me: i32) -> i32 {
             t -= 1;
         } else {
             t += 1;
-            if (41..=45).contains(&s.kind) || (111..=113).contains(&s.kind) {
+            if kinds::WALKERS.contains(&s.kind) || (111..=113).contains(&s.kind) {
                 t += 1;
             }
         }
@@ -69,7 +84,7 @@ pub fn free(b: &Building, slots: &[Slot], me: i32, credits: i32, aa: impl Fn((i3
         return 0;
     }
     let a = b.action_cell();
-    if !slots.iter().any(|s| s.owner != me && s.kind == 40 && s.cell == a) {
+    if !slots.iter().any(|s| s.owner != me && s.kind == kinds::ADVANCER && s.cell == a) {
         return 0;
     }
     6 - 2 * b.spots().iter().filter(|&&c| aa(c)).count() as i32
@@ -79,15 +94,45 @@ pub fn free(b: &Building, slots: &[Slot], me: i32, credits: i32, aa: impl Fn((i3
 pub fn wanted(credits: i32, t: i32, f: i32) -> i32 {
     if credits <= 1000 {
         if t > f {
-            match t { ..=2 => -1, 3..=4 => 0x19, 5 => 0x1b, 6 => 0x1c, _ => 0x1d }
-        } else if f >= 4 { 0x1a } else { -1 }
+            match t {
+                ..=2 => -1,
+                3..=4 => 0x19,
+                5 => 0x1b,
+                6 => 0x1c,
+                _ => 0x1d,
+            }
+        } else if f >= 4 {
+            0x1a
+        } else {
+            -1
+        }
     } else if credits <= 1500 {
         if t > f {
-            match t { ..=1 => -1, 2..=3 => 0x19, 4 => 0x1b, 5 => 0x1c, _ => 0x1d }
-        } else if f >= 3 { 0x1a } else { -1 }
+            match t {
+                ..=1 => -1,
+                2..=3 => 0x19,
+                4 => 0x1b,
+                5 => 0x1c,
+                _ => 0x1d,
+            }
+        } else if f >= 3 {
+            0x1a
+        } else {
+            -1
+        }
     } else if t > f {
-        if t >= 4 { 0x1d } else if t >= 2 { 0x1b } else { -1 }
-    } else if f >= 2 { 0x1a } else { -1 }
+        if t >= 4 {
+            0x1d
+        } else if t >= 2 {
+            0x1b
+        } else {
+            -1
+        }
+    } else if f >= 2 {
+        0x1a
+    } else {
+        -1
+    }
 }
 
 /// The step-down (`0x4316c5..0x43177f`): a tier is built when the credits reach its price and its flag is set; otherwise
@@ -108,7 +153,9 @@ pub fn step_down(mut kind: i32, credits: i32, flags: &[bool; 5]) -> Option<u32> 
 /// A chosen turret: tier and the cell passed to the placement (`0x439e30`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Placement {
+    /// Which turret (its tier) to build.
     pub tier: u32,
+    /// The cell to build it on.
     pub cell: (i32, i32),
 }
 

@@ -35,13 +35,24 @@ fn main() {
     std::fs::create_dir_all(&out).unwrap();
     let game = GameDir::locate().expect("game not found");
     let mega = MegaFile::open(&game.data().join("sprites.info"), &game.data().join("sprites.data")).unwrap();
-    let picks = [("units\\1A_blue.ps6", 8), ("units\\1C_blue.ps6", 0), ("builds\\blue\\_base.ps6", 0), ("builds\\blue\\_heavy.ps6", 0), ("builds\\blue\\sentry01.ps6", 0), ("extras\\money.ps6", 0), ("units\\2A_blue.ps6", 16)];
+    let picks = [
+        ("units\\1A_blue.ps6", 8),
+        ("units\\1C_blue.ps6", 0),
+        ("builds\\blue\\_base.ps6", 0),
+        ("builds\\blue\\_heavy.ps6", 0),
+        ("builds\\blue\\sentry01.ps6", 0),
+        ("extras\\money.ps6", 0),
+        ("units\\2A_blue.ps6", 16),
+    ];
     let ground = [96, 110, 70];
     let k = 4; // display factor of the ORIGINAL; 2x data is shown at k/2
     let mut cells: Vec<Vec<Vec<u8>>> = Vec::new(); // per pick: 3 images of the same size
     let mut sizes = Vec::new();
     for (name, idx) in picks {
-        let Some(e) = mega.find(name) else { eprintln!("missing {name}"); continue };
+        let Some(e) = mega.find(name) else {
+            eprintln!("missing {name}");
+            continue;
+        };
         let frames = sprite::parse(&mega.read(e).unwrap(), sprite::Kind::Color).unwrap();
         let f = &frames[idx.min(frames.len() - 1)];
         let (w, h) = (f.width as usize, f.height as usize);

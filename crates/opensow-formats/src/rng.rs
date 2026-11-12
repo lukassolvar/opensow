@@ -9,6 +9,7 @@
 /// Number of table entries the generator walks through (`0..=0xc346`).
 pub const TABLE_LEN: usize = 0xc346 + 1;
 
+/// The game's lockstep random numbers: the table read from `generic.file` and a position in it.
 #[derive(Debug, Clone)]
 pub struct GameRng {
     table: Vec<u16>,
@@ -43,6 +44,7 @@ impl GameRng {
         v % n
     }
 
+    /// The current position in the table.
     pub fn index(&self) -> usize {
         self.index
     }

@@ -25,6 +25,7 @@ pub enum Page {
     Walker,
 }
 
+/// Which kind of info box page an object or unit kind gets, `None` for kinds without one.
 pub fn page(kind: i32) -> Option<Page> {
     Some(match kind {
         1..=15 | 46 => Page::Unit,
@@ -40,47 +41,43 @@ pub fn page(kind: i32) -> Option<Page> {
 
 /// 0-based language index of the object's name (`0x431ad0`).
 pub fn name_index(kind: i32) -> Option<usize> {
-    Some(
-        match kind {
-            1..=15 => 173 + kind - 1,
-            16..=18 => 219 + kind - 16,
-            19..=21 => 225 + kind - 19,
-            22..=24 => 222 + kind - 22,
-            25..=29 => 195 + kind - 25,
-            30 => 200,
-            31 => 202,
-            32 => 204,
-            33 => 203,
-            34 => 201,
-            40 => 193,
-            41..=45 => 188 + kind - 41,
-            46 => 194,
-            100..=103 => 205 + kind - 100,
-            104..=107 => 210 + kind - 104,
-            108 => 209,
-            _ => return None,
-        } as usize,
-    )
+    Some(match kind {
+        1..=15 => 173 + kind - 1,
+        16..=18 => 219 + kind - 16,
+        19..=21 => 225 + kind - 19,
+        22..=24 => 222 + kind - 22,
+        25..=29 => 195 + kind - 25,
+        30 => 200,
+        31 => 202,
+        32 => 204,
+        33 => 203,
+        34 => 201,
+        40 => 193,
+        41..=45 => 188 + kind - 41,
+        46 => 194,
+        100..=103 => 205 + kind - 100,
+        104..=107 => 210 + kind - 104,
+        108 => 209,
+        _ => return None,
+    } as usize)
 }
 
 /// 0-based language index of the description (`0x43c410`).
 pub fn description_index(kind: i32) -> Option<usize> {
-    Some(
-        match kind {
-            1..=15 => 302 + kind - 1,
-            41..=45 => 317 + kind - 41,
-            46 => 322,
-            16..=18 => 323 + kind - 16,
-            22..=24 => 326 + kind - 22,
-            19..=21 => 329 + kind - 19,
-            30..=34 => 332 + kind - 30,
-            100..=103 => 337 + kind - 100,
-            108 => 341,
-            104..=107 => 342 + kind - 104,
-            25..=29 => 346 + kind - 25,
-            _ => return None,
-        } as usize,
-    )
+    Some(match kind {
+        1..=15 => 302 + kind - 1,
+        41..=45 => 317 + kind - 41,
+        46 => 322,
+        16..=18 => 323 + kind - 16,
+        22..=24 => 326 + kind - 22,
+        19..=21 => 329 + kind - 19,
+        30..=34 => 332 + kind - 30,
+        100..=103 => 337 + kind - 100,
+        108 => 341,
+        104..=107 => 342 + kind - 104,
+        25..=29 => 346 + kind - 25,
+        _ => return None,
+    } as usize)
 }
 
 /// 0-based language index of the shell / blast text (`0x4321c0`); 260 is "n/a".
@@ -163,7 +160,11 @@ pub fn picture(kind: i32) -> Option<(&'static str, i32)> {
 
 /// Kinds whose picture has 16 frames instead of 32 (`0x43cfd4`: 0x6a, 0x6c, 0x10..0x15): the animation cycles `frames`.
 pub fn picture_frames(kind: i32) -> u32 {
-    if matches!(kind, 106 | 108 | 16..=21) { 16 } else { 32 }
+    if matches!(kind, 106 | 108 | 16..=21) {
+        16
+    } else {
+        32
+    }
 }
 
 /// Weapon stats of a unit as the info box prints them: (kind, offence, defence, scope min, scope max, speed).
@@ -194,7 +195,8 @@ pub const UNIT_STATS: [(i32, i32, i32, i32, i32, i32); 22] = [
 ];
 
 /// Turrets 1-5 (kind 25..29): offence, defence (hit points), scope min, scope max; the speed prints as "0".
-pub const TURRET_STATS: [(i32, i32, i32, i32, i32); 5] = [(25, 25, 900, 0, 6), (26, 20, 1250, 0, 9), (27, 40, 1540, 0, 7), (28, 60, 2100, 0, 8), (29, 88, 2600, 2, 10)];
+pub const TURRET_STATS: [(i32, i32, i32, i32, i32); 5] =
+    [(25, 25, 900, 0, 6), (26, 20, 1250, 0, 9), (27, 40, 1540, 0, 7), (28, 60, 2100, 0, 8), (29, 88, 2600, 2, 10)];
 
 /// Air forces 30..34: defence, speed (`0x43da7f`: code 32 shows 720, 33 shows 150, others the aircraft's `[+0x24]` = 120).
 pub const AIR_STATS: [(i32, i32, i32); 5] = [(30, 480, 120), (31, 360, 120), (32, 8000, 720), (33, 270, 150), (34, 120, 120)];
@@ -233,13 +235,21 @@ fn fmt(template: &str, value: &str) -> String {
 /// The lines of the info box for `kind`, as drawn (`0x43b5ed..0x43b6ce`): positions are in [`LINE_POS`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InfoLines {
+    /// The NAME line.
     pub name: String,
+    /// The TYPE line.
     pub kind_line: String,
+    /// The OFFENCE line.
     pub offence: String,
+    /// The DEFENCE line.
     pub defence: String,
+    /// The SCOPE line.
     pub scope: String,
+    /// The SPEED line.
     pub speed: String,
+    /// The SHELL line.
     pub shell: String,
+    /// The description page's text.
     pub description: String,
 }
 
@@ -247,6 +257,7 @@ pub struct InfoLines {
 /// defence, speed, shell in the order the exe draws (and types) them.
 pub const LINE_POS: [(i32, i32); 7] = [(-54, 13), (-54, 22), (-54, 31), (8, 31), (-54, 40), (8, 40), (-54, 49)];
 
+/// Builds the info box lines of `kind` from the language file's strings; `None` for kinds without an info box.
 pub fn lines(kind: i32, lang: &LangFile) -> Option<InfoLines> {
     let page = page(kind)?;
     let s = |i: usize| lang.get(i).unwrap_or("").trim().to_owned();
@@ -350,7 +361,7 @@ mod tests {
             if let Some(p) = crate::anim::walk_params(kind) {
                 assert_eq!(p.speed as i32, speed, "speed of kind {kind}");
             }
-            if kind != 40 {
+            if kind != crate::kinds::ADVANCER {
                 // hit points: the unit table of the game (docs/art.md) matches the info box's DEFENCE
                 assert!(def > 0);
             }

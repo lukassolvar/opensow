@@ -1500,7 +1500,6 @@ dependencies = [
  "jpeg-decoder",
  "opensow-formats",
  "opensow-viewer",
- "png",
  "pollster",
  "rodio",
  "serde",
@@ -1515,8 +1514,11 @@ name = "opensow-launcher"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
+ "jpeg-decoder",
  "opensow-formats",
  "png",
+ "serde",
+ "serde_json",
  "softbuffer",
  "winit",
 ]

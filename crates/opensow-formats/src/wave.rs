@@ -11,7 +11,9 @@
 //! neighbour with the smallest stamp that is below the current one (and at least the base): stamps grow with the wave, so
 //! that walks back to the start. The route is stored target first, start last.
 
+/// Side of the exe's square cell grids, in cells.
 pub const SIDE: i32 = 128;
+/// The grid value of impassable terrain.
 pub const BLOCKED: u32 = 0xFFFFFD;
 /// The exe resets the grid and the base once the base passes this (`0x458230`).
 pub const BASE_LIMIT: u32 = 0x1fffff;
@@ -21,7 +23,9 @@ const MAX_GENERATION: usize = 0x2000;
 /// A route longer than this is cut (the exe stores at most 1000 steps).
 const MAX_STEPS: usize = 1000;
 
+/// The wave pathfinder's grid and state (port of `0x4753a0`, docs/pathfinding.md).
 pub struct Wave {
+    /// The grid's cell values.
     pub cells: Vec<u32>,
     /// `[0x49a364]`: the first value that counts as occupied.
     pub base: u32,
@@ -196,8 +200,17 @@ impl Wave {
     /// otherwise there is no step: the ground routine (`air == false`) just fails, the Advancer's `0x4732f0` (`air == true`)
     /// also sets `stop` like `0x476870` / `0x473f10` do. Only the networked movement `0x46fa40` -> `0x472f50` calls it
     /// (docs/pathfinding.md).
-    #[allow(clippy::too_many_arguments)]
-    pub fn local_step_second(&mut self, stat: &[u32], stat_base: u32, own: u32, route: &[(i32, i32)], at: (i32, i32), first: &[u32], first_base: u32, air: bool) -> LocalStep {
+    pub fn local_step_second(
+        &mut self,
+        stat: &[u32],
+        stat_base: u32,
+        own: u32,
+        route: &[(i32, i32)],
+        at: (i32, i32),
+        first: &[u32],
+        first_base: u32,
+        air: bool,
+    ) -> LocalStep {
         self.local_core(stat, stat_base, own, route, at, Some((first, first_base, air)))
     }
 
@@ -314,17 +327,22 @@ impl Wave {
 pub enum Seen {
     /// Not a hostile object (an own object, or neither unit nor building).
     Ignore,
+    /// A hostile unit.
     Unit,
     /// A building whose type (`0x43aaa0`) is 3 or 6: the turret class.
     Turret,
+    /// A hostile building that is not a turret.
     Building,
 }
 
 /// The nearest hostile objects found by [`find_targets`]: the first handle of each class the wave met (0 = none).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Targets {
+    /// Handle of the nearest hostile unit, 0 = none.
     pub unit: u32,
+    /// Handle of the nearest hostile turret, 0 = none.
     pub turret: u32,
+    /// Handle of the nearest hostile building, 0 = none.
     pub building: u32,
 }
 
@@ -344,7 +362,8 @@ pub fn find_targets(cells: &mut [u32], base: &mut u32, dims: (i32, i32), start: 
     let saved = cells[si];
     cells[si] = b;
     let mut stamp = b + 1;
-    let (mut cur, mut next): (Vec<(i32, i32)>, Vec<(i32, i32)>) = (vec![start], Vec::new());
+    let mut cur = vec![start];
+    let mut next: Vec<(i32, i32)> = Vec::new();
     loop {
         for &(x, y) in &cur {
             let Some(i) = at(x, y) else { continue };
@@ -382,6 +401,174 @@ pub fn find_targets(cells: &mut [u32], base: &mut u32, dims: (i32, i32), start: 
     cells[si] = saved;
     *base = stamp + 2;
     found
+}
+
+/// The chase search of `0x477630` (docs/walking.md): where a unit that wants to shoot at a target walks to.
+///
+/// A bucket wave runs over the static grid (`0x5eac38`, `base` = `[0x49a360]`) from the unit's cell until it reaches a cell
+/// within one cell (Chebyshev) of the target. Orthogonal neighbours are stamped with the generation counter and join the
+/// next list, diagonal ones get counter + 1 and join the list after that (so a diagonal costs two generations); nothing
+/// stops a wave except the grid edge, so cells beside the grid edge read out of bounds. The destination is then found by
+/// walking back from the *target* cell `range` times, each time to the neighbour with the smallest stamp that is below
+/// the current cell's and not below the base: the unit stops about `range` cells before the target along its way.
+///
+/// The target cell and its 7 x 7 surroundings are made passable where they hold `handle` (the target building's own
+/// cells) and restored afterwards, like the unit's cell. Returns `None` when the target cannot be reached; `base` moves
+/// past the stamps.
+pub fn approach(cells: &mut [u32], base: &mut u32, dims: (i32, i32), unit: (i32, i32), target: (i32, i32), handle: u32, range: i32) -> Option<(i32, i32)> {
+    approach_shifted(cells, base, dims, unit, target, handle, range, 0)
+}
+
+/// The chase search for a target of handle type 4 (an Advancer, `0x478200`): the same search as [`approach`] over the air
+/// grid (`0x60ac38`, base `[0x49a368]`), with one quirk of the exe's unrolled code: for every cell of the 7 x 7 block that
+/// is saved and restored, the cell *three places earlier in the linear index* (`x * 128 + y - 3`) is the one that is freed
+/// when it holds the target's handle. So the strip y-6..y beside the block is freed (and never restored: a handle there
+/// stays cleared) while handle cells at y+1..y+3 are not freed at all (docs/pathfinding.md). Only walkers' handles would
+/// show it and the air grid holds none besides other Advancers, so real games rarely see the quirk.
+pub fn approach_air(cells: &mut [u32], base: &mut u32, dims: (i32, i32), unit: (i32, i32), target: (i32, i32), handle: u32, range: i32) -> Option<(i32, i32)> {
+    approach_shifted(cells, base, dims, unit, target, handle, range, 3)
+}
+
+fn approach_shifted(
+    cells: &mut [u32],
+    base: &mut u32,
+    dims: (i32, i32),
+    unit: (i32, i32),
+    target: (i32, i32),
+    handle: u32,
+    range: i32,
+    free_shift: i32,
+) -> Option<(i32, i32)> {
+    let b = *base;
+    let (w, h) = dims;
+    let at = |x: i32, y: i32| (x * SIDE + y) as usize;
+    let (ui, ti) = (at(unit.0, unit.1), at(target.0, target.1));
+    let saved_unit = cells[ui];
+    // the 7 x 7 block around the target: remember it, free the target's own cells
+    let mut saved = Vec::new();
+    for x in target.0 - 3..=target.0 + 3 {
+        for y in target.1 - 3..=target.1 + 3 {
+            if x > -1 && x < w && y > -1 && y < h {
+                let i = at(x, y);
+                saved.push((i, cells[i]));
+                // the cell that is freed: the saved one (ground chase) or three cells before it (air chase)
+                let j = i as i32 - free_shift;
+                if j >= 0 && (j as usize) < cells.len() && cells[j as usize] == handle {
+                    cells[j as usize] = 0;
+                }
+            }
+        }
+    }
+    cells[ui] = b;
+    let mut stamp = b + 1;
+    cells[ti] = 0xfffffe;
+    let mut lists: [Vec<(i32, i32)>; 3] = [vec![unit], vec![], vec![]];
+    let (mut cur, mut next, mut third) = (0usize, 1usize, 2usize);
+    let mut found = false;
+    let mut reached_edge_limit = false;
+    loop {
+        let mut gen = std::mem::take(&mut lists[cur]);
+        for &(x, y) in &gen {
+            if (x - target.0).abs() < 2 && (y - target.1).abs() < 2 {
+                found = true;
+                break;
+            }
+            let i = x * SIDE + y;
+            let free = |c: &[u32], d: i32| {
+                let j = i + d;
+                (0..SIDE * SIDE).contains(&j) && c[j as usize] < b
+            };
+            // orthogonal neighbours: stamp `stamp`, next list
+            if free(cells, -128) && x > -1 {
+                cells[(i - 128) as usize] = stamp;
+                lists[next].push((x - 1, y));
+            }
+            if free(cells, 128) && x < w {
+                cells[(i + 128) as usize] = stamp;
+                lists[next].push((x + 1, y));
+            }
+            if free(cells, -1) && y > -1 {
+                cells[(i - 1) as usize] = stamp;
+                lists[next].push((x, y - 1));
+            }
+            if free(cells, 1) && y < h {
+                cells[(i + 1) as usize] = stamp;
+                lists[next].push((x, y + 1));
+            }
+            // diagonals: stamp + 1, the list after next
+            if free(cells, -129) && x > -1 && y > -1 {
+                cells[(i - 129) as usize] = stamp + 1;
+                lists[third].push((x - 1, y - 1));
+            }
+            if free(cells, 127) && x < w && y > -1 {
+                cells[(i + 127) as usize] = stamp + 1;
+                lists[third].push((x + 1, y - 1));
+            }
+            if free(cells, -127) && x > -1 && y < h {
+                cells[(i - 127) as usize] = stamp + 1;
+                lists[third].push((x - 1, y + 1));
+            }
+            if free(cells, 129) && x < w && y < h {
+                cells[(i + 129) as usize] = stamp + 1;
+                lists[third].push((x + 1, y + 1));
+            }
+        }
+        gen.clear();
+        if found {
+            break;
+        }
+        stamp += 1;
+        if lists[next].len() > 0x1f40 || stamp > b + MAX_SPAN || (lists[next].is_empty() && lists[third].is_empty()) {
+            reached_edge_limit = true;
+            break;
+        }
+        (cur, next, third) = match cur {
+            0 => (1, 2, 0),
+            1 => (2, 0, 1),
+            _ => (0, 1, 2),
+        };
+    }
+    let _ = reached_edge_limit;
+    let mut result = None;
+    if found {
+        result = Some((0, 0));
+        if range > 0 {
+            const AROUND: [(i32, i32); 8] = [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)];
+            let mut c = target;
+            let mut left = range;
+            while left > 0 {
+                left -= 1;
+                if c == unit {
+                    result = Some(unit);
+                    break;
+                }
+                let here = cells[at(c.0, c.1)];
+                let (mut best, mut pick) = (here, (0, 0));
+                for (dx, dy) in AROUND {
+                    let j = (c.0 * SIDE + c.1) + dx * SIDE + dy;
+                    if (0..SIDE * SIDE).contains(&j) {
+                        let v = cells[j as usize];
+                        if v < best && v >= b {
+                            best = v;
+                            pick = (c.0 + dx, c.1 + dy);
+                        }
+                    }
+                }
+                if pick == (0, 0) {
+                    result = None;
+                    break;
+                }
+                c = pick;
+                result = Some(c);
+            }
+        }
+    }
+    cells[ui] = saved_unit;
+    for (i, v) in saved {
+        cells[i] = v;
+    }
+    *base = stamp + 2;
+    result
 }
 
 #[cfg(test)]
@@ -605,164 +792,4 @@ mod tests {
         let r = w.find((2, 5), (8, 5), 2).unwrap();
         assert_eq!(r.last(), Some(&(4, 5)));
     }
-}
-
-/// The chase search of `0x477630` (docs/walking.md): where a unit that wants to shoot at a target walks to.
-///
-/// A bucket wave runs over the static grid (`0x5eac38`, `base` = `[0x49a360]`) from the unit's cell until it reaches a cell
-/// within one cell (Chebyshev) of the target. Orthogonal neighbours are stamped with the generation counter and join the
-/// next list, diagonal ones get counter + 1 and join the list after that (so a diagonal costs two generations); nothing
-/// stops a wave except the grid edge, so cells beside the grid edge read out of bounds. The destination is then found by
-/// walking back from the *target* cell `range` times, each time to the neighbour with the smallest stamp that is below
-/// the current cell's and not below the base: the unit stops about `range` cells before the target along its way.
-///
-/// The target cell and its 7 x 7 surroundings are made passable where they hold `handle` (the target building's own
-/// cells) and restored afterwards, like the unit's cell. Returns `None` when the target cannot be reached; `base` moves
-/// past the stamps.
-pub fn approach(cells: &mut [u32], base: &mut u32, dims: (i32, i32), unit: (i32, i32), target: (i32, i32), handle: u32, range: i32) -> Option<(i32, i32)> {
-    approach_shifted(cells, base, dims, unit, target, handle, range, 0)
-}
-
-/// The chase search for a target of handle type 4 (an Advancer, `0x478200`): the same search as [`approach`] over the air
-/// grid (`0x60ac38`, base `[0x49a368]`), with one quirk of the exe's unrolled code: for every cell of the 7 x 7 block that
-/// is saved and restored, the cell *three places earlier in the linear index* (`x * 128 + y - 3`) is the one that is freed
-/// when it holds the target's handle. So the strip y-6..y beside the block is freed (and never restored: a handle there
-/// stays cleared) while handle cells at y+1..y+3 are not freed at all (docs/pathfinding.md). Only walkers' handles would
-/// show it and the air grid holds none besides other Advancers, so real games rarely see the quirk.
-pub fn approach_air(cells: &mut [u32], base: &mut u32, dims: (i32, i32), unit: (i32, i32), target: (i32, i32), handle: u32, range: i32) -> Option<(i32, i32)> {
-    approach_shifted(cells, base, dims, unit, target, handle, range, 3)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn approach_shifted(cells: &mut [u32], base: &mut u32, dims: (i32, i32), unit: (i32, i32), target: (i32, i32), handle: u32, range: i32, free_shift: i32) -> Option<(i32, i32)> {
-    let b = *base;
-    let (w, h) = dims;
-    let at = |x: i32, y: i32| (x * SIDE + y) as usize;
-    let (ui, ti) = (at(unit.0, unit.1), at(target.0, target.1));
-    let saved_unit = cells[ui];
-    // the 7 x 7 block around the target: remember it, free the target's own cells
-    let mut saved = Vec::new();
-    for x in target.0 - 3..=target.0 + 3 {
-        for y in target.1 - 3..=target.1 + 3 {
-            if x > -1 && x < w && y > -1 && y < h {
-                let i = at(x, y);
-                saved.push((i, cells[i]));
-                // the cell that is freed: the saved one (ground chase) or three cells before it (air chase)
-                let j = i as i32 - free_shift;
-                if j >= 0 && (j as usize) < cells.len() && cells[j as usize] == handle {
-                    cells[j as usize] = 0;
-                }
-            }
-        }
-    }
-    cells[ui] = b;
-    let mut stamp = b + 1;
-    cells[ti] = 0xfffffe;
-    let mut lists: [Vec<(i32, i32)>; 3] = [vec![unit], vec![], vec![]];
-    let (mut cur, mut next, mut third) = (0usize, 1usize, 2usize);
-    let mut found = false;
-    let mut reached_edge_limit = false;
-    loop {
-        let mut gen = std::mem::take(&mut lists[cur]);
-        for &(x, y) in &gen {
-            if (x - target.0).abs() < 2 && (y - target.1).abs() < 2 {
-                found = true;
-                break;
-            }
-            let i = x * SIDE + y;
-            let free = |c: &[u32], d: i32| {
-                let j = i + d;
-                (0..SIDE * SIDE).contains(&j) && c[j as usize] < b
-            };
-            // orthogonal neighbours: stamp `stamp`, next list
-            if free(cells, -128) && x > -1 {
-                cells[(i - 128) as usize] = stamp;
-                lists[next].push((x - 1, y));
-            }
-            if free(cells, 128) && x < w {
-                cells[(i + 128) as usize] = stamp;
-                lists[next].push((x + 1, y));
-            }
-            if free(cells, -1) && y > -1 {
-                cells[(i - 1) as usize] = stamp;
-                lists[next].push((x, y - 1));
-            }
-            if free(cells, 1) && y < h {
-                cells[(i + 1) as usize] = stamp;
-                lists[next].push((x, y + 1));
-            }
-            // diagonals: stamp + 1, the list after next
-            if free(cells, -129) && x > -1 && y > -1 {
-                cells[(i - 129) as usize] = stamp + 1;
-                lists[third].push((x - 1, y - 1));
-            }
-            if free(cells, 127) && x < w && y > -1 {
-                cells[(i + 127) as usize] = stamp + 1;
-                lists[third].push((x + 1, y - 1));
-            }
-            if free(cells, -127) && x > -1 && y < h {
-                cells[(i - 127) as usize] = stamp + 1;
-                lists[third].push((x - 1, y + 1));
-            }
-            if free(cells, 129) && x < w && y < h {
-                cells[(i + 129) as usize] = stamp + 1;
-                lists[third].push((x + 1, y + 1));
-            }
-        }
-        gen.clear();
-        if found {
-            break;
-        }
-        stamp += 1;
-        if lists[next].len() > 0x1f40 || stamp > b + MAX_SPAN || (lists[next].is_empty() && lists[third].is_empty()) {
-            reached_edge_limit = true;
-            break;
-        }
-        (cur, next, third) = match cur {
-            0 => (1, 2, 0),
-            1 => (2, 0, 1),
-            _ => (0, 1, 2),
-        };
-    }
-    let _ = reached_edge_limit;
-    let mut result = None;
-    if found {
-        result = Some((0, 0));
-        if range > 0 {
-            const AROUND: [(i32, i32); 8] = [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)];
-            let mut c = target;
-            let mut left = range;
-            while left > 0 {
-                left -= 1;
-                if c == unit {
-                    result = Some(unit);
-                    break;
-                }
-                let here = cells[at(c.0, c.1)];
-                let (mut best, mut pick) = (here, (0, 0));
-                for (dx, dy) in AROUND {
-                    let j = (c.0 * SIDE + c.1) + dx * SIDE + dy;
-                    if (0..SIDE * SIDE).contains(&j) {
-                        let v = cells[j as usize];
-                        if v < best && v >= b {
-                            best = v;
-                            pick = (c.0 + dx, c.1 + dy);
-                        }
-                    }
-                }
-                if pick == (0, 0) {
-                    result = None;
-                    break;
-                }
-                c = pick;
-                result = Some(c);
-            }
-        }
-    }
-    cells[ui] = saved_unit;
-    for (i, v) in saved {
-        cells[i] = v;
-    }
-    *base = stamp + 2;
-    result
 }

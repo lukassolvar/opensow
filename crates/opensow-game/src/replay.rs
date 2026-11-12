@@ -182,6 +182,7 @@ struct Sized {
     bytes: u64,
 }
 
+/// The GPU replay: a compute shader that redraws a recorded frame pixel by pixel.
 pub struct Replay {
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
@@ -222,6 +223,7 @@ fn ensure(device: &wgpu::Device, slot: &mut Option<Sized>, bytes: u64, usage: wg
 }
 
 impl Replay {
+    /// Compiles the shader and builds the pipeline.
     pub fn new(device: &wgpu::Device) -> Replay {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("replay"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -235,12 +237,17 @@ impl Replay {
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
                     visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: true, min_binding_size: wgpu::BufferSize::new(48) },
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: wgpu::BufferSize::new(48),
+                    },
                     count: None,
                 },
             ],
         });
-        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("replay"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
+        let pl =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("replay"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("replay"),
             layout: Some(&pl),
@@ -250,9 +257,20 @@ impl Replay {
             cache: None,
         });
         let limits = device.limits();
-        let max_buffer = (limits.max_storage_buffer_binding_size as u64).min(limits.max_buffer_size);
+        let max_buffer = limits.max_storage_buffer_binding_size.min(limits.max_buffer_size);
         record::set_atlas_limit((max_buffer / 4) as usize);
-        Replay { pipeline, layout, state: None, data: None, uniforms: None, atlas: None, atlas_synced: (u64::MAX, 0), ground: None, ground_synced: u64::MAX, max_buffer }
+        Replay {
+            pipeline,
+            layout,
+            state: None,
+            data: None,
+            uniforms: None,
+            atlas: None,
+            atlas_synced: (u64::MAX, 0),
+            ground: None,
+            ground_synced: u64::MAX,
+            max_buffer,
+        }
     }
 
     /// Words per picture row: rows start on 256-byte boundaries, as a buffer-to-texture copy needs.
@@ -310,7 +328,14 @@ impl Replay {
             let u = [w as u32, h as u32, stride as u32, bins.tiles_x as u32, tiles, s as u32, cmds_at, maps_at, offsets_at, indices_at, local_at, 0];
             uniforms[s * UNIFORM_SLOT as usize / 4..][..12].copy_from_slice(&u);
         }
-        ensure(device, &mut self.uniforms, (uniforms.len() * 4) as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, "segments", self.max_buffer);
+        ensure(
+            device,
+            &mut self.uniforms,
+            (uniforms.len() * 4) as u64,
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            "segments",
+            self.max_buffer,
+        );
         queue.write_buffer(&self.uniforms.as_ref().unwrap().buffer, 0, bytes_of(&uniforms));
 
         let (picture, before, _) = self.state.as_ref().unwrap();
@@ -325,7 +350,11 @@ impl Replay {
                 wgpu::BindGroupEntry { binding: 4, resource: whole_buffer(&self.ground.as_ref().unwrap().buffer) },
                 wgpu::BindGroupEntry {
                     binding: 5,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &self.uniforms.as_ref().unwrap().buffer, offset: 0, size: wgpu::BufferSize::new(48) }),
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &self.uniforms.as_ref().unwrap().buffer,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(48),
+                    }),
                 },
             ],
         });
@@ -348,7 +377,12 @@ impl Replay {
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("replay check") });
         let (picture, stride) = self.encode(device, queue, &mut enc, rec);
         let size = (stride * rec.h * 4) as u64;
-        let read = device.create_buffer(&wgpu::BufferDescriptor { label: Some("readback"), size, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         enc.copy_buffer_to_buffer(picture, 0, &read, 0, size);
         queue.submit([enc.finish()]);
         read.map_async(wgpu::MapMode::Read, .., |r| r.expect("map"));

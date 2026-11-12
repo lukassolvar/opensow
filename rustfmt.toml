@@ -1,0 +1,4 @@
+# The code uses long lines (many one-line table rows and exe-address comments); keep rustfmt from
+# wrapping them into something harder to compare with the original.
+max_width = 160
+use_small_heuristics = "Max"

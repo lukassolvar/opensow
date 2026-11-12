@@ -13,11 +13,16 @@
 //! (`[obj+0x214] = 0`) and the state becomes 6. While no sequence runs the top shows phase 0 (the idle phase array
 //! `[obj+0x94]` has a single zero entry for every top).
 
+/// One step of a top's fire sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FireStep {
+    /// The top's sprite phase shown during the step.
     pub phase: u8,
+    /// The muzzle-flash group shown during the step, -1 = none.
     pub flash_group: i8,
+    /// The first barrel that fires on the step's first tick, -1 = the step fires nothing.
     pub barrel: i8,
+    /// How many shots fire, starting at `barrel`.
     pub shots: u8,
 }
 
@@ -25,12 +30,14 @@ const fn s(phase: u8, flash_group: i8, barrel: i8, shots: u8) -> FireStep {
     FireStep { phase, flash_group, barrel, shots }
 }
 
+/// A top kind's fire sequence: the steps it plays through once it is aimed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FireSequence {
     /// Index into [`FLASH_SETS`] (`[obj+0x58]`), `None` for tops without muzzle-flash sprites.
     pub flash_set: Option<u8>,
     /// Counter reload `[obj+0x210]`: each step lasts `reload + 1` ticks.
     pub reload: u32,
+    /// The steps, in order.
     pub steps: &'static [FireStep],
 }
 
@@ -99,8 +106,11 @@ pub fn fire_sequence(kind: i32) -> Option<FireSequence> {
 /// What a top does on a given tick of its fire sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Moment {
+    /// Index of the step that is playing.
     pub step: usize,
+    /// The top's sprite phase to show.
     pub phase: u8,
+    /// The muzzle-flash group to show, if any.
     pub flash_group: Option<u8>,
     /// Tables fired on this very tick: `(first barrel, shots)`.
     pub shot: Option<(u8, u8)>,
@@ -120,7 +130,7 @@ impl FireSequence {
         let len = self.reload + 1;
         let step = ((tick - 1) / len) as usize;
         let st = self.steps[step];
-        let first = (tick - 1) % len == 0;
+        let first = (tick - 1).is_multiple_of(len);
         Some(Moment {
             step,
             phase: st.phase,

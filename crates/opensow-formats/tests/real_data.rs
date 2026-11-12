@@ -1,5 +1,6 @@
 //! Invariants checked against a real installation. Skipped when the game is not found.
 
+use opensow_formats::kinds;
 use opensow_formats::{level::*, map::Map, GameDir};
 
 fn read(game: &GameDir, rel: &str) -> Option<Vec<u8>> {
@@ -32,12 +33,33 @@ fn campaign_objects_are_on_open_ground_inside_the_map() {
 }
 
 #[test]
+fn every_level_file_is_written_back_byte_identical() {
+    let Some(game) = GameDir::locate() else { return };
+    let mut dirs = vec![game.resolve("Data\\Levels").unwrap()];
+    dirs.extend(game.warmonger.as_ref().and_then(|w| GameDir::new(w.clone()).resolve("Data\\Levels")));
+    let mut n = 0;
+    for dir in dirs {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if !p.extension().is_some_and(|x| x.eq_ignore_ascii_case("net") || x.eq_ignore_ascii_case("edt")) {
+                continue;
+            }
+            let data = std::fs::read(&p).unwrap();
+            let Ok(level) = Level::parse(&data) else { continue }; // the empty template M00 has version 3 and is checked elsewhere
+            assert!(level.to_bytes() == data, "{} is not written back as it was", p.display());
+            n += 1;
+        }
+    }
+    assert!(n >= 31, "{n} level files");
+}
+
+#[test]
 fn multiplayer_maps_have_two_hqs_and_start_positions_per_side() {
     let Some(game) = GameDir::locate() else { return };
     let dir = game.resolve("Data\\Levels").unwrap();
     for e in std::fs::read_dir(dir).unwrap().flatten() {
         let p = e.path();
-        if p.extension().map_or(true, |x| !x.eq_ignore_ascii_case("net")) {
+        if p.extension().is_none_or(|x| !x.eq_ignore_ascii_case("net")) {
             continue;
         }
         let l = Level::parse(&std::fs::read(&p).unwrap()).unwrap();
@@ -119,11 +141,14 @@ fn air_force_stock_matches_the_exes_loader_assumptions() {
     // Spot checks against the shipped data.
     let m10 = Level::parse(&read(&game, "Data\\Levels\\M10.edt").unwrap()).unwrap().air_stock();
     let side1 = |f: AirForce| m10.iter().find(|s| s.force == f).unwrap().counts[0];
-    assert_eq!([side1(AirForce::Bomber), side1(AirForce::Asteroid), side1(AirForce::Carryall), side1(AirForce::Tripler), side1(AirForce::Fighter)], [4, 0, 7, 4, 6]);
+    assert_eq!(
+        [side1(AirForce::Bomber), side1(AirForce::Asteroid), side1(AirForce::Carryall), side1(AirForce::Tripler), side1(AirForce::Fighter)],
+        [4, 0, 7, 4, 6]
+    );
     // Multiplayer: both players get the same stock; the unread words stay 0.
     let dir = game.resolve("Data\\Levels").unwrap();
     for e in std::fs::read_dir(dir).unwrap().flatten() {
-        if e.path().extension().map_or(false, |x| x.eq_ignore_ascii_case("net")) {
+        if e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("net")) {
             for st in Level::parse(&std::fs::read(e.path()).unwrap()).unwrap().air_stock() {
                 assert_eq!((st.counts[0], st.counts[2]), (st.counts[1], 0), "{} {}", e.path().display(), st.force.name());
             }
@@ -154,7 +179,13 @@ fn fonts_follow_the_ascii_minus_32_layout_and_masks_nest() {
             assert!(to <= ti && to + go.height as i32 >= ti + gi.height as i32, "{f} {c}: vertical nesting");
         }
         // Capitals share a baseline (round letters may overshoot it by one pixel).
-        let bottoms: Vec<i32> = ('A'..='Z').filter(|&c| c != 'Q' && c != 'J').map(|c| { let g = i.glyph(c).unwrap(); -(g.hot_y as i32) + g.height as i32 }).collect();
+        let bottoms: Vec<i32> = ('A'..='Z')
+            .filter(|&c| c != 'Q' && c != 'J')
+            .map(|c| {
+                let g = i.glyph(c).unwrap();
+                -(g.hot_y as i32) + g.height as i32
+            })
+            .collect();
         let (lo, hi) = (*bottoms.iter().min().unwrap(), *bottoms.iter().max().unwrap());
         assert!(hi - lo <= 1, "{f}: capitals should share a baseline, got {lo}..{hi}");
     }
@@ -198,7 +229,11 @@ fn language_files_parse_and_hungarian_is_the_damaged_one() {
 
 #[test]
 fn fire_tables_exist_for_every_top_and_trace_smooth_loops() {
-    use opensow_formats::{fire::{FireTables, FACINGS}, megafile::MegaFile, units::TOPS};
+    use opensow_formats::{
+        fire::{FireTables, FACINGS},
+        megafile::MegaFile,
+        units::TOPS,
+    };
     let Some(game) = GameDir::locate() else { return };
     let mega = MegaFile::open(&game.data().join("sprites.info"), &game.data().join("sprites.data")).unwrap();
     let load = |name: &str, ext: &str| {
@@ -235,6 +270,10 @@ fn fire_tables_exist_for_every_top_and_trace_smooth_loops() {
         assert_eq!(load(t, "po1"), load(t, "po2"), "{t}");
     }
 }
+
+/// What [`Exe::top_case`] reads from a weapon-top constructor case: the fields stored (offset -> value) and the fire
+/// steps added (phase, flash group, barrel, shots).
+type TopCase = (std::collections::HashMap<u32, i32>, Vec<(i32, i32, i32, i32)>);
 
 /// Minimal PE reader: bytes at a virtual address of `State of War.exe`.
 struct Exe {
@@ -363,7 +402,12 @@ fn walk_parameters_match_the_exes_chassis_initialiser() {
 
 #[test]
 fn chassis_frame_counts_are_phases_times_steps() {
-    use opensow_formats::{anim::{steps_for, walk_params}, megafile::MegaFile, sprite, units::unit_art};
+    use opensow_formats::{
+        anim::{steps_for, walk_params},
+        megafile::MegaFile,
+        sprite,
+        units::unit_art,
+    };
     let Some(game) = GameDir::locate() else { return };
     let mega = MegaFile::open(&game.data().join("sprites.info"), &game.data().join("sprites.data")).unwrap();
     for kind in (1..=15).chain(40..=46) {
@@ -396,7 +440,7 @@ impl Exe {
     /// Decodes a weapon-top constructor case (`0x47a000..`) by following its unconditional jumps (cases share tail code)
     /// until the common tail `0x47ab5f`/`0x47ab66`. Understands `push imm`, `mov ecx, edi`, `mov [edi+disp], imm32` and
     /// `call 0x479760`. Returns the fields stored (later stores win) and the steps added (phase, flash group, barrel, shots).
-    fn top_case(&self, va: u32) -> (std::collections::HashMap<u32, i32>, Vec<(i32, i32, i32, i32)>) {
+    fn top_case(&self, va: u32) -> TopCase {
         let (mut pc, mut pushes) = (va, Vec::<i32>::new());
         let (mut fields, mut steps) = (std::collections::HashMap::new(), Vec::new());
         for _ in 0..400 {
@@ -406,11 +450,23 @@ impl Exe {
             let code = self.at(pc, 12).to_vec();
             let imm32 = |o: usize| i32::from_le_bytes(code[o..o + 4].try_into().unwrap());
             match code[0] {
-                0x6A => { pushes.push(code[1] as i8 as i32); pc += 2 }
-                0x68 => { pushes.push(imm32(1)); pc += 5 }
+                0x6A => {
+                    pushes.push(code[1] as i8 as i32);
+                    pc += 2
+                }
+                0x68 => {
+                    pushes.push(imm32(1));
+                    pc += 5
+                }
                 0x8B if code[1] == 0xCF => pc += 2, // mov ecx, edi
-                0xC7 if code[1] == 0x47 => { fields.insert(code[2] as u32, imm32(3)); pc += 7 }
-                0xC7 if code[1] == 0x87 => { fields.insert(u32::from_le_bytes(code[2..6].try_into().unwrap()), imm32(6)); pc += 10 }
+                0xC7 if code[1] == 0x47 => {
+                    fields.insert(code[2] as u32, imm32(3));
+                    pc += 7
+                }
+                0xC7 if code[1] == 0x87 => {
+                    fields.insert(u32::from_le_bytes(code[2..6].try_into().unwrap()), imm32(6));
+                    pc += 10
+                }
                 0xE8 => {
                     let target = (pc + 5).wrapping_add(imm32(1) as u32);
                     assert_eq!(target, 0x479760, "unexpected call at {pc:#x}");
@@ -449,7 +505,13 @@ fn fire_sequences_match_the_exes_top_constructor() {
 
 #[test]
 fn recoil_sequences_are_consistent_with_the_sprites_and_fire_tables() {
-    use opensow_formats::{fire::FireTables, megafile::MegaFile, recoil::{fire_sequence, FLASH_SETS}, sprite, units::unit_art};
+    use opensow_formats::{
+        fire::FireTables,
+        megafile::MegaFile,
+        recoil::{fire_sequence, FLASH_SETS},
+        sprite,
+        units::unit_art,
+    };
     let Some(game) = GameDir::locate() else { return };
     let mega = MegaFile::open(&game.data().join("sprites.info"), &game.data().join("sprites.data")).unwrap();
     let frames = |name: &str| {
@@ -536,8 +598,14 @@ impl Exe {
             let code = self.at(pc, 12).to_vec();
             let imm32 = |o: usize| i32::from_le_bytes(code[o..o + 4].try_into().unwrap());
             match (code[0], code[1]) {
-                (0xC7, 0x86) => { fields.insert(u32::from_le_bytes(code[2..6].try_into().unwrap()), imm32(6)); pc += 10 }
-                (0xC7, 0x46) => { fields.insert(code[2] as u32, imm32(3)); pc += 7 }
+                (0xC7, 0x86) => {
+                    fields.insert(u32::from_le_bytes(code[2..6].try_into().unwrap()), imm32(6));
+                    pc += 10
+                }
+                (0xC7, 0x46) => {
+                    fields.insert(code[2] as u32, imm32(3));
+                    pc += 7
+                }
                 (0xC6, 0x86) => pc += 7, // mov byte ptr [esi+disp32], imm8
                 // random initial value: push n; call 0x437b10; movzx eax, ax; add esp, 4; mov [esi+disp32], eax
                 (0x6A, _) => pc += 2,
@@ -625,7 +693,9 @@ fn advancer_beam_period_comes_from_the_exes_cooldown_member() {
     use opensow_formats::advancer::{BeamTimer, BEAM_PERIOD};
     let Some(game) = GameDir::locate() else { return };
     let Some(exe) = Exe::open(&game) else { return };
-    let imm = |b: &[u8], pat: &[u8]| -> Option<u32> { (0..b.len() - pat.len() - 3).find(|&i| b[i..i + pat.len()] == *pat).map(|i| u32::from_le_bytes(b[i + pat.len()..i + pat.len() + 4].try_into().unwrap())) };
+    let imm = |b: &[u8], pat: &[u8]| -> Option<u32> {
+        (0..b.len() - pat.len() - 3).find(|&i| b[i..i + pat.len()] == *pat).map(|i| u32::from_le_bytes(b[i + pat.len()..i + pat.len() + 4].try_into().unwrap()))
+    };
     // 0x47c630 (cooldown member constructor): `mov [ecx+0x20], 10` (reload), `mov [ecx+0x24], 0` (spread)
     let ctor = exe.at(0x47c630, 0x70);
     assert_eq!(imm(ctor, &[0xC7, 0x41, 0x20]), Some(BEAM_PERIOD));
@@ -680,7 +750,9 @@ fn factory_exit_cells_match_the_exes_constructor() {
     // `mov dword ptr [ebx+disp32], imm32` = C7 83 disp32 imm32, inside the constructor cases of kinds 101 (0x40a596..) and 102 (0x40a636..)
     let find = |from: u32, len: usize, disp: u32| {
         let code = exe.at(from, len);
-        (0..code.len() - 10).find(|&i| code[i..i + 2] == [0xC7, 0x83] && u32::from_le_bytes(code[i + 2..i + 6].try_into().unwrap()) == disp).map(|i| i32::from_le_bytes(code[i + 6..i + 10].try_into().unwrap()))
+        (0..code.len() - 10)
+            .find(|&i| code[i..i + 2] == [0xC7, 0x83] && u32::from_le_bytes(code[i + 2..i + 6].try_into().unwrap()) == disp)
+            .map(|i| i32::from_le_bytes(code[i + 6..i + 10].try_into().unwrap()))
     };
     for (kind, from) in [(101, 0x40a596u32), (102, 0x40a636)] {
         let e = factory_exit(kind).unwrap();
@@ -706,7 +778,11 @@ fn building_footprints_match_the_exes_tables() {
     let jt: Vec<u32> = exe.at(0x409910, 4 * 12).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
     for kind in [25, 26, 27, 28, 29, 100, 101, 102, 103, 104, 105, 106, 107, 108] {
         let code = exe.at(jt[byte_table[kind as usize - 0x19] as usize], 40);
-        let imm: Vec<i32> = (0..code.len() - 5).filter(|&i| code[i..i + 2] == [0xC7, 0x00]).map(|i| i32::from_le_bytes(code[i + 2..i + 6].try_into().unwrap())).take(3).collect();
+        let imm: Vec<i32> = (0..code.len() - 5)
+            .filter(|&i| code[i..i + 2] == [0xC7, 0x00])
+            .map(|i| i32::from_le_bytes(code[i + 2..i + 6].try_into().unwrap()))
+            .take(3)
+            .collect();
         // stores in the order width ([ebp+0x10]), height ([ebp+0x14]), layout ([ebp+0xc])
         assert_eq!(imm, vec![footprint(kind).unwrap().0, footprint(kind).unwrap().1, footprint(kind).unwrap().2 as i32], "kind {kind}");
     }
@@ -788,7 +864,9 @@ fn sfx_table_files_exist_and_match_the_exes_loader() {
     assert_eq!(missing, vec![31, 49]);
     // the loader passes the id as `push imm8` before `call 0x407470`: ids 0..=0x48
     let code = exe.at(0x406dc0, 0x6a0);
-    let calls = (0..code.len() - 4).filter(|&i| code[i] == 0xE8 && (0x406dc0 + i as u32 + 5).wrapping_add(i32::from_le_bytes(code[i + 1..i + 5].try_into().unwrap()) as u32) == 0x407470).count();
+    let calls = (0..code.len() - 4)
+        .filter(|&i| code[i] == 0xE8 && (0x406dc0 + i as u32 + 5).wrapping_add(i32::from_le_bytes(code[i + 1..i + 5].try_into().unwrap()) as u32) == 0x407470)
+        .count();
     assert_eq!(calls, SFX.len(), "one load call per table entry");
 }
 
@@ -874,7 +952,7 @@ fn extras_table_matches_the_exes_loader() {
         let mut push_name = vec![0x68];
         push_name.extend(name.to_le_bytes());
         assert!(code.windows(5).any(|w| w == &push_name[..]), "{} name push", e.name);
-        let file = game.resolve(&format!("Data\\sprites.data"));
+        let file = game.resolve("Data\\sprites.data");
         assert!(file.is_some());
     }
 }
@@ -914,7 +992,10 @@ fn impact_sounds_match_the_exes_impact_function() {
             let (mut i, mut id) = (0, None);
             loop {
                 match code[i] {
-                    0x6A => { id = Some(code[i + 1]); i += 2; }
+                    0x6A => {
+                        id = Some(code[i + 1]);
+                        i += 2;
+                    }
                     0xE8 => i += 5,
                     0x0F => i += 6,
                     0xFF => i += 3,
@@ -940,11 +1021,18 @@ fn animation_spawn_sites_match_the_exes_calls() {
         // push flag; push repeat; push to; push from; push array; push period; (push y; push x ...) call
         let window = exe.at(s.site - 64, 64);
         let imm = |v: u32| if v < 0x80 { vec![0x6A, v as u8] } else { [&[0x68][..], &v.to_le_bytes()].concat() };
-        let tokens = [imm(s.spec.repeat as u32), imm(s.spec.to as u32), imm(s.spec.from as u32), [&[0x68][..], &s.spec.array.to_le_bytes()].concat(), imm(s.spec.period as u32)];
+        let tokens = [
+            imm(s.spec.repeat as u32),
+            imm(s.spec.to as u32),
+            imm(s.spec.from as u32),
+            [&[0x68][..], &s.spec.array.to_le_bytes()].concat(),
+            imm(s.spec.period as u32),
+        ];
         // the argument pushes appear in this order, possibly with other instructions between them
         let mut at = 0;
         for t in &tokens {
-            let p = window[at..].windows(t.len()).position(|w| w == &t[..]).unwrap_or_else(|| panic!("site {:#x} ({}): token {t:02x?} missing", s.site, s.what));
+            let p =
+                window[at..].windows(t.len()).position(|w| w == &t[..]).unwrap_or_else(|| panic!("site {:#x} ({}): token {t:02x?} missing", s.site, s.what));
             at += p + t.len();
         }
         assert_eq!(exe.at(s.site, 1)[0], 0xE8, "site {:#x} is a call", s.site);
@@ -1018,7 +1106,7 @@ fn smoke_puff_constants_match_the_exes_constructor() {
     // the decal draw (0x41a160) reads the 0x5e6960 array through the darkening blit
     let draw = exe.at(0x41a160, 0x60);
     assert!(draw.windows(4).any(|w| w == DECAL_ARRAY.to_le_bytes()));
-    assert!(draw.windows(5).any(|w| w == [0xE8, 0x7B, 0xE7, 0x03, 0x00]) || draw.iter().any(|&b| b == 0xE8), "calls the blit");
+    assert!(draw.windows(5).any(|w| w == [0xE8, 0x7B, 0xE7, 0x03, 0x00]) || draw.contains(&0xE8), "calls the blit");
     // fire_sm1/2 and pustkrat exist with the frames the puff and decal use
     use opensow_formats::{megafile::MegaFile, sprite};
     let mega = MegaFile::open(&game.data().join("sprites.info"), &game.data().join("sprites.data")).unwrap();
@@ -1069,7 +1157,10 @@ fn constructor_sounds_match_the_exes_bullet_constructor() {
             }
             if b[0] == 0xE8 && rel(va, b) == 0x4075b0 {
                 let before = exe.at(case, (va - case) as usize);
-                let at = before.windows(4).rposition(|w| w[0] == 0x57 && w[1] == 0x52 && w[2] == 0x6A).unwrap_or_else(|| panic!("type {ty}: no id push before the call at {va:#x}"));
+                let at = before
+                    .windows(4)
+                    .rposition(|w| w[0] == 0x57 && w[1] == 0x52 && w[2] == 0x6A)
+                    .unwrap_or_else(|| panic!("type {ty}: no id push before the call at {va:#x}"));
                 found = Some(before[at + 3]);
                 sounding += 1;
                 break;
@@ -1287,7 +1378,26 @@ fn campaign_progress_rules_match_the_exes_pass_function() {
 fn every_music_track_is_plain_pcm() {
     let Some(game) = GameDir::locate() else { return };
     let mut total = 0.0;
-    for name in ["Menu", "Brief", "Brief2", "Statistic", "uvod", "Level01", "Level02", "Level03", "Level04", "Level05", "Level06", "Level07", "Level08", "Level09", "Level10", "Level11", "Level12", "Level13"] {
+    for name in [
+        "Menu",
+        "Brief",
+        "Brief2",
+        "Statistic",
+        "uvod",
+        "Level01",
+        "Level02",
+        "Level03",
+        "Level04",
+        "Level05",
+        "Level06",
+        "Level07",
+        "Level08",
+        "Level09",
+        "Level10",
+        "Level11",
+        "Level12",
+        "Level13",
+    ] {
         let path = game.resolve(&format!("Data\\Sounds\\Music\\{name}.wav")).unwrap_or_else(|| panic!("{name}.wav missing"));
         let w = opensow_formats::wav::parse(&std::fs::read(path).unwrap()).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(w.sample_rate == 22050 && (1..=2).contains(&w.channels), "{name}: {} Hz {} ch", w.sample_rate, w.channels);
@@ -1298,7 +1408,11 @@ fn every_music_track_is_plain_pcm() {
 
 #[test]
 fn pointer_types_match_the_exes_cursor_code() {
-    use opensow_formats::{cursor::{Pointer, FRAMES_PER_TYPE, SPRITE}, megafile::MegaFile, sprite};
+    use opensow_formats::{
+        cursor::{Pointer, FRAMES_PER_TYPE, SPRITE},
+        megafile::MegaFile,
+        sprite,
+    };
     let Some(game) = GameDir::locate() else { return };
     let mega = MegaFile::open(&game.data().join("sprites.info"), &game.data().join("sprites.data")).unwrap();
     let e = mega.find(SPRITE).expect("cursor.ps6");
@@ -1312,7 +1426,16 @@ fn pointer_types_match_the_exes_cursor_code() {
         assert_eq!(code[3] as usize, p as usize, "{va:#x}");
     }
     // the scroll arrows: (va, type, x offset, y offset) in the three consecutive moves of 0x416aa5.. (`[+0x50]`, `[+0x54]`, `[+0x58]`)
-    for (va, p) in [(0x416afc, Pointer::ScrollUpLeft), (0x416ae5, Pointer::ScrollDownLeft), (0x416aa5, Pointer::ScrollLeft), (0x416acb, Pointer::ScrollUp), (0x416b48, Pointer::ScrollUpRight), (0x416b31, Pointer::ScrollDownRight), (0x416b21, Pointer::ScrollRight), (0x416b68, Pointer::ScrollDown)] {
+    for (va, p) in [
+        (0x416afc, Pointer::ScrollUpLeft),
+        (0x416ae5, Pointer::ScrollDownLeft),
+        (0x416aa5, Pointer::ScrollLeft),
+        (0x416acb, Pointer::ScrollUp),
+        (0x416b48, Pointer::ScrollUpRight),
+        (0x416b31, Pointer::ScrollDownRight),
+        (0x416b21, Pointer::ScrollRight),
+        (0x416b68, Pointer::ScrollDown),
+    ] {
         let code = exe.at(va, 7);
         assert_eq!(code[3] as usize, p as usize, "scroll type at {va:#x}");
     }
@@ -1324,7 +1447,17 @@ fn building_art_offsets_match_the_exes_constructor() {
     let Some(game) = GameDir::locate() else { return };
     let Some(exe) = Exe::open(&game) else { return };
     // `mov [ebx+0x1c], x` (C7 43 1C imm32) then `mov [ebx+0x20], y` (C7 43 20 imm32), the cases of the constructor
-    for (va, kind) in [(0x40a547, 100), (0x40a59d, 101), (0x40a63d, 102), (0x40a6dd, 103), (0x40a757, 104), (0x40a7bb, 105), (0x40a81f, 106), (0x40a883, 107), (0x40a6f7, 108)] {
+    for (va, kind) in [
+        (0x40a547, 100),
+        (0x40a59d, 101),
+        (0x40a63d, 102),
+        (0x40a6dd, 103),
+        (0x40a757, 104),
+        (0x40a7bb, 105),
+        (0x40a81f, 106),
+        (0x40a883, 107),
+        (0x40a6f7, 108),
+    ] {
         let c = exe.at(va, 14);
         assert_eq!(&c[..3], &[0xC7, 0x43, 0x1C], "{va:#x}");
         assert_eq!(&c[7..10], &[0xC7, 0x43, 0x20], "{va:#x}");
@@ -1344,25 +1477,46 @@ fn building_animation_tables_match_the_exes_constructor() {
     let Some(game) = GameDir::locate() else { return };
     let Some(exe) = Exe::open(&game) else { return };
     // Follow each case through its jumps to the common tail 0x40a981, collecting `mov [ebx+d], imm` stores.
-    for (start, kind) in [(0x40a540, 100), (0x40a596, 101), (0x40a636, 102), (0x40a6d6, 103), (0x40a750, 104), (0x40a7b4, 105), (0x40a818, 106), (0x40a87c, 107), (0x40a6f0, 108)] {
+    for (start, kind) in [
+        (0x40a540, 100),
+        (0x40a596, 101),
+        (0x40a636, 102),
+        (0x40a6d6, 103),
+        (0x40a750, 104),
+        (0x40a7b4, 105),
+        (0x40a818, 106),
+        (0x40a87c, 107),
+        (0x40a6f0, 108),
+    ] {
         let mut stores = std::collections::HashMap::new();
         let mut va = start;
         loop {
             let c = exe.at(va, 10);
             match (c[0], c[1]) {
-                (0xC7, 0x43) => { stores.insert(c[2] as u32, u32::from_le_bytes(c[3..7].try_into().unwrap())); va += 7 }
-                (0xC7, 0x83) => { stores.insert(u32::from_le_bytes(c[2..6].try_into().unwrap()), u32::from_le_bytes(c[6..10].try_into().unwrap())); va += 10 }
-                (0xC6, 0x43) => { stores.insert(c[2] as u32, c[3] as u32); va += 4 }
+                (0xC7, 0x43) => {
+                    stores.insert(c[2] as u32, u32::from_le_bytes(c[3..7].try_into().unwrap()));
+                    va += 7
+                }
+                (0xC7, 0x83) => {
+                    stores.insert(u32::from_le_bytes(c[2..6].try_into().unwrap()), u32::from_le_bytes(c[6..10].try_into().unwrap()));
+                    va += 10
+                }
+                (0xC6, 0x43) => {
+                    stores.insert(c[2] as u32, c[3] as u32);
+                    va += 4
+                }
                 (0xEB, _) => va = (va as i64 + 2 + c[1] as i8 as i64) as u32,
                 (0xE9, _) => va = (va as i64 + 5 + i32::from_le_bytes(c[1..5].try_into().unwrap()) as i64) as u32,
                 _ => panic!("unexpected code at {va:#x}: {c:02x?}"),
             }
-            if va == 0x40a981 { break }
+            if va == 0x40a981 {
+                break;
+            }
         }
         let a = anim(kind).unwrap();
         let bounds: Vec<u32> = (0..8).map(|i| stores[&(0x28 + 4 * i)]).collect();
         assert_eq!(a.bounds.iter().map(|&b| b as u32).collect::<Vec<_>>(), bounds, "kind {kind} bounds");
-        if kind != 100 {
+        if kind != kinds::HEADQUARTERS {
             assert_eq!(a.period, stores[&0x58], "kind {kind} period");
             assert_eq!(stores[&0x54], stores[&0x58], "kind {kind} initial timer");
         }
@@ -1374,7 +1528,9 @@ fn building_sprite_sets_have_the_exes_frame_counts() {
     use opensow_formats::{buildings::anim, megafile::MegaFile, sprite};
     let Some(game) = GameDir::locate() else { return };
     let mega = MegaFile::open(&game.data().join("sprites.info"), &game.data().join("sprites.data")).unwrap();
-    for (kind, stem) in [(100, "_base"), (101, "_light"), (102, "_med"), (103, "_heavy"), (104, "_air"), (105, "_mine"), (106, "_rlab"), (107, "_wind"), (108, "_walker")] {
+    for (kind, stem) in
+        [(100, "_base"), (101, "_light"), (102, "_med"), (103, "_heavy"), (104, "_air"), (105, "_mine"), (106, "_rlab"), (107, "_wind"), (108, "_walker")]
+    {
         let a = anim(kind).unwrap();
         let name = format!("builds\\blue\\{stem}.ps6");
         let e = mega.find(&name).unwrap_or_else(|| panic!("{name}"));
@@ -1522,7 +1678,13 @@ fn free_cell_fallback_and_networked_step_match_the_decoded_structure() {
     assert!(!targets.contains(&0x46a190));
     assert!(calls_in(0x46f550, 0x46f9b3).contains(&0x46a190));
     // 0x41f020(player) = [0x575720] > 0 && player != 0
-    assert_eq!(exe.at(0x41f020, 0x1a), [0x55, 0x8B, 0xEC, 0x83, 0x3D, 0x20, 0x57, 0x57, 0x00, 0x00, 0x7E, 0x0A, 0x83, 0x7D, 0x08, 0x00, 0x74, 0x04, 0xB0, 0x01, 0x5D, 0xC3, 0x32, 0xC0, 0x5D, 0xC3]);
+    assert_eq!(
+        exe.at(0x41f020, 0x1a),
+        [
+            0x55, 0x8B, 0xEC, 0x83, 0x3D, 0x20, 0x57, 0x57, 0x00, 0x00, 0x7E, 0x0A, 0x83, 0x7D, 0x08, 0x00, 0x74, 0x04, 0xB0, 0x01, 0x5D, 0xC3, 0x32, 0xC0,
+            0x5D, 0xC3
+        ]
+    );
     // the speed row table 0x5524a0 (60 bytes per row) and the clock comparison seconds * 64 + tick (shl 6)
     let net = exe.at(0x46fa40, 0x46ff49 - 0x46fa40).to_vec();
     assert_eq!(count(&net, 0x5524a0), 1);
@@ -1554,7 +1716,8 @@ fn string_groups_match_the_exes_name_switches() {
     // object names 0x431ad0 / weapon names 0x4321c0: `dec kind; movzx byte table; jmp [table*4 + jump table]`; the exe's index is the file index + 1
     let cases = |bytes: u32, jt: u32, n: usize| -> Vec<Option<u32>> {
         let sel = exe.at(bytes, n).to_vec();
-        let jmp: Vec<u32> = exe.at(jt, 4 * (*sel.iter().max().unwrap() as usize + 1)).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+        let jmp: Vec<u32> =
+            exe.at(jt, 4 * (*sel.iter().max().unwrap() as usize + 1)).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
         sel.iter().map(|&s| case_string(&exe, jmp[s as usize])).collect()
     };
     let names = cases(0x43214c, 0x432064, 0x73);
@@ -1579,10 +1742,22 @@ fn string_groups_match_the_exes_name_switches() {
     assert_eq!((s(*MESSAGES.start()), s(SPEED), s(SATELLITE_PROTECTION)), ("Building captured", "speed", "SATELLITE PROTECTION"));
     assert!(s(*TUTORIAL.start()).starts_with("i Welcome") && s(*TUTORIAL.end()).starts_with("! Excellent"));
     assert_eq!((s(*OBJECT_NAMES.start()), s(*OBJECT_NAMES.end())), ("Radar", "Research Influx 3"));
-    assert_eq!((s(*WEAPON_NAMES.start()), s(*WEAPON_NAMES.end()), s(NO_WEAPON), s(TECH_LEVEL_HINT)), ("2x antiair rockets", "4x AG bombs", "n/a", "increase tech-level for 500"));
-    assert_eq!((s(SELECTED_LEVEL), s(*SESSION_BUTTONS.start()), s(*SLOT_TEXTS.start()), s(*SIDE_AND_START.end()), s(*HINTS.start())), ("Selected level:", "CREATE SESSION", "Empty Savegame...", "RESEARCH", "Now increase tech-level in your factory."));
-    assert_eq!((s(*INFOBOX_LINES.start()), s(*INFOBOX_LINES.end()), s(QUICK_SAVE), s(ACCEPT), s(BACK)), ("No Info Available", "cargo: reinforcements", "Quick Save", "ACCEPT", "BACK"));
-    assert_eq!((s(*STATISTICS.start()), s(*STATISTICS.end()), s(LOAD), s(SAVE), s(PAUSE), s(REMAINING_TIME), s(SAVE_TITLE)), ("CAPTURED", "SENT", "LOAD", "SAVE", "P A U S E", "Remaining Time", "Save Game"));
+    assert_eq!(
+        (s(*WEAPON_NAMES.start()), s(*WEAPON_NAMES.end()), s(NO_WEAPON), s(TECH_LEVEL_HINT)),
+        ("2x antiair rockets", "4x AG bombs", "n/a", "increase tech-level for 500")
+    );
+    assert_eq!(
+        (s(SELECTED_LEVEL), s(*SESSION_BUTTONS.start()), s(*SLOT_TEXTS.start()), s(*SIDE_AND_START.end()), s(*HINTS.start())),
+        ("Selected level:", "CREATE SESSION", "Empty Savegame...", "RESEARCH", "Now increase tech-level in your factory.")
+    );
+    assert_eq!(
+        (s(*INFOBOX_LINES.start()), s(*INFOBOX_LINES.end()), s(QUICK_SAVE), s(ACCEPT), s(BACK)),
+        ("No Info Available", "cargo: reinforcements", "Quick Save", "ACCEPT", "BACK")
+    );
+    assert_eq!(
+        (s(*STATISTICS.start()), s(*STATISTICS.end()), s(LOAD), s(SAVE), s(PAUSE), s(REMAINING_TIME), s(SAVE_TITLE)),
+        ("CAPTURED", "SENT", "LOAD", "SAVE", "P A U S E", "Remaining Time", "Save Game")
+    );
 }
 
 #[test]
@@ -1632,7 +1807,10 @@ fn rally_point_constants_match_the_exes_code() {
 
 #[test]
 fn turret_art_matches_the_exes_tables() {
-    use opensow_formats::{buildings::{anim, turret_art, turret_top_pos}, units::TOPS};
+    use opensow_formats::{
+        buildings::{anim, turret_art, turret_top_pos},
+        units::TOPS,
+    };
     let Some(game) = GameDir::locate() else { return };
     let Some(exe) = Exe::open(&game) else { return };
     // tops: the weapon constructor's cases for the units 109..=113 that turrets 25..=29 create (`0x40e004`)
@@ -1653,9 +1831,18 @@ fn turret_art_matches_the_exes_tables() {
         while va != 0x40a981 {
             let c = exe.at(va, 10);
             match (c[0], c[1]) {
-                (0xC7, 0x43) => { stores.insert(c[2] as u32, u32::from_le_bytes(c[3..7].try_into().unwrap())); va += 7 }
-                (0xC7, 0x83) => { stores.insert(u32::from_le_bytes(c[2..6].try_into().unwrap()), u32::from_le_bytes(c[6..10].try_into().unwrap())); va += 10 }
-                (0xC6, 0x43) => { stores.insert(c[2] as u32, c[3] as u32); va += 4 }
+                (0xC7, 0x43) => {
+                    stores.insert(c[2] as u32, u32::from_le_bytes(c[3..7].try_into().unwrap()));
+                    va += 7
+                }
+                (0xC7, 0x83) => {
+                    stores.insert(u32::from_le_bytes(c[2..6].try_into().unwrap()), u32::from_le_bytes(c[6..10].try_into().unwrap()));
+                    va += 10
+                }
+                (0xC6, 0x43) => {
+                    stores.insert(c[2] as u32, c[3] as u32);
+                    va += 4
+                }
                 (0xEB, _) => va = (va as i64 + 2 + c[1] as i8 as i64) as u32,
                 (0xE9, _) => va = (va as i64 + 5 + i32::from_le_bytes(c[1..5].try_into().unwrap()) as i64) as u32,
                 _ => panic!("unexpected code at {va:#x}: {c:02x?}"),
@@ -1905,7 +2092,7 @@ fn map_files_are_map_object_streams_that_round_trip() {
     let mut no_marks_cells = Vec::new();
     for e in std::fs::read_dir(dir).unwrap().flatten() {
         let p = e.path();
-        if p.extension().map_or(true, |x| !x.eq_ignore_ascii_case("map")) {
+        if p.extension().is_none_or(|x| !x.eq_ignore_ascii_case("map")) {
             continue;
         }
         let name = p.file_name().unwrap().to_string_lossy().into_owned();
@@ -1939,7 +2126,6 @@ fn map_files_are_map_object_streams_that_round_trip() {
     }
 }
 
-
 #[test]
 fn unit_corpse_timer_and_final_blasts_match_the_exe() {
     use opensow_formats::effects::{corpse_blasts, CORPSE_BLAST_BELOW, CORPSE_LIFE};
@@ -1955,7 +2141,14 @@ fn unit_corpse_timer_and_final_blasts_match_the_exe() {
     assert_eq!(u32::from_le_bytes(exe.at(0x46b664, 4).try_into().unwrap()), 0x46b782 - 0x46b668);
     assert_eq!(u32::from_le_bytes(exe.at(0x46b66d, 4).try_into().unwrap()), 0x46b6fe - 0x46b671);
     // the four spawns, in chain order: `push size` right before `push y` (0x46b6c5, 0x46b749, 0x46b7cd, 0x46b851)
-    let sizes: Vec<u8> = [0x46b6c5u32, 0x46b749, 0x46b7cd, 0x46b851].iter().map(|&a| { let b = exe.at(a, 2); assert_eq!(b[0], 0x6A); b[1] }).collect();
+    let sizes: Vec<u8> = [0x46b6c5u32, 0x46b749, 0x46b7cd, 0x46b851]
+        .iter()
+        .map(|&a| {
+            let b = exe.at(a, 2);
+            assert_eq!(b[0], 0x6A);
+            b[1]
+        })
+        .collect();
     for (variant, n) in [(4u32, 4usize), (3, 3), (2, 2)] {
         assert_eq!(corpse_blasts(variant), &sizes[4 - n..], "variant {variant}");
     }
@@ -1976,8 +2169,16 @@ fn top_offsets_match_the_exes_constructor() {
         let (f, _) = exe.top_case(jt[byte_table[kind as usize - 1] as usize]);
         assert_eq!(f.get(&0x5c), None, "kind {kind}: the horizontal offset stays 0");
         let adj = if kind <= 0x2c {
-            match adj_jt[adj_idx[kind as usize] as usize] { 0x47ab89 => -10, 0x47ab8f => -4, 0x47ab95 => -16, 0x47ab99 => 0, o => panic!("{o:x}") }
-        } else { 0 };
+            match adj_jt[adj_idx[kind as usize] as usize] {
+                0x47ab89 => -10,
+                0x47ab8f => -4,
+                0x47ab95 => -16,
+                0x47ab99 => 0,
+                o => panic!("{o:x}"),
+            }
+        } else {
+            0
+        };
         assert_eq!(top_dy(kind), f.get(&0x60).copied().unwrap_or(0) + adj, "kind {kind}");
     }
 }
@@ -2019,10 +2220,12 @@ fn building_start_hp_follows_the_exes_percentage_rule() {
     let (mut n, mut off) = (0, Vec::new());
     for e in std::fs::read_dir(dir).unwrap().flatten() {
         let path = e.path();
-        if !path.extension().map_or(false, |x| x.eq_ignore_ascii_case("edt") || x.eq_ignore_ascii_case("net")) {
+        if !path.extension().is_some_and(|x| x.eq_ignore_ascii_case("edt") || x.eq_ignore_ascii_case("net")) {
             continue;
         }
-        for o in Level::parse(&std::fs::read(&path).unwrap()).unwrap().objects.iter().filter(|o| o.object_kind().is_building() || (25..=29).contains(&o.kind)) {
+        for o in
+            Level::parse(&std::fs::read(&path).unwrap()).unwrap().objects.iter().filter(|o| o.object_kind().is_building() || kinds::TURRETS.contains(&o.kind))
+        {
             n += 1;
             let want = o.start_hp(building_max_hp(o.kind));
             if (want - o.hp()).abs() > 1 {
@@ -2055,7 +2258,10 @@ fn frame_sender_writes_the_command_queues_and_snapshot_in_the_documented_order()
             }
             // the nearest `6A xx` before the call whose next instruction is a value push (FF /6, 50, or a register push)
             let back = &code[i.saturating_sub(24)..i];
-            let n = (0..back.len().saturating_sub(2)).rev().find(|&j| back[j] == 0x6A && back[j + 1] <= 0x20 && matches!(back[j + 2], 0xFF | 0x50 | 0x51 | 0x52 | 0x53 | 0x56 | 0x57 | 0x6A)).map(|j| back[j + 1]);
+            let n = (0..back.len().saturating_sub(2))
+                .rev()
+                .find(|&j| back[j] == 0x6A && back[j + 1] <= 0x20 && matches!(back[j + 2], 0xFF | 0x50 | 0x51 | 0x52 | 0x53 | 0x56 | 0x57 | 0x6A))
+                .map(|j| back[j + 1]);
             // the release point pushes its width, then computes the value (`sar eax, 5`) before the second push: take the nearest push imm8
             let n = n.or_else(|| (0..back.len().saturating_sub(1)).rev().find(|&j| back[j] == 0x6A && back[j + 1] <= 0x20).map(|j| back[j + 1]));
             out.push(n.unwrap_or(255));
@@ -2096,7 +2302,7 @@ fn building_destruction_animation_lengths_match_the_exes_constructor() {
     let table = exe.at(0x40af64, 0x54).to_vec();
     for kind in 25..=108 {
         let case = table[(kind - 25) as usize];
-        if (25..=29).contains(&kind) || (100..=108).contains(&kind) {
+        if kinds::TURRETS.contains(&kind) || (100..=108).contains(&kind) {
             let expect = if case <= 2 { 2 } else { 5 };
             assert_eq!(destruction_bursts(kind), expect, "kind {kind}");
         }
@@ -2127,7 +2333,10 @@ fn shot_spread_and_rounds_match_the_exes_top_constructor() {
 /// The sprite encoder and the archive builder reproduce the installed files exactly (so re-imported art is a drop-in).
 #[test]
 fn sprite_encoder_and_archive_builder_reproduce_the_install() {
-    use opensow_formats::{megafile::{self, MegaFile}, sprite};
+    use opensow_formats::{
+        megafile::{self, MegaFile},
+        sprite,
+    };
     let Some(game) = GameDir::locate() else { return };
     let mega = MegaFile::open(&game.data().join("sprites.info"), &game.data().join("sprites.data")).unwrap();
     let mut all = Vec::new();

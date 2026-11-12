@@ -1,17 +1,29 @@
+//! The CPU renderer: draws a [`Scene`] through a [`View`] (camera position and zoom) into a `0x00RRGGBB` frame buffer.
+//!
+//! Everything here is plain pixel loops with no window or GPU, so it runs headless and in tests. Each drawing primitive
+//! also reports itself to [`record`], which lets the game replay the same frame on the GPU (docs/game.md).
+
 use crate::art::Source;
-use crate::{fx, record, upscale};
 use crate::scene::{Scene, CELL};
+use crate::{fx, record, upscale};
 use opensow_formats::effects::Blit;
 use opensow_formats::level::{Object, ObjectKind, Owner, UnitKind};
 use opensow_formats::sprite::{rgb565_to_rgb8, Frame};
 
+/// What the renderer draws on top of or instead of the plain map.
 #[derive(Clone, Copy)]
 pub struct Overlays {
+    /// Shade the cells ground units cannot enter.
     pub blocked: bool,
+    /// Draw the cell grid.
     pub grid: bool,
+    /// Outline the buildings and turrets in their owner's colour.
     pub objects: bool,
+    /// Mark the unit markers.
     pub markers: bool,
+    /// Draw the sprites of objects and units.
     pub sprites: bool,
+    /// Mark the muzzle points of weapon tops.
     pub muzzles: bool,
     /// Show chassis mid-walk after this many game ticks (`None` = standing still).
     pub walk: Option<u32>,
@@ -25,19 +37,34 @@ pub struct Overlays {
 
 impl Default for Overlays {
     fn default() -> Self {
-        Overlays { blocked: false, grid: false, objects: true, markers: true, sprites: true, muzzles: false, walk: None, fire: None, foreground: true, minimap: false }
+        Overlays {
+            blocked: false,
+            grid: false,
+            objects: true,
+            markers: true,
+            sprites: true,
+            muzzles: false,
+            walk: None,
+            fire: None,
+            foreground: true,
+            minimap: false,
+        }
     }
 }
 
 /// Camera: `x`,`y` are the map pixel at the top-left of the screen, `zoom` is screen px per map px.
 #[derive(Clone, Copy)]
 pub struct View {
+    /// Map pixel x at the left edge of the screen.
     pub x: f32,
+    /// Map pixel y at the top edge of the screen.
     pub y: f32,
+    /// Screen pixels per map pixel.
     pub zoom: f32,
 }
 
 impl View {
+    /// Keeps the zoom in its limits and the view inside the map for a `w` x `h` screen.
     pub fn clamp(&mut self, scene: &Scene, w: usize, h: usize) {
         self.zoom = self.zoom.clamp(0.1, 4.0);
         let (vw, vh) = (w as f32 / self.zoom, h as f32 / self.zoom);
@@ -46,21 +73,25 @@ impl View {
         self.y = if vh >= mh { (mh - vh) / 2.0 } else { self.y.clamp(0.0, mh - vh) };
     }
 
+    /// The screen pixel of a map pixel.
     pub fn to_screen(&self, mx: f32, my: f32) -> (i32, i32) {
         (((mx - self.x) * self.zoom).round() as i32, ((my - self.y) * self.zoom).round() as i32)
     }
 }
 
+/// Packs a colour into the frame buffer's `0x00RRGGBB` word.
 #[inline(always)]
 pub fn pack(r: u8, g: u8, b: u8) -> u32 {
     (r as u32) << 16 | (g as u32) << 8 | b as u32
 }
 
+/// Mixes the colour over the pixel `dst` with opacity `a` (0..=255).
 pub fn blend(dst: u32, r: u8, g: u8, b: u8, a: u32) -> u32 {
     let mix = |d: u32, s: u8| (d * (255 - a) + s as u32 * a) / 255;
     pack(mix(dst >> 16 & 255, r) as u8, mix(dst >> 8 & 255, g) as u8, mix(dst & 255, b) as u8)
 }
 
+/// The viewer's marker colour for an object kind.
 pub fn kind_color(kind: ObjectKind) -> (u8, u8, u8) {
     match kind {
         ObjectKind::Turret(_) => (235, 235, 235),
@@ -77,6 +108,7 @@ pub fn kind_color(kind: ObjectKind) -> (u8, u8, u8) {
     }
 }
 
+/// The outline colour of an owner: blue player, green enemy, gray neutral.
 pub fn owner_color(owner: Owner) -> (u8, u8, u8) {
     match owner {
         Owner::Player => (40, 90, 255),
@@ -88,11 +120,15 @@ pub fn owner_color(owner: Owner) -> (u8, u8, u8) {
 
 /// Half-size of an object's square in map pixels.
 fn object_radius(o: &Object) -> f32 {
-    if o.object_kind().is_building() { 0.8 * CELL as f32 } else { 0.35 * CELL as f32 }
+    if o.object_kind().is_building() {
+        0.8 * CELL as f32
+    } else {
+        0.35 * CELL as f32
+    }
 }
 
 /// Topmost object whose square contains the map pixel (mx, my).
-pub fn object_at<'a>(scene: &'a Scene, mx: f32, my: f32) -> Option<&'a Object> {
+pub fn object_at(scene: &Scene, mx: f32, my: f32) -> Option<&Object> {
     let level = scene.level.as_ref()?;
     level.objects.iter().rev().find(|o| {
         let (cx, cy) = ((o.cell_x as f32 + 0.5) * CELL as f32, (o.cell_y as f32 + 0.5) * CELL as f32);
@@ -101,6 +137,7 @@ pub fn object_at<'a>(scene: &'a Scene, mx: f32, my: f32) -> Option<&'a Object> {
     })
 }
 
+/// Blends the colour `c` with opacity `a` over the rectangle `x0..x1` x `y0..y1`, clipped to the screen.
 pub fn rect(buf: &mut [u32], w: usize, h: usize, x0: i32, y0: i32, x1: i32, y1: i32, c: (u8, u8, u8), a: u32) {
     if record::active() {
         record::fill(record::op::FILL, x0, y0, x1, y1, pack(c.0, c.1, c.2), a);
@@ -146,7 +183,6 @@ pub fn blit_clip(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, ax
     blit_clip_core(buf, w, h, view, f, ax, ay, shadow, clip, fx::SHADOW_ALPHA);
 }
 
-#[allow(clippy::too_many_arguments)]
 fn blit_clip_core(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, ax: i32, ay: i32, shadow: bool, clip: (i32, i32, i32, i32), alpha: u32) {
     if let Some((v, e)) = hires(view, f) {
         return blit_clip_core(buf, w, h, &v, e, ax * 2, ay * 2, shadow, clip, alpha);
@@ -191,7 +227,6 @@ pub fn blit_shadow_masked(buf: &mut [u32], w: usize, h: usize, view: &View, f: &
     blit_shadow_masked_core(buf, w, h, view, f, ax, ay, mask, fx::SHADOW_ALPHA);
 }
 
-#[allow(clippy::too_many_arguments)]
 fn blit_shadow_masked_core(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, ax: i32, ay: i32, mask: &[bool], alpha: u32) {
     if let Some((v, e)) = hires(view, f) {
         return blit_shadow_masked_core(buf, w, h, &v, e, ax * 2, ay * 2, mask, alpha);
@@ -258,7 +293,6 @@ pub fn blit_blend(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, a
 
 /// [`blit_blend`] that skips the screen pixels `mask` marks (the exe's screen mask, docs/effects.md: `0x45b5e0` and `0x45f4d0` draw
 /// only where the byte is below the frame's stamp, i.e. where no building or foreground tile was stamped this frame).
-#[allow(clippy::too_many_arguments)]
 pub fn blit_blend_masked(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, ax: i32, ay: i32, mode: Blit, mask: Option<&[bool]>) {
     // an additive effect (explosion, muzzle flash) also lights the ground around it (docs/fx.md)
     if mode == Blit::Additive && fx::glow_on() {
@@ -267,7 +301,6 @@ pub fn blit_blend_masked(buf: &mut [u32], w: usize, h: usize, view: &View, f: &F
     blit_blend_core(buf, w, h, view, f, ax, ay, mode, mask);
 }
 
-#[allow(clippy::too_many_arguments)]
 fn blit_blend_core(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, ax: i32, ay: i32, mode: Blit, mask: Option<&[bool]>) {
     // (the lens blend refracts by the integer zoom, so it keeps the exe's pixels)
     if mode != Blit::Lens {
@@ -497,6 +530,7 @@ fn foreground_rows(scene: &Scene, view: &View, buf: &mut [u32], w: usize, h: usi
     }
 }
 
+/// Draws the scene as seen through `view` with the overlays `ov` into the `w` x `h` frame buffer.
 pub fn render(scene: &Scene, view: &View, ov: Overlays, buf: &mut [u32], w: usize, h: usize) {
     if record::active() {
         let (g, v) = scene.ground(view);
@@ -589,9 +623,7 @@ fn render_rest(scene: &Scene, view: &View, ov: Overlays, buf: &mut [u32], w: usi
         let frame_of = |p: &crate::art::Placed| match (p.walk, ov.walk, &p.recoil) {
             (None, Some(t), _) if p.anim.is_some() => p.anim.map_or(p.frame, |a| a.working_frame(t)).min(p.set.len() - 1),
             (Some(wk), Some(t), _) => wk.frame_at(t).min(p.set.len() - 1),
-            (_, _, Some(r)) if ov.fire.is_some() => {
-                (r.seq.top_frame(fire_tick(r).unwrap_or(0), r.facing as u32, r.steps as u32) as usize).min(p.set.len() - 1)
-            }
+            (_, _, Some(r)) if ov.fire.is_some() => (r.seq.top_frame(fire_tick(r).unwrap_or(0), r.facing as u32, r.steps as u32) as usize).min(p.set.len() - 1),
             _ => p.frame,
         };
         if fx::contact() {
@@ -607,7 +639,9 @@ fn render_rest(scene: &Scene, view: &View, ov: Overlays, buf: &mut [u32], w: usi
         for p in &scene.placed {
             if let Some((set, i)) = &p.shadow {
                 blit(buf, w, h, view, &set[frame_of(p).min(set.len() - 1).max(if p.walk.is_some() || p.anim.is_some() { 0 } else { *i })], p.ax, p.ay, true);
-            } else if fx::turret_shadows() && matches!(p.source, Source::Object(oi) if level.objects.get(oi).is_some_and(|o| (25..=29).contains(&o.kind))) {
+            } else if fx::turret_shadows()
+                && matches!(p.source, Source::Object(oi) if level.objects.get(oi).is_some_and(|o| opensow_formats::kinds::TURRETS.contains(&o.kind)))
+            {
                 // a turret part with no shadow art: its own silhouette, moved right and up (docs/fx.md)
                 let f = &p.set[frame_of(p).min(p.set.len() - 1)];
                 let (dx, dy) = fx::turret_shadow_offset(f.height);
@@ -708,7 +742,7 @@ pub fn draw_minimap(scene: &Scene, view: &View, buf: &mut [u32], w: usize, h: us
             rect(buf, w, h, x, y, x + n, y + n, owner_color(o.owner()), 255);
         }
         for m in &level.markers {
-            let (x, y) = (ox + m.x.div_euclid(CELL as i32) * k, oy + m.y.div_euclid(CELL as i32) * k);
+            let (x, y) = (ox + m.x.div_euclid(CELL) * k, oy + m.y.div_euclid(CELL) * k);
             let team = if m.player == 0 { (110, 150, 255) } else { (110, 240, 130) };
             rect(buf, w, h, x, y, x + k.max(1), y + k.max(1), team, 255);
         }
@@ -729,7 +763,16 @@ mod mask_tests {
     use opensow_formats::sprite::Frame;
 
     fn frame(w: u16, h: u16, px: u16) -> Frame {
-        Frame { width: w, height: h, hot_x: 0, hot_y: 0, extra: [0; 4], pixels: vec![px; (w * h) as usize], mask: vec![true; (w * h) as usize], enhanced: Default::default() }
+        Frame {
+            width: w,
+            height: h,
+            hot_x: 0,
+            hot_y: 0,
+            extra: [0; 4],
+            pixels: vec![px; (w * h) as usize],
+            mask: vec![true; (w * h) as usize],
+            enhanced: Default::default(),
+        }
     }
 
     /// The screen mask (docs/effects.md): a masked blit leaves the marked pixels alone, an unmasked one draws them; stamping a frame

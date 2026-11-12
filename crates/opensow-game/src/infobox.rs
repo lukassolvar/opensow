@@ -12,17 +12,21 @@ use opensow_formats::infobox::{self, InfoLines, LINE_POS};
 
 /// Anchor y when hidden and when shown (`0x455b6c..0x455bb8`), speed in px per tick (`0x455b80`); x is -65 from the right edge.
 pub const Y_HIDDEN: i32 = -91;
+/// Anchor y while the box is shown.
 pub const Y_SHOWN: i32 = 99;
 const SPEED: i32 = 13;
 /// Text width limit of the description (`0x43e2bd`: 0x69), in unscaled pixels.
 const WRAP_WIDTH: i32 = 105;
 
+/// The info box at the right edge: what it shows and how far it has slid in.
 #[derive(Default)]
 pub struct InfoBox {
+    /// What the box shows; 0 = nothing (hidden).
     pub mode: u8,
     /// Current anchor y (the widget position).
     pub y: i32,
     target_y: i32,
+    /// The unit or building kind the box is about.
     pub kind: Option<i32>,
     /// The hovered icon is a locked production slot (the third argument of `0x43cde0`): mode 3 instead of the stats.
     pub locked: bool,
@@ -46,10 +50,12 @@ pub struct InfoBox {
 }
 
 impl InfoBox {
+    /// A hidden box.
     pub fn new() -> InfoBox {
         InfoBox { y: Y_HIDDEN, target_y: Y_HIDDEN, pic_frame: 99, ..Default::default() }
     }
 
+    #[cfg(test)]
     pub fn visible(&self) -> bool {
         self.mode != 0
     }
@@ -117,7 +123,7 @@ impl InfoBox {
         if self.pic_timer2 < 0 {
             self.pic_timer2 = 6;
             self.pic_frame += 1;
-            let frames = self.kind.map_or(32, |k| infobox::picture_frames(k)) as i32;
+            let frames = self.kind.map_or(32, infobox::picture_frames) as i32;
             if self.pic_frame >= frames {
                 self.pic_frame = 0;
             }
@@ -125,7 +131,7 @@ impl InfoBox {
         // static animation index
         let (period, count) = match self.mode {
             2 => (2, 6),
-            3 | 4 | 5 => (9, 6),
+            3..=5 => (9, 6),
             _ => (0, 0),
         };
         if period > 0 {
@@ -236,7 +242,17 @@ pub fn wrap_description(font: &(opensow_formats::font::Font, opensow_formats::fo
 }
 
 /// Draws the box at the top right: frame, window (static, picture), text. `w` is the screen width, `s` the HUD scale.
-pub fn draw(b: &InfoBox, lines: Option<&InfoLines>, desc: &[String], gdi: Option<&crate::gdi::Gdi>, assets: &mut Assets, buf: &mut [u32], w: usize, h: usize, s: f32) {
+pub fn draw(
+    b: &InfoBox,
+    lines: Option<&InfoLines>,
+    desc: &[String],
+    gdi: Option<&crate::gdi::Gdi>,
+    assets: &mut Assets,
+    buf: &mut [u32],
+    w: usize,
+    h: usize,
+    s: f32,
+) {
     if b.mode == 0 {
         return;
     }
@@ -298,7 +314,7 @@ pub fn draw(b: &InfoBox, lines: Option<&InfoLines>, desc: &[String], gdi: Option
                 // when a translated first column is short
                 let first_of_two = dx < 0 && LINE_POS.iter().any(|&(x, y)| y == dy && x > dx);
                 let (dx, max_w) = match gdi {
-                    Some(g) if dx > 0 => {
+                    Some(_g) if dx > 0 => {
                         let x2 = dx.min(-54 + prev_w + 6);
                         (x2, 48 - x2)
                     }

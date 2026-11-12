@@ -38,6 +38,7 @@ pub fn saved() -> Edition {
     }
 }
 
+/// Remembers the chosen campaign for the next start.
 pub fn remember(e: Edition) {
     write(EDITION_FILE, if e == Edition::Warmonger { "warmonger" } else { "original" });
 }

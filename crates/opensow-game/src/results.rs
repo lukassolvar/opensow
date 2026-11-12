@@ -5,7 +5,7 @@ use crate::assets::{load_backdrop, Assets};
 use crate::ui::{self, Image};
 use opensow_formats::endscreen::{self as es, SideStats};
 use opensow_formats::font::Font;
-use opensow_formats::lang::{self, LangFile};
+use opensow_formats::lang::LangFile;
 use opensow_formats::sprite::{self, rgb565_to_rgb8, Frame, Kind};
 use opensow_viewer::render::pack;
 
@@ -25,7 +25,9 @@ enum Phase {
     Statistics,
 }
 
+/// The mission-end screens: the victory / defeat banner, then the statistics.
 pub struct Results {
+    /// The mission was won.
     pub won: bool,
     /// The tutorial skips the statistics screen and returns to the main menu (`0x4359f3`: state 0x16 only when the mission number is not 0).
     pub tutorial: bool,
@@ -57,7 +59,12 @@ impl Results {
     /// `language`: the index into `intro::LANGUAGES` (the banner picture has a copy per language under `DiffData`).
     pub fn new(assets: &mut Assets, won: bool, tutorial: bool, stats: [SideStats; 2], language: usize) -> Results {
         let lang_id = assets.game.language();
-        let strings = assets.game.resolve(&format!("Data\\Language\\{}", lang_id.file_name())).and_then(|p| std::fs::read(p).ok()).and_then(|d| LangFile::parse(&d).ok()).map(|f| f.with_supplement(lang_id));
+        let strings = assets
+            .game
+            .resolve(&format!("Data\\Language\\{}", lang_id.file_name()))
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|d| LangFile::parse(&d).ok())
+            .map(|f| f.with_supplement(lang_id));
         let dir = crate::intro::LANGUAGES.get(language).copied().unwrap_or("");
         let local = (!dir.is_empty()).then(|| frames(assets, &format!("Data\\DiffData\\{dir}\\Sprites2\\Extras\\WinLoose.tsp"))).filter(|f| f.len() >= 2);
         let banner = local.unwrap_or_else(|| frames(assets, "Data\\Sprites2\\Extras\\WinLoose.tsp"));
@@ -82,10 +89,12 @@ impl Results {
         }
     }
 
+    /// Whether the statistics screen is showing (after the banner).
     pub fn in_statistics(&self) -> bool {
         self.phase == Phase::Statistics
     }
 
+    #[cfg(test)]
     pub fn finished(&self) -> bool {
         self.finished
     }
@@ -163,19 +172,19 @@ impl Results {
         if opensow_viewer::record::active() {
             opensow_viewer::record::fill(opensow_viewer::record::op::TINT_ROWS, 0, 0, w as i32, h as i32, 0, 0);
         } else {
-        for y in 0..h {
-            let row = &mut buf[y * w..(y + 1) * w];
-            if y % 2 == 1 {
-                row.fill(0);
-                continue;
+            for y in 0..h {
+                let row = &mut buf[y * w..(y + 1) * w];
+                if y % 2 == 1 {
+                    row.fill(0);
+                    continue;
+                }
+                for px in row.iter_mut() {
+                    let (r, g, b) = ((*px >> 16 & 255) as u16, (*px >> 8 & 255) as u16, (*px & 255) as u16);
+                    let p = es::tint565((r >> 3) << 11 | (g >> 2) << 5 | (b >> 3));
+                    let [r, g, b] = rgb565_to_rgb8(p);
+                    *px = pack(r, g, b);
+                }
             }
-            for px in row.iter_mut() {
-                let (r, g, b) = ((*px >> 16 & 255) as u16, (*px >> 8 & 255) as u16, (*px & 255) as u16);
-                let p = es::tint565((r >> 3) << 11 | (g >> 2) << 5 | (b >> 3));
-                let [r, g, b] = rgb565_to_rgb8(p);
-                *px = pack(r, g, b);
-            }
-        }
         }
         if let Some(f) = self.banner.get(if self.won { 0 } else { 1 }) {
             let s = (h as f32 / 768.0).max(1.0);
@@ -334,7 +343,7 @@ mod tests {
         r.update(60.0);
         assert!(r.finished());
         assert_eq!(r.sounds.iter().filter(|&&s| s == 47).count(), 8);
-        assert!(r.sounds.iter().any(|&s| s == 48));
+        assert!(r.sounds.contains(&48));
     }
 
     #[test]

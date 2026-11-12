@@ -24,6 +24,7 @@ pub enum Force {
 /// An enemy unit or building.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Obj {
+    /// The cell it stands on.
     pub cell: (i32, i32),
     /// What destroying it is worth (a tank 1, a factory 4).
     pub w: f32,
@@ -34,7 +35,9 @@ pub struct Obj {
 /// Anti-air that covers `range` cells around `cell`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Flak {
+    /// Where it stands.
     pub cell: (i32, i32),
+    /// Reach in cells.
     pub range: f32,
 }
 
@@ -61,7 +64,11 @@ pub fn value(force: Force, at: (i32, i32), foes: &[Obj], own: &[(i32, i32)], fla
         return 0.0;
     }
     let v = hit - 2.0 * friends;
-    if force == Force::Fighter { v } else { v * 0.5f32.powi(guns as i32) }
+    if force == Force::Fighter {
+        v
+    } else {
+        v * 0.5f32.powi(guns as i32)
+    }
 }
 
 /// The launch to make now: the best (force, aim cell) over the stock `[bombers, fighters, triplers]`, if it clears the bar
@@ -79,7 +86,7 @@ pub fn decide(stock: [u32; 3], foes: &[Obj], own: &[(i32, i32)], flak: &[Flak]) 
         };
         for o in foes {
             let v = value(force, o.cell, foes, own, flak);
-            if v >= bar && best.map_or(true, |(b, _, _)| v > b + 1e-4) {
+            if v >= bar && best.is_none_or(|(b, _, _)| v > b + 1e-4) {
                 best = Some((v, force, o.cell));
             }
         }

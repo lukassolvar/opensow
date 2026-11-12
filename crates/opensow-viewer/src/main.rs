@@ -16,6 +16,7 @@ use opensow_viewer::editor::{self, Editor, Sel};
 use opensow_viewer::editor_ui::{panel_width, Hit, Ui};
 use opensow_viewer::render::{object_at, render, Overlays, View};
 use opensow_viewer::scene::Scene;
+use opensow_viewer::screenshot::write_png;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
@@ -48,7 +49,23 @@ struct Args {
 }
 
 fn parse_args() -> Result<Args, String> {
-    let mut a = Args { level: "M01".into(), screenshot: None, size: (1280, 800), zoom: None, center: None, facing: 0, aim: None, walk: None, fire: None, shots: Vec::new(), ranges: Vec::new(), overlays: Overlays::default(), edit: None, select: None, tool: None };
+    let mut a = Args {
+        level: "M01".into(),
+        screenshot: None,
+        size: (1280, 800),
+        zoom: None,
+        center: None,
+        facing: 0,
+        aim: None,
+        walk: None,
+        fire: None,
+        shots: Vec::new(),
+        ranges: Vec::new(),
+        overlays: Overlays::default(),
+        edit: None,
+        select: None,
+        tool: None,
+    };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         let mut value = |what: &str| it.next().ok_or(format!("{arg} needs {what}"));
@@ -94,7 +111,18 @@ fn parse_args() -> Result<Args, String> {
             }
             "--overlay" => {
                 let v = value("a list")?;
-                a.overlays = Overlays { blocked: false, grid: false, objects: false, markers: false, sprites: false, muzzles: false, walk: None, fire: None, foreground: false, minimap: false };
+                a.overlays = Overlays {
+                    blocked: false,
+                    grid: false,
+                    objects: false,
+                    markers: false,
+                    sprites: false,
+                    muzzles: false,
+                    walk: None,
+                    fire: None,
+                    foreground: false,
+                    minimap: false,
+                };
                 for o in v.split(',').filter(|s| !s.is_empty()) {
                     match o {
                         "blocked" => a.overlays.blocked = true,
@@ -141,11 +169,7 @@ fn main() {
         std::process::exit(1);
     });
 
-    scene.shots = args
-        .shots
-        .iter()
-        .filter_map(|&(x1, y1, x2, y2, t)| opensow_formats::projectile::build_path(t, x1, y1, x2, y2, 0))
-        .collect();
+    scene.shots = args.shots.iter().filter_map(|&(x1, y1, x2, y2, t)| opensow_formats::projectile::build_path(t, x1, y1, x2, y2, 0)).collect();
 
     scene.ranges = args.ranges.clone();
 
@@ -174,7 +198,25 @@ fn main() {
     let levels = Scene::list(&game);
     let idx = levels.iter().position(|l| *l == scene.name).unwrap_or(0);
     let event_loop = EventLoop::new().expect("event loop");
-    let mut app = App { game, levels, idx, scene, view: View { x: 0.0, y: 0.0, zoom: 1.0 }, ov: args.overlays, window: None, surface: None, drag: None, cursor: PhysicalPosition::new(0.0, 0.0), needs_fit: true, autoplay: false, fire_play: false, ticks: 0, last_tick: std::time::Instant::now(), edit: None, mods: ModifiersState::empty() };
+    let mut app = App {
+        game,
+        levels,
+        idx,
+        scene,
+        view: View { x: 0.0, y: 0.0, zoom: 1.0 },
+        ov: args.overlays,
+        window: None,
+        surface: None,
+        drag: None,
+        cursor: PhysicalPosition::new(0.0, 0.0),
+        needs_fit: true,
+        autoplay: false,
+        fire_play: false,
+        ticks: 0,
+        last_tick: std::time::Instant::now(),
+        edit: None,
+        mods: ModifiersState::empty(),
+    };
     event_loop.run_app(&mut app).expect("run");
 }
 
@@ -273,13 +315,42 @@ fn run_editor(game: GameDir, wanted: &str, args: &Args) {
         return;
     }
     let event_loop = EventLoop::new().expect("event loop");
-    let mut app = App { game, levels: Vec::new(), idx: 0, scene, view: View { x: 0.0, y: 0.0, zoom: 1.0 }, ov: args.overlays, window: None, surface: None, drag: None, cursor: PhysicalPosition::new(0.0, 0.0), needs_fit: true, autoplay: false, fire_play: false, ticks: 0, last_tick: std::time::Instant::now(), edit: Some(session), mods: ModifiersState::empty() };
+    let mut app = App {
+        game,
+        levels: Vec::new(),
+        idx: 0,
+        scene,
+        view: View { x: 0.0, y: 0.0, zoom: 1.0 },
+        ov: args.overlays,
+        window: None,
+        surface: None,
+        drag: None,
+        cursor: PhysicalPosition::new(0.0, 0.0),
+        needs_fit: true,
+        autoplay: false,
+        fire_play: false,
+        ticks: 0,
+        last_tick: std::time::Instant::now(),
+        edit: Some(session),
+        mods: ModifiersState::empty(),
+    };
     event_loop.run_app(&mut app).expect("run");
 }
 
 /// One editor frame into `buf` (`w` x `h`): the map with the editor's marks on the left, the sidebar on the right.
-#[allow(clippy::too_many_arguments)]
-fn draw_editor(scene: &Scene, view: &View, ov: Overlays, s: &EditSession, buf: &mut [u32], w: usize, h: usize, hover: Option<Sel>, drag: Option<(i32, i32)>, place: Option<(i32, i32)>, mouse: (i32, i32)) {
+fn draw_editor(
+    scene: &Scene,
+    view: &View,
+    ov: Overlays,
+    s: &EditSession,
+    buf: &mut [u32],
+    w: usize,
+    h: usize,
+    hover: Option<Sel>,
+    drag: Option<(i32, i32)>,
+    place: Option<(i32, i32)>,
+    mouse: (i32, i32),
+) {
     let mw = w - panel_width(w, h);
     let mut map = vec![0u32; mw * h];
     render(scene, view, ov, &mut map, mw, h);
@@ -288,14 +359,6 @@ fn draw_editor(scene: &Scene, view: &View, ov: Overlays, s: &EditSession, buf: &
         buf[y * w..y * w + mw].copy_from_slice(&map[y * mw..(y + 1) * mw]);
     }
     s.ui.draw(buf, w, h, &s.editor, &s.editor.map, s.maps.len() > 1, mouse);
-}
-
-fn write_png(path: &str, buf: &[u32], w: usize, h: usize) {
-    let rgb: Vec<u8> = buf.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]).collect();
-    let mut enc = png::Encoder::new(std::io::BufWriter::new(std::fs::File::create(path).expect("create png")), w as u32, h as u32);
-    enc.set_color(png::ColorType::Rgb);
-    enc.set_depth(png::BitDepth::Eight);
-    enc.write_header().and_then(|mut w| w.write_image_data(&rgb)).expect("write png");
 }
 
 struct App {
@@ -521,7 +584,8 @@ impl App {
         let (mx, my) = (self.view.x + self.cursor.x as f32 / self.view.zoom, self.view.y + self.cursor.y as f32 / self.view.zoom);
         let mut t = format!("OpenSOW - {}  cell ({},{})", self.scene.name, (mx / 32.0).floor() as i32, (my / 32.0).floor() as i32);
         if let Some(l) = &self.scene.level {
-            let stock: Vec<String> = l.air_stock().iter().filter(|s| s.counts.iter().any(|&c| c != 0)).map(|s| format!("{} {:?}", s.force.name(), s.counts)).collect();
+            let stock: Vec<String> =
+                l.air_stock().iter().filter(|s| s.counts.iter().any(|&c| c != 0)).map(|s| format!("{} {:?}", s.force.name(), s.counts)).collect();
             if !stock.is_empty() {
                 t += &format!("  |  air: {}", stock.join(", "));
             }
@@ -623,7 +687,19 @@ impl ApplicationHandler for App {
                             let in_map = (self.cursor.x as usize) < w;
                             let place = (e.editor.placing && in_map && e.grab.is_none()).then_some(cell);
                             let mouse = (self.cursor.x as i32, self.cursor.y as i32);
-                            draw_editor(&self.scene, &self.view, self.ov, e, &mut buf, full_w, h, hover.filter(|_| in_map), e.grab.map(|(_, at)| at), place, mouse);
+                            draw_editor(
+                                &self.scene,
+                                &self.view,
+                                self.ov,
+                                e,
+                                &mut buf,
+                                full_w,
+                                h,
+                                hover.filter(|_| in_map),
+                                e.grab.map(|(_, at)| at),
+                                place,
+                                mouse,
+                            );
                         }
                         None => render(&self.scene, &self.view, self.ov, &mut buf, w, h),
                     }
@@ -795,10 +871,6 @@ impl ApplicationHandler for App {
                         }
                         "x" => {
                             self.ov.sprites ^= true;
-                            self.redraw();
-                        }
-                        "n" => {
-                            self.switch_level(1);
                             self.redraw();
                         }
                         "p" => {
