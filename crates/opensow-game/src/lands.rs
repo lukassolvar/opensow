@@ -204,8 +204,9 @@ fn timeline(g: &Geometry, c: i64) -> Timeline {
 }
 
 impl Lands {
-    /// `video`: play the `mA` animation first (New game); `mute` opens no audio device.
-    pub fn new(assets: &mut Assets, progress: PassedLevels, video: bool, mute: bool) -> Lands {
+    /// `video`: play the `mA` animation first (New game); `gain` is its sound's volume (`sfx::gain` of the FX row, 0 = silent,
+    /// no audio device opened).
+    pub fn new(assets: &mut Assets, progress: PassedLevels, video: bool, gain: f32) -> Lands {
         let language = assets.game.language();
         let strings = assets
             .game
@@ -218,9 +219,7 @@ impl Lands {
         let stage = match video.then(|| Anim::open(&assets.game, "mA")).and_then(Result::ok) {
             Some(mut a) => {
                 a.once = true;
-                if !mute {
-                    a.start_sound();
-                }
+                a.start_sound(gain);
                 Stage::Video(Box::new(a))
             }
             None => Stage::Map,
@@ -954,7 +953,7 @@ mod tests {
         let mut game = GameDir::locate()?;
         game.set_language(opensow_formats::lang::Language::English);
         let mut assets = Assets::load(game).ok()?;
-        let l = Lands::new(&mut assets, PassedLevels::initial(), video, true);
+        let l = Lands::new(&mut assets, PassedLevels::initial(), video, 0.0);
         Some((assets, l))
     }
 
@@ -967,7 +966,7 @@ mod tests {
         game.edition = Edition::Warmonger;
         game.set_language(opensow_formats::lang::Language::English);
         let mut assets = Assets::load(game).unwrap();
-        let l = Lands::new(&mut assets, PassedLevels::initial_warmonger(), false, true);
+        let l = Lands::new(&mut assets, PassedLevels::initial_warmonger(), false, 0.0);
         assert!(l.headings(1).0.starts_with("TERRITORY : 01") && l.headings(1).1.starts_with("Coordinate: X8A3"));
         assert!(l.briefing(1).0.starts_with("The Crystal Brotherhood") && l.briefing(1).1.starts_with("Objective: Collect 1000"));
         assert_eq!(l.headings(5).0, "No data available", "a land without a Warmonger mission stays locked");

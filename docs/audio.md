@@ -15,6 +15,11 @@ The exe's music player is `0x407bb0(name)` (stop: `0x408550`). Calls found: `men
 campaign map (`0x441c72/0x441d20`, chosen by `0x437cd0(2)`), `Level01..04` at mission start (random, `0x42d6e0`; Level05..13 are named in the player's
 track list `0x406a00..0x407d50` but no other caller was traced), `statistic.wav` on the results screen (`0x44d8ac`), `uvod.wav` on the boot pictures (`CMenuCopyright` update `0x442400` and constructor `0x4426e0`; also the three promo pictures `CMenuCoolStuff`, `0x4421dd..`), restarted at every page (docs/game.md).
 The game loops the current track (looping is assumed) and plays these for the menu, the map and missions; movies stop it; `--mute` / `--no-intro` silence it.
+Music volume: the player is a DirectShow filter graph; `0x457c00(v)` sets `IBasicAudio::put_Volume` (vtable `+0x1c`, IID at `0x490c80`, its only reference `0x457bb1`) to `30 * (v - 100)` hundredths of a dB, 0 giving -10000 (silent): the same curve as the effects (`sfx::volume`). The game sets the track player's volume with `sfx::gain(true, volume)`.
+
+## Movie soundtracks
+The exe plays every movie (intro `mI`, briefings `M01..M22`, outro `mO`, the BRIEFING animation `mA`, docs/video.md) through `IAMMultiMediaStream` (`0x4573e0`): `AddMediaStream(MSPID_PrimaryAudio, AMMSF_ADDDEFAULTRENDERER)` at `0x45756b`, then `OpenFile` and `SetState(RUN)`, and never touches the audio object `0x6b3d38` or an `IBasicAudio`, so the movies always play at full volume, whatever the MUSIC / FX / VOICE rows say.
+**Differs from the exe:** the intro, briefing and outro soundtracks follow the MUSIC row (`Game::movie_gain`: music off silences them, the volume scales them with the curve above), and the `mA` animation after New game follows the FX row (`Game::anim_gain`). The volume is taken when the movie starts (no options menu is reachable during one). Asked for by the player (2026-11-14): with music off the briefings still played their music.
 
 ## Effects in the game (`opensow-game/src/sfx.rs`)
 Effect ids from `formats::sfx::SFX`.

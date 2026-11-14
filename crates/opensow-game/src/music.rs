@@ -50,7 +50,7 @@ impl Music {
 
     fn apply_volume(&self) {
         if let Some(s) = &self.sound {
-            s.player.set_volume(opensow_formats::sfx::volume(self.volume, None).map_or(0.0, |v| opensow_formats::sfx::gains(v, 0).0));
+            s.player.set_volume(crate::sfx::gain(true, self.volume));
         }
     }
 

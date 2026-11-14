@@ -75,10 +75,14 @@ impl Anim {
         Ok(a)
     }
 
-    /// Open the audio device and start the soundtrack (once); returns whether sound is playing.
-    pub fn start_sound(&mut self) -> bool {
-        if self.sound.is_none() {
+    /// Open the audio device and start the soundtrack (once) at the linear `gain` (`sfx::gain`); returns whether sound is playing.
+    /// A silent gain opens nothing.
+    pub fn start_sound(&mut self, gain: f32) -> bool {
+        if self.sound.is_none() && gain > 0.0 {
             self.sound = self.audio.take().and_then(|(c, r, s)| Sound::start_pcm(c, r, s, false));
+            if let Some(s) = &self.sound {
+                s.player.set_volume(gain);
+            }
         }
         self.sound.is_some()
     }
@@ -205,10 +209,14 @@ impl Intro {
         Ok(Intro { name: String::new(), stream, fps, frame: Some(frame), index: 0, clock: 0.0, ended: false, audio, sound: None })
     }
 
-    /// Open the audio device and start the soundtrack; returns whether sound is playing.
-    pub fn start_sound(&mut self) -> bool {
-        if self.sound.is_none() {
+    /// Open the audio device and start the soundtrack at the linear `gain` (`sfx::gain`); returns whether sound is playing.
+    /// A silent gain opens nothing.
+    pub fn start_sound(&mut self, gain: f32) -> bool {
+        if self.sound.is_none() && gain > 0.0 {
             self.sound = self.audio.take().and_then(Sound::start);
+            if let Some(s) = &self.sound {
+                s.player.set_volume(gain);
+            }
         }
         self.sound.is_some()
     }

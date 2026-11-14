@@ -301,6 +301,15 @@ fn route(device: &rodio::mixer::Mixer, rate: rodio::SampleRate, channels: rodio:
     Some((mixer, master))
 }
 
+/// The linear gain of an options row: its switch and its 0..=100 volume through the exe's curve (`30 * (volume - 100)`
+/// hundredths of a dB, `sfx::volume`); off or volume 0 is silence.
+pub fn gain(on: bool, volume: i32) -> f32 {
+    if !on {
+        return 0.0;
+    }
+    sfx::volume(volume, None).map_or(0.0, |v| sfx::gains(v, 0).0)
+}
+
 /// +-10 % pitch from a cheap clock-based pick (the exe uses its visual generator, so the sequence need not match).
 pub fn jitter() -> f32 {
     let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_micros()) % 201;
@@ -330,5 +339,16 @@ mod tests {
         voices.add(rodio::source::SineWave::new(440.0).take_duration(std::time::Duration::from_millis(200)));
         let peak = (0..19200).filter_map(|_| out.next()).fold(0.0f32, |m, v| m.max(v.abs()));
         assert!(peak > 0.1, "a later effect too (peak {peak})");
+    }
+}
+
+#[cfg(test)]
+mod gain_tests {
+    #[test]
+    fn an_options_row_gain_uses_the_exes_curve() {
+        assert_eq!(super::gain(true, 100), 1.0);
+        assert_eq!(super::gain(false, 100), 0.0);
+        assert_eq!(super::gain(true, 0), 0.0);
+        assert!((super::gain(true, 15) - 10f32.powf(-2550.0 / 2000.0)).abs() < 1e-6);
     }
 }

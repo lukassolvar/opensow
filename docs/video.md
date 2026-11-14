@@ -102,6 +102,7 @@ game plays it after winning the last campaign mission (`FINAL_LEVEL = "M22"`, an
 In `opensow-game`: choosing a mission plays its briefing (`Game::begin`), then starts it; restarting from the
 pause menu does not replay it; winning M22 plays `mO` before the closing message. Same skip keys, `--mute`
 opens no audio device, `--no-intro` turns every movie off (port options, not in the exe). Headless: `--movie M05 --intro-frame 120`.
+**Differs from the exe:** movie sound follows the options: intro, briefings and outro the MUSIC row, the `mA` animation the FX row; the exe always plays it at full volume (docs/audio.md, "Movie soundtracks").
 The briefing movies have no language copies (only mI/mO do); the player falls back to `Data\Levels`.
 
 ## How the exe uses the two AVIs

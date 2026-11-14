@@ -103,6 +103,17 @@ impl Game {
         }
     }
 
+    /// The movies' soundtrack volume (intro, briefings, outro): the MUSIC row, so music off silences them (not in the exe, whose
+    /// DirectShow player never sets their volume).
+    pub(super) fn movie_gain(&self) -> f32 {
+        if self.mute { 0.0 } else { sfx::gain(self.music.on, self.music.volume) }
+    }
+
+    /// The green BRIEFING animation's sound (`mA`, after New game): the FX row (not in the exe, which plays it at full volume).
+    pub(super) fn anim_gain(&self) -> f32 {
+        if self.mute || !self.sfx.enabled { 0.0 } else { sfx::gain(self.sfx.fx_on, self.sfx.fx_volume) }
+    }
+
     /// Show a movie, then do `then`; without a movie (missing file, movies off) `then` happens at once.
     pub(super) fn play_movie(&mut self, name: &str, then: Then) {
         self.then = then;
@@ -110,7 +121,8 @@ impl Game {
             match intro::Intro::open(&self.assets.game, name, self.language) {
                 Ok(mut m) => {
                     self.music.stop();
-                    if !self.mute && !m.start_sound() {
+                    let gain = self.movie_gain();
+                    if gain > 0.0 && !m.start_sound(gain) {
                         eprintln!("{name}: no audio device, playing silently");
                     }
                     self.intro = Some(m);
@@ -243,7 +255,8 @@ impl Game {
         self.back.clear();
         self.play_music(if music::pick(2) == 0 { "Brief2" } else { "Brief" }); // 0x441cf9/0x441c4b: random 0 -> brief2.wav
         let progress = self.effective_progress();
-        self.lands = Some(lands::Lands::new(&mut self.assets, progress, video && self.movies, self.mute));
+        let gain = self.anim_gain();
+        self.lands = Some(lands::Lands::new(&mut self.assets, progress, video && self.movies, gain));
     }
 
     /// The campaign progress the map shows: with the dev tools' UNLOCK ALL every locked land is open.

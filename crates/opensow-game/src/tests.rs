@@ -1655,3 +1655,27 @@ fn m06_rolls_the_exes_first_strategy_at_the_exes_table_position() {
     let (strategy, timer, _) = p.world.ai_state();
     assert_eq!((strategy, timer), (1, 1224));
 }
+
+#[test]
+fn movie_and_briefing_animation_sound_follow_the_options() {
+    let Some(mut g) = game() else { return };
+    g.sfx.enabled = true;
+    g.options.music_on = true;
+    g.options.music_volume = 100;
+    g.options.fx_on = true;
+    g.options.fx_volume = 50;
+    g.apply_audio();
+    assert_eq!(g.movie_gain(), 1.0, "music at 100: movies at full volume");
+    assert!((g.anim_gain() - sfx::gain(true, 50)).abs() < 1e-6, "the BRIEFING animation follows FX");
+    g.options.music_volume = 50;
+    g.apply_audio();
+    assert!((g.movie_gain() - 10f32.powf(-1500.0 / 2000.0)).abs() < 1e-6, "music 50 = -15 dB");
+    g.options.music_on = false;
+    g.options.fx_volume = 0;
+    g.apply_audio();
+    assert_eq!((g.movie_gain(), g.anim_gain()), (0.0, 0.0), "music off silences movies, FX 0 the animation");
+    g.options.music_on = true;
+    g.mute = true;
+    g.apply_audio();
+    assert_eq!(g.movie_gain(), 0.0, "--mute opens nothing");
+}

@@ -54,7 +54,7 @@ impl Game {
                 self.set_edition(e);
                 // the same map for the other campaign: no animation, the music keeps playing
                 let progress = self.effective_progress();
-                self.lands = Some(lands::Lands::new(&mut self.assets, progress, false, self.mute));
+                self.lands = Some(lands::Lands::new(&mut self.assets, progress, false, 0.0));
             }
             lands::Event::Accept(land) => {
                 self.lands = None;
