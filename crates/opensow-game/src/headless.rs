@@ -261,13 +261,13 @@ fn mission_switches(game: &mut Game, args: &[String], w: usize, h: usize) {
                 // the satellite laser column over a cell (a bullet of type 10 at the cell's centre, 64 px up)
                 let (x, y) = (cx.parse::<i32>().unwrap_or(0) * 32 + 16, cy.parse::<i32>().unwrap_or(0) * 32 + 16);
                 if let Some(path) = opensow_formats::projectile::build_path(10, x, y - 79, x, y - 54, 0) {
-                    p.world.bullets.push(sim::Bullet::new(10, 1000, 0, path));
+                    p.world.push_bullet(sim::Bullet::new(10, 1000, 0, path));
                 }
             } else if let [cx, cy, "missile", _] = f[..] {
                 // an anti-air missile (bullet type 1) flying 250 px right and 60 px up from the cell's centre
                 let (x, y) = (cx.parse::<i32>().unwrap_or(0) * 32 + 16, cy.parse::<i32>().unwrap_or(0) * 32 + 16);
                 if let Some(path) = opensow_formats::projectile::build_path(1, x, y, x + 250, y - 60, 0) {
-                    p.world.bullets.push(sim::Bullet::new(1, 0, 0, path));
+                    p.world.push_bullet(sim::Bullet::new(1, 0, 0, path));
                 }
             } else if let [cx, cy, "piece", age] = f[..] {
                 // a destroyed unit's flying piece (bullet type 15) from the cell's centre; AGE = the top variant 0..14
@@ -275,7 +275,7 @@ fn mission_switches(game: &mut Game, args: &[String], w: usize, h: usize) {
                 if let Some(path) = opensow_formats::projectile::build_path(15, x, y, x + 50, y + 30, 0) {
                     let mut b = sim::Bullet::new(15, 40, 0, path);
                     b.variant = age.parse().unwrap_or(0);
-                    p.world.bullets.push(b);
+                    p.world.push_bullet(b);
                 }
             } else if let [cx, cy, kind, age] = f[..] {
                 use opensow_formats::effects as e;
@@ -379,16 +379,6 @@ fn mission_switches(game: &mut Game, args: &[String], w: usize, h: usize) {
             println!("turret tiers player {:?} enemy {:?}", p.world.turret_flags[0], p.world.turret_flags[1]);
             println!("bullets {} tick {} outcome {:?}", p.world.bullets.len(), p.world.tick, p.world.outcome);
             println!("timer {:?} expired {} objective {:?}", p.world.timer, p.world.timer_expired, p.world.objective);
-            if p.world.convoy.is_some() {
-                let n = |r: sim::escort_ai::Role| p.world.escort_roles.iter().filter(|e| e.1 == r).count();
-                println!(
-                    "escort roles: goal {} intercept {} strike {} wait {}",
-                    n(sim::escort_ai::Role::Goal),
-                    n(sim::escort_ai::Role::Intercept),
-                    n(sim::escort_ai::Role::Strike),
-                    n(sim::escort_ai::Role::Wait)
-                );
-            }
         }
     }
 }

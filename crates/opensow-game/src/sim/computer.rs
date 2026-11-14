@@ -1,4 +1,4 @@
-//! The computer opponent's turn: it gathers a snapshot of the world for each of its planners (`defence`, `advancer_ai`, `airlift_ai`, `air_ai`, `escort_ai`) and carries out what they decide.
+//! The computer opponent's turn: it gathers a snapshot of the world for each of its planners (`defence`, `advancer_ai`, `airlift_ai`, `air_ai`) and carries out what they decide.
 
 use super::*;
 
@@ -28,89 +28,23 @@ impl World {
         swap(self);
     }
 
-    /// One tick of the computer opponent playing `side`.
-    pub(super) fn step_ai(&mut self, side: usize) {
-        self.tech_up_all(side);
+    /// `0x42fae0`: every idle Advancer of `side` scores every building of the three players, `rand(3)` + bonuses - distance
+    /// (`0x42fb94..0x42fd9f`), and goes for the best. The buildings are walked player by player in each owner's slot order
+    /// (`0x43a8e0(player, index)`), one `rand(3)` each, so the draws match the exe's.
+    fn ai_pick_buildings(&mut self, side: usize) {
         let me = if side == 0 { Owner::Player } else { Owner::Enemy };
         let mine = |o: Owner| o == me;
-        let hq = self.structures.iter().position(|s| s.alive() && s.kind_id == kinds::HEADQUARTERS && !mine(s.owner));
-        let enemy_turrets = self.structures.iter().filter(|s| s.alive() && !mine(s.owner) && matches!(s.kind, ObjectKind::Turret(_))).count();
-        // strategy: re-rolled when it no longer fits the enemy's turret count (0x42f67e..0x42f6c1) or its timer expires
-        if (enemy_turrets == 0 && self.ai_strategy == 2) || (enemy_turrets > 4 && self.ai_strategy != 2) || self.ai_strategy == 0 {
-            self.ai_timer = 0;
-        }
-        self.ai_timer -= 1;
-        if self.ai_timer <= 0 {
-            self.ai_strategy = 1 + self.random(4);
-            self.ai_timer = 900 + self.random(600) as i32;
-        }
-        if enemy_turrets == 0 && self.ai_strategy == 2 {
-            self.ai_strategy = 4;
-        }
-        if enemy_turrets > 4 {
-            self.ai_strategy = 2;
-        }
-        let think = self.tick.is_multiple_of(self.difficulty_of(side).handicap().think_every.max(1) as u64);
-        // idle units attack: strategy 1 the HQ, 2 turret > unit > building, 3 unit > turret > building, 4 building > turret > unit
-        let enemy_adv = self.units.iter().filter(|u| u.hp > 0 && u.kind == kinds::ADVANCER && (u.player != 0) != (side != 0)).map(|u| u.id).next_back();
-        // a custom escort: the computer plays against the convoy first (`escort_ai`, not in the exe); units it holds at a
-        // post stay out of the usual strategy
-        let held = if side == 1 && think && self.convoy.is_some() { self.ai_escort(side) } else { Vec::new() };
-        let idle: Vec<usize> = (0..self.units.len())
-            .filter(|&i| {
-                let u = &self.units[i];
-                think
-                    && u.hp > 0
-                    && (u.player != 0) == (side != 0)
-                    && u.kind != kinds::ADVANCER
-                    && u.chase.is_none()
-                    && u.path.is_empty()
-                    && !held.contains(&u.id)
-            })
-            .collect();
-        for i in idle {
-            let (cell, kind) = (self.units[i].cell(), self.units[i].kind);
-            let pick = if is_anti_air(kind) {
-                // skirmish: an Advancer far away is no goal (it flies about); then the anti-air units go with the others to the
-                // enemy HQ as a body shield (the fallback below)
-                enemy_adv
-                    .filter(|&id| {
-                        !self.skirmish
-                            || self.unit(id).is_some_and(|a| {
-                                let (ac, d) = (a.cell(), 30);
-                                (ac.0 - cell.0).abs().max((ac.1 - cell.1).abs()) <= d
-                            })
-                    })
-                    .map(Target::Unit)
-            } else {
-                let (u, t, b) = self.nearest_enemy(side, cell);
-                let order = match self.ai_strategy {
-                    1 => [None, None, None],
-                    2 => [t, u, b],
-                    3 => [u, t, b],
-                    _ => [b, t, u],
-                };
-                order.into_iter().flatten().next()
-            };
-            self.units[i].chase = pick.or(hq.map(Target::Structure));
-        }
-        // Advancers choose a building: score = random(3) + bonuses - distance (0x42fb94..0x42fd9f); skirmish: `ai_advancers`
-        if self.skirmish {
-            self.ai_advancers(side);
-        }
+        let order: Vec<usize> = self.slot_tables.iter().flatten().flatten().copied().filter(|&k| self.structures.get(k).is_some_and(|s| s.alive())).collect();
         let advancers: Vec<usize> = (0..self.units.len())
             .filter(|&i| {
                 let u = &self.units[i];
-                !self.skirmish && think && u.hp > 0 && u.kind == kinds::ADVANCER && (u.player != 0) == (side != 0) && u.action.is_none()
+                u.hp > 0 && u.kind == kinds::ADVANCER && (u.player != 0) == (side != 0) && u.action.is_none()
             })
             .collect();
         for i in advancers {
             let (ux, uy) = (self.units[i].x as i32 / CELL, self.units[i].y as i32 / CELL);
             let mut best: Option<(i32, usize)> = None;
-            for k in 0..self.structures.len() {
-                if !self.structures[k].alive() {
-                    continue;
-                }
+            for k in order.iter().copied() {
                 let mut score = self.random(3) as i32;
                 let s = &self.structures[k];
                 if s.kind_id == kinds::HEADQUARTERS {
@@ -143,6 +77,96 @@ impl World {
                 let id = self.units[i].id;
                 self.order_action(id, k);
             }
+        }
+    }
+
+    /// One tick of the computer opponent playing `side`.
+    pub(super) fn step_ai(&mut self, side: usize) {
+        self.tech_up_all(side);
+        let me = if side == 0 { Owner::Player } else { Owner::Enemy };
+        let mine = |o: Owner| o == me;
+        let hq = self.structures.iter().position(|s| s.alive() && s.kind_id == kinds::HEADQUARTERS && !mine(s.owner));
+        let enemy_turrets = self.structures.iter().filter(|s| s.alive() && !mine(s.owner) && matches!(s.kind, ObjectKind::Turret(_))).count();
+        // the Advancers choose their building first (`0x42fae0` is called at `0x42f602`, before the strategy roll)
+        let think = self.tick.is_multiple_of(self.difficulty_of(side).handicap().think_every.max(1) as u64);
+        if !self.skirmish && think {
+            self.ai_pick_buildings(side);
+        }
+        // strategy: re-rolled when it no longer fits the enemy's turret count (0x42f67e..0x42f6c1) or its timer expires
+        if (enemy_turrets == 0 && self.ai_strategy == 2) || (enemy_turrets > 4 && self.ai_strategy != 2) || self.ai_strategy == 0 {
+            self.ai_timer = 0;
+        }
+        self.ai_timer -= 1;
+        if self.ai_timer <= 0 {
+            self.ai_strategy = 1 + self.random(4);
+            self.ai_timer = 900 + self.random(600) as i32;
+        }
+        if enemy_turrets == 0 && self.ai_strategy == 2 {
+            self.ai_strategy = 4;
+        }
+        if enemy_turrets > 4 {
+            self.ai_strategy = 2;
+        }
+        // idle units attack: strategy 1 the HQ, 2 turret > unit > building, 3 unit > turret > building, 4 building > turret > unit
+        let enemy_adv = self.units.iter().filter(|u| u.hp > 0 && u.kind == kinds::ADVANCER && (u.player != 0) != (side != 0)).map(|u| u.id).next_back();
+        // the escort missions 3 and 8 skip the strategy: the nearest enemy unit (the pods are units), else the HQ
+        // (`0x42f81d..0x42f828` jump to `0x42f86e`); a custom map's escort (not in the exe) plays by the same rule
+        let escort = (!self.skirmish && matches!(self.mission_no, Some(3 | 8))) || (side == 1 && self.convoy.is_some());
+        let idle: Vec<usize> = (0..self.units.len())
+            .filter(|&i| {
+                let u = &self.units[i];
+                think
+                    && u.hp > 0
+                    && (u.player != 0) == (side != 0)
+                    && u.kind != kinds::ADVANCER
+                    && u.chase.is_none()
+                    && u.path.is_empty()
+            })
+            .collect();
+        for i in idle {
+            let (cell, kind) = (self.units[i].cell(), self.units[i].kind);
+            let pick = if is_anti_air(kind) {
+                // skirmish: an Advancer far away is no goal (it flies about); then the anti-air units go with the others to the
+                // enemy HQ as a body shield (the fallback below)
+                enemy_adv
+                    .filter(|&id| {
+                        !self.skirmish
+                            || self.unit(id).is_some_and(|a| {
+                                let (ac, d) = (a.cell(), 30);
+                                (ac.0 - cell.0).abs().max((ac.1 - cell.1).abs()) <= d
+                            })
+                    })
+                    .map(Target::Unit)
+            } else {
+                let (u, t, b) = self.nearest_enemy(side, cell);
+                let order = match self.ai_strategy {
+                    _ if escort => [u, None, None],
+                    1 => [None, None, None],
+                    2 => [t, u, b],
+                    3 => [u, t, b],
+                    _ => [b, t, u],
+                };
+                order.into_iter().flatten().next()
+            };
+            let target = pick.or(hq.map(Target::Structure));
+            if (self.skirmish && !escort) || kind == kinds::POD {
+                // skirmish (not in the exe) keeps the order as a chase, except against an escort, which takes the exe's
+                // one-shot order below; a pod keeps its target in the exe too (0x46a147)
+                self.units[i].chase = target;
+            } else if let Some(t) = target {
+                // the order `0x469fe0(target, 0)`: it sets `[unit+0x7c]`, plans ONE route through the chase check `0x46eb40`
+                // (to the cell `range` steps before the target, nothing when already in range) and, its flag being 0, clears
+                // `[unit+0x7c]` again (`0x46a141..0x46a14d`). So the unit walks that route and has no order target for its
+                // weapon (the priority scan picks what to shoot); when the route ends it is idle and picks again with the
+                // strategy of that moment
+                if let Some((tx, ty)) = self.target_pos(t) {
+                    self.chase_step(i, t, (tx.div_euclid(CELL), ty.div_euclid(CELL)));
+                }
+            }
+        }
+        // Advancers choose a building: score = random(3) + bonuses - distance (0x42fb94..0x42fd9f); skirmish: `ai_advancers`
+        if self.skirmish {
+            self.ai_advancers(side);
         }
         // air strikes every 600 ticks: bomber, fighter or tripler at random if in stock (0x42f930..0x42fa2a);
         // skirmish on Hard and Brutal: the stock is spent where it pays (`ai_air`)
@@ -726,71 +750,5 @@ impl World {
     pub(super) fn aircraft_aim_point(&self, a: usize) -> (i32, i32) {
         let a = &self.aircraft[a];
         (a.x + a.aim_dx, a.y - a.altitude)
-    }
-
-    /// The computer against a custom escort (`escort_ai`): its idle ground units strike pods within reach, fill the goal
-    /// guard (nearest to the goal first) and wait at posts ahead of the lead pod; Brutal first calls back units busy with
-    /// the player's buildings. Returns the units that hold their post (the usual strategy leaves them alone).
-    pub(super) fn ai_escort(&mut self, side: usize) -> Vec<u32> {
-        let Some(c) = self.convoy.clone() else { return Vec::new() };
-        let t = escort_ai::tuning(self.difficulty_of(side));
-        let next = |id: u32| c.next.iter().find(|e| e.0 == id).map_or(0, |e| e.1);
-        let pods: Vec<escort_ai::Pod> = self
-            .units
-            .iter()
-            .filter(|u| u.hp > 0 && u.player == 0 && u.kind == kinds::POD)
-            .map(|u| escort_ai::Pod { id: u.id, cell: u.cell(), next: next(u.id) })
-            .collect();
-        let Some(lead) = escort_ai::lead(&pods, &c.route) else { return Vec::new() };
-        let way = escort_ai::ahead(&c.route, lead);
-        let goal = c.goal().unwrap_or(lead.cell);
-        let mine = |u: &Unit| u.hp > 0 && u.player == side as i32 && u.kind != kinds::ADVANCER && u.kind != kinds::POD && !is_anti_air(u.kind);
-        let alive: Vec<u32> = self.units.iter().filter(|u| mine(u)).map(|u| u.id).collect();
-        self.escort_roles.retain(|(id, _)| alive.contains(id));
-        if t.pull_busy {
-            for u in self
-                .units
-                .iter_mut()
-                .filter(|u| u.hp > 0 && u.player == side as i32 && u.kind != kinds::ADVANCER && u.kind != kinds::POD && !is_anti_air(u.kind))
-            {
-                if matches!(u.chase, Some(Target::Structure(_))) {
-                    u.chase = None;
-                    u.path.clear();
-                }
-            }
-        }
-        let want = escort_ai::guard_size(&t, alive.len());
-        let mut guards = self.escort_roles.iter().filter(|r| r.1 == escort_ai::Role::Goal).count();
-        let mut idle: Vec<usize> =
-            (0..self.units.len()).filter(|&i| mine(&self.units[i]) && self.units[i].chase.is_none() && self.units[i].path.is_empty()).collect();
-        let far = |c: (i32, i32)| (c.0 - goal.0).abs().max((c.1 - goal.1).abs());
-        idle.sort_by_key(|&i| far(self.units[i].cell()));
-        let (mut held, mut taken) = (Vec::new(), Vec::new());
-        for i in idle {
-            let (id, cell, kind) = (self.units[i].id, self.units[i].cell(), self.units[i].kind);
-            let role = self.escort_roles.iter().find(|r| r.0 == id).map(|r| r.1);
-            let guard = role != Some(escort_ai::Role::Goal) && guards < want;
-            let speed = self.walk_params_of(kind).map_or(20.0, |p| p.speed as f32);
-            let Some((order, r)) = escort_ai::decide(&t, &c.route, &pods, &way, &escort_ai::Unit { cell, speed, role }, guard) else { continue };
-            if r == escort_ai::Role::Goal && role != Some(r) {
-                guards += 1;
-            }
-            self.escort_roles.retain(|e| e.0 != id);
-            self.escort_roles.push((id, r));
-            match order {
-                escort_ai::Order::Attack(pod) => self.units[i].chase = Some(Target::Unit(pod)),
-                escort_ai::Order::Hold => held.push(id),
-                escort_ai::Order::Post(p) => {
-                    // spread over free cells around the post (not two units for one cell)
-                    let spot = (0..=3)
-                        .flat_map(|r| (-r..=r).flat_map(move |dy| (-r..=r).map(move |dx| (p.0 + dx, p.1 + dy))))
-                        .find(|&q| !self.is_blocked(q.0, q.1) && !taken.contains(&q) && !self.units.iter().any(|u| u.hp > 0 && u.id != id && u.cell() == q))
-                        .unwrap_or(p);
-                    taken.push(spot);
-                    self.order_move(id, spot, None);
-                }
-            }
-        }
-        held
     }
 }

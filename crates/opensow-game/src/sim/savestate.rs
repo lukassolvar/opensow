@@ -67,13 +67,22 @@ impl World {
         let (w, h) = self.cells;
         // ---- handles -------------------------------------------------------------------------------------------------------
         let mut counters: [Vec<u8>; 4] = [vec![0; 3 * SLOTS[0]], vec![0; 3 * SLOTS[1]], vec![0; 3 * SLOTS[2]], vec![0; 3 * SLOTS[3]]];
-        let mut unit_slot = [0usize; 3];
+        // every unit and turret gun keeps its slot in its player's table (`Unit::slot`, `World::gun_slot`); one without a slot
+        // (or with a clashing one) takes the first free slot
+        let mut used: [std::collections::HashSet<usize>; 3] = Default::default();
+        let mut take = |p: usize, want: Option<u32>| -> usize {
+            let s = match want.map(|w| w as usize) {
+                Some(w) if w < SLOTS[0] && !used[p].contains(&w) => w,
+                _ => (0..).find(|n| !used[p].contains(n)).unwrap(),
+            };
+            used[p].insert(s);
+            s
+        };
         let mut unit_handles: HashMap<u32, u32> = HashMap::new();
         let mut unit_slots: Vec<(usize, usize)> = Vec::new(); // (player, slot) per world.units index
         for u in &self.units {
             let p = player_slot(u.player);
-            let slot = unit_slot[p];
-            unit_slot[p] += 1;
+            let slot = take(p, (u.slot != u32::MAX).then_some(u.slot));
             unit_handles.insert(u.id, handle(1, unit_handle_type(u.kind), p as u32, 0, slot as u32));
             unit_slots.push((p, slot));
         }
@@ -82,8 +91,7 @@ impl World {
         for (i, s) in self.structures.iter().enumerate() {
             if let (ObjectKind::Turret(_), true) = (s.kind, s.alive()) {
                 let p = side(s.owner);
-                gun_slots.push((i, p, unit_slot[p]));
-                unit_slot[p] += 1;
+                gun_slots.push((i, p, take(p, self.gun_slot.get(&i).copied())));
             }
         }
         for &(p, slot) in unit_slots.iter().chain(gun_slots.iter().map(|(_, p, s)| (*p, *s)).collect::<Vec<_>>().iter()) {
@@ -325,11 +333,10 @@ impl World {
         // dead units keep their slot while the corpse lasts: dead flag `+0x2c`, corpse timer / variant / blasts thrown `+0x90..0x98`
         for c in &self.corpses {
             let p = player_slot(c.player);
-            let slot = unit_slot[p];
+            let slot = take(p, (c.slot != u32::MAX).then_some(c.slot));
             if slot >= SLOTS[0] {
                 continue;
             }
-            unit_slot[p] += 1;
             counters[0][p * SLOTS[0] + slot] = 1;
             let mut o = self.new_unit(c.kind, c.player, false);
             let hd = handle(1, unit_handle_type(c.kind), p as u32, 0, slot as u32);
@@ -364,63 +371,68 @@ impl World {
             }
         }
         // ---- bullets (counters[2]) and aircraft squads (counters[3]) ---------------------------------------------------------
-        // an aircraft's handle in the stream (side, squad slot): bullets aimed at it store it
-        let mut next_slot = [0usize; 3];
-        let mut air_handles: HashMap<u32, u32> = HashMap::new();
-        for a in &self.aircraft {
-            let p = player_slot(a.side);
-            if next_slot[p] < SLOTS[3] {
-                air_handles.insert(a.id, handle(4, 0, p as u32, 0, next_slot[p] as u32));
-                next_slot[p] += 1;
+        // every bullet, beam shot, bomb event and aircraft keeps its slot in its owner's table (`slot`); one without a slot (or
+        // with a clashing one) takes the first free slot
+        fn taker(limit: usize) -> impl FnMut(usize, u32) -> Option<usize> {
+            let mut used: [std::collections::HashSet<usize>; 3] = Default::default();
+            move |p: usize, want: u32| {
+                let s = match want as usize {
+                    w if want != u32::MAX && w < limit && !used[p].contains(&w) => w,
+                    _ => (0..limit).find(|n| !used[p].contains(n))?,
+                };
+                used[p].insert(s);
+                Some(s)
             }
         }
+        // an aircraft's handle in the stream (side, squad slot): bullets aimed at it store it
+        let mut air_take = taker(SLOTS[3]);
+        let mut air_handles: HashMap<u32, u32> = HashMap::new();
+        let mut air_slots: Vec<Option<(usize, usize)>> = Vec::new();
+        for a in &self.aircraft {
+            let p = player_slot(a.side);
+            let slot = air_take(p, a.slot);
+            if let Some(slot) = slot {
+                air_handles.insert(a.id, handle(4, 0, p as u32, 0, slot as u32));
+            }
+            air_slots.push(slot.map(|s| (p, s)));
+        }
         let mut bullets: Vec<(u32, Vec<(usize, Object)>)> = vec![(0, Vec::new()), (0, Vec::new()), (0, Vec::new())];
-        let mut next_slot = [0usize; 3];
+        let mut take = taker(SLOTS[2]);
+        let mut put = |p: usize, slot: usize, o: Object| {
+            bullets[p].0 = bullets[p].0.max(slot as u32 + 1);
+            bullets[p].1.push((slot, o));
+            counters[2][p * SLOTS[2] + slot] = 1;
+        };
         for b in &self.bullets {
             let p = player_slot(b.owner);
-            let slot = next_slot[p];
-            if slot >= SLOTS[2] {
-                continue;
+            if let Some(slot) = take(p, b.slot) {
+                put(p, slot, self.bullet_record(b, &unit_handles, &air_handles));
             }
-            next_slot[p] += 1;
-            bullets[p].0 = slot as u32 + 1;
-            bullets[p].1.push((slot, self.bullet_record(b, &unit_handles, &air_handles)));
-            counters[2][p * SLOTS[2] + slot] = 1;
         }
         for b in &self.beams {
             let p = b.side.min(2);
-            let slot = next_slot[p];
-            if slot >= SLOTS[2] {
-                continue;
+            if let Some(slot) = take(p, b.slot) {
+                put(p, slot, self.beam_record(b));
             }
-            next_slot[p] += 1;
-            bullets[p].0 = slot as u32 + 1;
-            bullets[p].1.push((slot, self.beam_record(b)));
-            counters[2][p * SLOTS[2] + slot] = 1;
         }
         for n in &self.nukes {
             let p = player_slot(n.owner);
-            let slot = next_slot[p];
-            if slot >= SLOTS[2] {
-                continue;
+            if let Some(slot) = take(p, n.slot) {
+                put(p, slot, nuke_record(n));
             }
-            next_slot[p] += 1;
-            bullets[p].0 = slot as u32 + 1;
-            bullets[p].1.push((slot, nuke_record(n)));
-            counters[2][p * SLOTS[2] + slot] = 1;
+        }
+        for g in bullets.iter_mut() {
+            g.1.sort_by_key(|x| x.0);
         }
         let mut squads: Vec<(u32, Vec<(usize, Object)>)> = vec![(0, Vec::new()), (0, Vec::new()), (0, Vec::new())];
-        let mut next_slot = [0usize; 3];
-        for a in &self.aircraft {
-            let p = player_slot(a.side);
-            let slot = next_slot[p];
-            if slot >= SLOTS[3] {
-                continue;
-            }
-            next_slot[p] += 1;
-            squads[p].0 = slot as u32 + 1;
+        for (a, at) in self.aircraft.iter().zip(air_slots) {
+            let Some((p, slot)) = at else { continue };
+            squads[p].0 = squads[p].0.max(slot as u32 + 1);
             squads[p].1.push((slot, aircraft_record(a, air_handles[&a.id])));
             counters[3][p * SLOTS[3] + slot] = 1;
+        }
+        for g in squads.iter_mut() {
+            g.1.sort_by_key(|x| x.0);
         }
         // the aircraft an anti-air top keeps aiming at: `[unit+0x80]`
         for (&(is_structure, key), &air_id) in &self.air_targets {
@@ -802,6 +814,7 @@ impl World {
         self.units.clear();
         self.corpses.clear();
         self.turret_look.clear();
+        self.gun_slot.clear();
         let mut guns: Vec<(usize, &Object)> = Vec::new();
         for (p, (_, objs)) in st.units.iter().enumerate() {
             for (slot, o) in objs {
@@ -817,12 +830,14 @@ impl World {
                         blasted: o.get(0x98).unwrap_or(0) != 0,
                         player: p as i32,
                         kind,
+                        slot: *slot as u32,
                     });
                     continue;
                 }
                 if kinds::TURRET_TOPS.contains(&kind) {
                     if let Some(i) = self.structure_of_handle(o.get(0x68).unwrap_or(0)) {
                         self.turret_look.insert(i, o.get(0x8c).unwrap_or(0) as i32);
+                        self.gun_slot.insert(i, *slot as u32);
                         guns.push((i, o));
                     }
                     continue;
@@ -846,7 +861,8 @@ impl World {
             .iter()
             .flat_map(|g| g.1.iter())
             .filter(|(_, o)| o.get(0x2658) == Some(opensow_formats::rogon::BULLET_TYPE as u32))
-            .map(|(_, o)| Nuke {
+            .map(|(slot, o)| Nuke {
+                slot: *slot as u32,
                 x: o.get(0x269c).unwrap_or(0) as i32,
                 y: o.get(0x26a0).unwrap_or(0) as i32,
                 owner: o.get(0x266c).unwrap_or(0) as i32,
@@ -858,20 +874,29 @@ impl World {
             .iter()
             .flat_map(|g| g.1.iter())
             .filter(|(_, o)| !(19..=21).contains(&o.get(0x2658).unwrap_or(0)) && o.get(0x2658) != Some(35))
-            .filter_map(|(_, o)| self.bullet_from_record(o))
+            .filter_map(|(slot, o)| self.bullet_from_record(o).map(|mut b| {
+                b.slot = *slot as u32;
+                b
+            }))
             .collect();
         self.beams = st
             .bullets
             .iter()
             .flat_map(|g| g.1.iter())
             .filter(|(_, o)| (19..=21).contains(&o.get(0x2658).unwrap_or(0)))
-            .filter_map(|(_, o)| self.beam_from_record(o))
+            .filter_map(|(slot, o)| self.beam_from_record(o).map(|mut b| {
+                b.slot = *slot as u32;
+                b
+            }))
             .collect();
         let mut aircraft = Vec::new();
         for (side, g) in st.squads.iter().enumerate() {
             for (slot, o) in &g.1 {
                 let hd = handle(4, 0, side as u32, 0, *slot as u32);
-                aircraft.extend(self.aircraft_from_record(o, side as i32, hd));
+                aircraft.extend(self.aircraft_from_record(o, side as i32, hd).map(|mut a| {
+                    a.slot = *slot as u32;
+                    a
+                }));
             }
         }
         self.aircraft = aircraft;
@@ -995,6 +1020,7 @@ impl World {
             index: bullet.index,
             trail: bullet.trail,
             frags,
+            slot: u32::MAX,
         })
     }
 
@@ -1115,6 +1141,7 @@ impl World {
             chase,
             idle,
             look: o.get(0x8c).unwrap_or(0) as i32,
+            slot: hd & 0x3ff, // the handle's slot bits: the unit's place in its player's table
         }
     }
 }
@@ -1475,12 +1502,12 @@ mod tests {
         let mut w = world();
         w.add_structure(structure(ObjectKind::Headquarters, 100, Owner::Player, (4, 4)));
         w.add_structure(structure(ObjectKind::Turret(1), 25, Owner::Enemy, (12, 12)));
-        w.corpses.push(Corpse { x: 300, y: 340, left: 211, variant: 3, air: false, blasted: true, player: 1, kind: 7 });
+        w.corpses.push(Corpse { x: 300, y: 340, left: 211, variant: 3, air: false, blasted: true, player: 1, kind: 7, slot: u32::MAX });
         w.blinks.insert(0, Blink { timer: 3, on: false, left: 5 });
         w.turret_look.insert(1, 123);
         let path = build_path(Action::Upgrade as u8, 100, 100, 160, 160, 0).unwrap();
         let n = path.points.len();
-        w.beams.push(BeamShot { action: Action::Upgrade, target: 0, side: 0, rate: 40, path, index: 7, trail: 2, frags: vec![(1, -2, 3), (4, 5, 6)] });
+        w.beams.push(BeamShot { action: Action::Upgrade, target: 0, side: 0, rate: 40, path, index: 7, trail: 2, frags: vec![(1, -2, 3), (4, 5, 6)], slot: u32::MAX });
         let bytes = w.to_state(1, &PassedLevels::initial(), (0, 0)).to_bytes().unwrap();
         dump("synthetic_corpse_beam", &bytes);
         let parsed = State::parse(&bytes, 1).unwrap();
@@ -1505,7 +1532,7 @@ mod tests {
     #[test]
     fn a_rogon_blast_in_progress_survives_the_stream() {
         let mut w = world();
-        w.nukes.push(Nuke { x: 320, y: 352, owner: 1, ex: opensow_formats::rogon::Explosion::from_parts(7, 123) });
+        w.nukes.push(Nuke { x: 320, y: 352, owner: 1, ex: opensow_formats::rogon::Explosion::from_parts(7, 123), slot: u32::MAX });
         let bytes = w.to_state(1, &PassedLevels::initial(), (0, 0)).to_bytes().unwrap();
         dump("synthetic_nuke", &bytes);
         let parsed = State::parse(&bytes, 1).unwrap();

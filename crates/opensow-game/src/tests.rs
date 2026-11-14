@@ -1640,3 +1640,18 @@ fn warmongers_radar_pictures_fit_its_small_radar_list() {
         assert_eq!((f.width, f.height) == (64, 64), small, "M{m:02}: {}x{}", f.width, f.height);
     }
 }
+
+/// The lockstep draws up to the computer's first strategy roll follow the exe (docs/ai.md "The first roll"): the curves (600)
+/// and the 19 units' initialisers (2 each) during the load, then in the first tick blue's turn (its 3 turrets create their gun
+/// units, 2 draws each) and green's computer, whose Advancer scores the 42 buildings (`rand(3)` each) before the roll at
+/// index 686: strategy 1 (every idle unit to the HQ), timer 900 + 324.
+#[test]
+fn m06_rolls_the_exes_first_strategy_at_the_exes_table_position() {
+    let Some(mut g) = game() else { return };
+    g.start("M06");
+    let p = g.play.as_mut().unwrap();
+    assert_eq!(p.world.ai_state().2, Some(638), "curves + 19 units x 2 when the level is loaded");
+    p.world.step();
+    let (strategy, timer, _) = p.world.ai_state();
+    assert_eq!((strategy, timer), (1, 1224));
+}

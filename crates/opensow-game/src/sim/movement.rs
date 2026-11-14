@@ -298,16 +298,19 @@ impl World {
     pub(super) fn step_unit(&mut self, i: usize, index: &HashMap<(i32, i32), Vec<Target>>) {
         let (kind, player, cell) = (self.units[i].kind, self.units[i].player, self.units[i].cell());
         // idle look-around (`0x46e114`): a unit without orders turns its idle top to a random facing every 240..1139 ticks
-        if self.units[i].kind != kinds::ADVANCER && self.units[i].path.is_empty() && self.units[i].aim.is_some() {
+        // (the counter runs while the chassis has no order, `0x46e11b`; a unit without a top, the pod, still draws the `rand(900)`
+        // reload, `0x46e147`, but no facing, `0x46e16f`)
+        if self.units[i].kind != kinds::ADVANCER && self.units[i].path.is_empty() && self.units[i].straight.is_none() {
             self.units[i].look -= 1;
             if self.units[i].look <= 0 {
                 let wait = 240 + self.random(900) as i32;
-                let steps = self.units[i].aim.as_ref().map_or(32, |a| a.params.steps);
-                let face = self.random(steps);
-                let u = &mut self.units[i];
-                u.look = wait;
-                if u.target.is_none() {
-                    u.aim.as_mut().unwrap().set_target_facing(face);
+                self.units[i].look = wait;
+                if let Some(steps) = self.units[i].aim.as_ref().map(|a| a.params.steps) {
+                    let face = self.random(steps);
+                    let u = &mut self.units[i];
+                    if u.target.is_none() {
+                        u.aim.as_mut().unwrap().set_target_facing(face);
+                    }
                 }
             }
         }
@@ -380,11 +383,9 @@ impl World {
             let tpoints = t.and_then(|id| self.unit(id)).map(|u| if u.kind == kinds::ADVANCER { u.flyer_points() } else { (u.px(), u.px()) });
             let face = tpoints.map(|(aim, _)| facing(ux, uy, aim.0, aim.1, steps));
             let tpos = tpoints.map(|(_, shot)| shot);
-            let mut r = self.random(1 << 16);
-            let ev = self.units[i].aim.as_mut().unwrap().tick(face, |n| {
-                r = r.wrapping_mul(1_103_515_245).wrapping_add(12345);
-                (r >> 8) % n.max(1)
-            });
+            // the reload jitter is drawn from the lockstep table when the search finds a target (`0x479cf3` -> `0x47c5f0`)
+            let (table, state) = (&mut self.game_rng, &mut self.rng);
+            let ev = self.units[i].aim.as_mut().unwrap().tick(face, |n| draw(table, state, n));
             if ev.shot.is_some() {
                 if let (Some(id), Some(to), Some((bt, strength))) = (t, tpos, weapon_shot(40)) {
                     // a bullet of type 31 (invisible, speed 600); the strength comes off the unit by handle when it lands (0x4108bc..0x4109b8)
@@ -408,12 +409,9 @@ impl World {
             let uy = uy + opensow_formats::aim::top_dy(kind);
             let tpos = t.and_then(|t| self.target_pos(t));
             let face = tpos.map(|(tx, ty)| facing(ux, uy, tx, ty, steps));
-            let jitter = self.random(1 << 16);
-            let mut r = jitter;
-            let ev = self.units[i].aim.as_mut().unwrap().tick(face, |n| {
-                r = r.wrapping_mul(1_103_515_245).wrapping_add(12345);
-                (r >> 8) % n.max(1)
-            });
+            // the reload jitter is drawn from the lockstep table when the search finds a target (`0x479cf3` -> `0x47c5f0`)
+            let (table, state) = (&mut self.game_rng, &mut self.rng);
+            let ev = self.units[i].aim.as_mut().unwrap().tick(face, |n| draw(table, state, n));
             if let (Some((_, shots)), Some(to)) = (ev.shot, tpos) {
                 let a = self.units[i].aim.as_ref().unwrap();
                 let (sin, cos) = heading_degrees(a.facing, steps).to_radians().sin_cos();
@@ -469,11 +467,9 @@ impl World {
                 (None, Some((tx, ty))) => Some(facing(ux, oy, tx, ty, steps)),
                 _ => None,
             };
-            let mut r = self.random(1 << 16);
-            let ev = self.units[i].aim.as_mut().unwrap().tick(face, |n| {
-                r = r.wrapping_mul(1_103_515_245).wrapping_add(12345);
-                (r >> 8) % n.max(1)
-            });
+            // the reload jitter is drawn from the lockstep table when the search finds a target (`0x479cf3` -> `0x47c5f0`)
+            let (table, state) = (&mut self.game_rng, &mut self.rng);
+            let ev = self.units[i].aim.as_mut().unwrap().tick(face, |n| draw(table, state, n));
             if ev.shot.is_some() {
                 if let Some((bt, strength)) = weapon_shot(kind) {
                     // a type 1 bullet flies from the muzzle to the aircraft (or the Advancer's shot point); the hit is by handle

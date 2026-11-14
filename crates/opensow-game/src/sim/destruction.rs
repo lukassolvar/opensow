@@ -36,7 +36,7 @@ impl World {
             let mut b = Bullet::new(bt, 80, owner, path);
             b.speed = rb.speed;
             b.variant = rb.flag.unwrap_or(0);
-            self.bullets.push(b);
+            self.push_bullet(b);
         }
         BURST_GAP + self.random(BURST_JITTER) as i32
     }
@@ -53,18 +53,6 @@ impl World {
             let turret = matches!(self.structures[i].kind, ObjectKind::Turret(_));
             let gap = self.destruction_burst(i, turret);
             self.structures[i].dying = Some((anim - 1, gap));
-        }
-    }
-
-    /// The animations of all dying buildings: the exe runs [`DESTRUCTION_PASSES`] passes per tick.
-    pub(super) fn step_destruction(&mut self) {
-        for i in 0..self.structures.len() {
-            for _ in 0..DESTRUCTION_PASSES {
-                if self.structures[i].dying.is_none() {
-                    break;
-                }
-                self.destruction_pass(i);
-            }
         }
     }
 
@@ -108,6 +96,9 @@ impl World {
         match winner {
             Some(p) => {
                 self.slot_alloc(p.min(2), i);
+                // the old gun unit goes with the old building; the rebuilt turret creates a new one once healed in
+                self.turret_look.remove(&i);
+                self.gun_slot.remove(&i);
                 let s = &mut self.structures[i];
                 s.owner = match p {
                     0 => Owner::Player,
@@ -150,22 +141,18 @@ impl World {
         }
     }
 
-    /// Corpses (`0x46b600`): the timer runs down; below [`CORPSE_BLAST_BELOW`] the final blasts go off once; below 0 the slot is freed.
-    pub(super) fn step_corpses(&mut self) {
-        let mut corpses = std::mem::take(&mut self.corpses);
-        for c in corpses.iter_mut() {
-            c.left -= 1;
-            if c.left < CORPSE_BLAST_BELOW && !c.blasted {
-                c.blasted = true;
-                for &size in corpse_blasts(c.variant) {
-                    let (dy, dx) = (self.random(30) as i32 - 15, self.random(30) as i32 - 15);
-                    self.effects.push(Effect { x: c.x + dx, y: c.y + dy, spec: blast(size), age: 0 });
-                }
+    /// One corpse's turn (`0x46b600`, in its player's unit pass at its slot): the timer runs down; below [`CORPSE_BLAST_BELOW`]
+    /// the final blasts go off once; below 0 the caller frees the slot.
+    pub(super) fn step_corpse(&mut self, n: usize) {
+        let c = self.corpses[n];
+        self.corpses[n].left -= 1;
+        if c.left - 1 < CORPSE_BLAST_BELOW && !c.blasted {
+            self.corpses[n].blasted = true;
+            for &size in corpse_blasts(c.variant) {
+                let (dy, dx) = (self.random(30) as i32 - 15, self.random(30) as i32 - 15);
+                self.effects.push(Effect { x: c.x + dx, y: c.y + dy, spec: blast(size), age: 0 });
             }
         }
-        corpses.retain(|c| c.left >= 0);
-        self.corpses = corpses;
-        self.occ = None;
     }
 
     /// Burning wrecks (`0x45b0a0`): remove at 0 columns left, else count down and throw a rising smoke bullet every 20 steps.
@@ -182,7 +169,7 @@ impl World {
                 let (dx, dy) = (80 + self.fx_random(80) as i32, 80 + self.fx_random(40) as i32);
                 if let Some(path) = build_path(WRECK_SMOKE_TYPE, w.x, w.y, w.x + dx, w.y - dy, 0) {
                     if !path.points.is_empty() {
-                        self.bullets.push(Bullet::new(WRECK_SMOKE_TYPE, 0, 0, path));
+                        self.push_bullet(Bullet::new(WRECK_SMOKE_TYPE, 0, 0, path));
                     }
                 }
             }
@@ -192,30 +179,28 @@ impl World {
     }
 
     /// Advances the explosions (`0x411220`, type 35).
-    pub(super) fn step_nukes(&mut self) {
+    /// One step of bomb event `n` (its turn in the owner's bullet pass); `false` when it has ended (the caller removes it).
+    pub(super) fn step_nuke(&mut self, n: usize) -> bool {
         use opensow_formats::rogon::Explosion;
         let words: Vec<i32> = self.rings.offsets.iter().flat_map(|&(dx, dy)| [dx as i32, dy as i32]).collect();
         // the list used goes up to ring 7: `[0x6b3a34]` = 2 * (offsets up to and including ring 7)
         let limit = Explosion::limit(&self.rings.ends);
-        let mut blasts: Vec<(i32, i32, i32, i32, bool)> = Vec::new();
-        self.nukes.retain_mut(|n| {
-            let (list, alive) = n.ex.step(&words, limit);
-            for b in list {
-                blasts.push((n.x + 16 + b.dx * CELL, n.y + 16 + b.dy * CELL, b.strength, n.owner, b.sound));
-            }
-            alive
-        });
+        let nk = &mut self.nukes[n];
+        let (list, alive) = nk.ex.step(&words, limit);
+        let (nx, ny, owner) = (nk.x, nk.y, nk.owner);
         // per blast, in the exe's order (0x411310..0x411442): the rumble every 17th blast (the walker nuke 19, now and then the
         // fighter missile's boom 67), then a `e_unit2` cloud (the unit-death cloud, not a blast sprite) at the centre moved by
         // rand(32) - 16 on y (first draw) and x, then the area damage
-        for (x, y, strength, owner, sound) in blasts {
-            if sound {
+        for b in list {
+            let (x, y) = (nx + 16 + b.dx * CELL, ny + 16 + b.dy * CELL);
+            if b.sound {
                 let id = if self.random(4) == 1 { 67 } else { 19 };
                 self.sound(id, x, y, true);
             }
             let (dy, dx) = (self.random(32) as i32 - 16, self.random(32) as i32 - 16);
             self.effects.push(Effect { x: x + dx, y: y + dy, spec: UNIT_CLOUD, age: 0 });
-            self.explode(x, y, 35, strength, owner);
+            self.explode(x, y, 35, b.strength, owner);
         }
+        alive
     }
 }

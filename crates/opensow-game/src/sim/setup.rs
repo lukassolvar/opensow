@@ -27,6 +27,7 @@ impl World {
             beams: Vec::new(),
             blinks: HashMap::new(),
             turret_look: HashMap::new(),
+            gun_slot: HashMap::new(),
             air_targets: HashMap::new(),
             turret_muzzles: HashMap::new(),
             effects: Vec::new(),
@@ -50,7 +51,6 @@ impl World {
             objective: Objective::default(),
             reinforcement: None,
             convoy: None,
-            escort_roles: Vec::new(),
             rates: [40; 3],
             repair_mode: false,
             credits: [0; 2],
@@ -100,13 +100,25 @@ impl World {
     }
 
     /// Builds the world of a loaded level: blocked cells from the map, structures from the objects, units from the markers.
+    #[cfg(test)]
     pub fn from_level(map: &opensow_formats::map::Map, level: &Level) -> World {
+        Self::from_level_with_rng(map, level, None)
+    }
+
+    /// `from_level` with the exe's random table installed first. A fresh mission start (`0x422b00`, state 11) puts the table
+    /// back to index 0 (`0x422b19`), builds the debris curves (`0x422c13`, 600 numbers) and only then loads the level
+    /// (`0x41f140`), whose units each draw `rand(20)` and `rand(900)` from it (`0x46bf31`, `0x46c111`). Every later draw (the
+    /// computer's first strategy roll among them) depends on that order.
+    pub fn from_level_with_rng(map: &opensow_formats::map::Map, level: &Level, rng: Option<GameRng>) -> World {
         let (w, h) = (map.width as i32, map.height as i32);
         let mut blocked = vec![false; (w * h) as usize];
         for c in map.cells.iter().filter(|c| c.blocked) {
             blocked[c.y as usize * w as usize + c.x as usize] = true;
         }
         let mut world = World::new((w, h), blocked);
+        if let Some(r) = rng {
+            world.set_game_rng(r);
+        }
         // the air layer: the map's second terrain grid (`+0x180cc`), which the .map file stores as the "border" layer
         for c in map.cells.iter() {
             world.air_blocked[c.y as usize * w as usize + c.x as usize] = c.border;
@@ -387,6 +399,7 @@ impl World {
         // look-around countdown `[unit+0x8c]` = 240 + random(900) (`0x46c10c..0x46c121`)
         let look = 240 + self.random(900) as i32;
         let max_hp = UnitKind::max_hp(kind).unwrap_or(300);
+        let slot = self.free_unit_slot(player.clamp(0, 2) as usize);
         self.units.push(Unit {
             id,
             kind,
@@ -414,6 +427,7 @@ impl World {
             chase: None,
             idle: 0,
             look,
+            slot,
         });
         id
     }

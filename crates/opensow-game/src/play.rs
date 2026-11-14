@@ -206,10 +206,8 @@ impl Play {
 
     fn with_scene(assets: &mut Assets, level: &str, mut scene: Scene, settings: &Settings, carry_counter: usize) -> Result<Play, String> {
         let lvl = scene.level.as_ref().ok_or("level has no script (.edt)")?;
-        let mut world = World::from_level(&scene.map, lvl);
-        if let Some(rng) = std::fs::read(assets.game.data().join("generic.file")).ok().and_then(|d| opensow_formats::rng::GameRng::from_file(&d)) {
-            world.set_game_rng(rng);
-        }
+        let rng = std::fs::read(assets.game.data().join("generic.file")).ok().and_then(|d| opensow_formats::rng::GameRng::from_file(&d));
+        let mut world = World::from_level_with_rng(&scene.map, lvl, rng);
         if settings.starter_squad && world.player_units().filter(|u| u.kind != kinds::ADVANCER).count() < 4 {
             let anchor = world.player_units().find(|u| u.kind == kinds::ADVANCER).or_else(|| world.player_units().next()).map(|u| u.px());
             if let Some((x, y)) = anchor {

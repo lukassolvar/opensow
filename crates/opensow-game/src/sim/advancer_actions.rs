@@ -61,11 +61,12 @@ impl World {
 
     /// Satellite protection (`0x409f50`): on a protected building a recently attacked flag plus an expired 240-tick timer
     /// destroys every foreign Advancer above the building; the flag is cleared on every pass.
-    pub(super) fn step_satellites(&mut self) {
-        for i in 0..self.structures.len() {
+    /// One building's check, in its owner's building pass (`0x40e38e` in `0x40de60`).
+    pub(super) fn satellite_check(&mut self, i: usize) {
+        {
             let s = &mut self.structures[i];
             if !s.protected || !s.alive() {
-                continue;
+                return;
             }
             if s.sat_cd > 0 {
                 s.sat_cd -= 1;
@@ -92,7 +93,7 @@ impl World {
                     let lift = opensow_formats::anim::HOVER_ALTITUDE;
                     if let Some(path) = build_path(10, x, y + lift + SATLASER_START_DY, x, y + lift + SATLASER_END_DY, 0) {
                         if !path.points.is_empty() {
-                            self.bullets.push(Bullet::new(10, SATLASER_STRENGTH, player, path));
+                            self.push_bullet(Bullet::new(10, SATLASER_STRENGTH, player, path));
                         }
                     }
                 }
@@ -103,15 +104,9 @@ impl World {
     /// Advancer beams: once the Advancer hovers over the target cell it shoots every `ADVANCER_BEAM_TICKS`; each shot
     /// moves `2 * rate` hit points (destroy / repair, `0x40ffe9`) or adds `rate` upgrade points (`0x40e3d0`). New
     /// buildings heal in at `HEAL_PER_TICK`.
-    pub(super) fn step_actions(&mut self) {
-        for s in &mut self.structures {
-            if s.heal > 0 && s.hp > 0 {
-                let h = s.heal.min(HEAL_PER_TICK);
-                s.hp += h;
-                s.heal -= h;
-            }
-        }
-        for i in 0..self.units.len() {
+    /// One unit's part of it, at the end of its turn (the Advancer's chassis tick `0x46f210..0x46f321`).
+    pub(super) fn advancer_action(&mut self, i: usize) {
+        {
             if self.units[i].kind == kinds::ADVANCER && self.units[i].player == 0 {
                 let u = &mut self.units[i];
                 if u.action.is_none() && u.path.is_empty() && u.hp > 0 {
@@ -127,7 +122,7 @@ impl World {
             }
             // `0x46f210` ticks the cooldown member first, every tick, whatever the unit does (`0x46f321`)
             self.units[i].beam.tick();
-            let Some((action, t)) = self.units[i].action else { continue };
+            let Some((action, t)) = self.units[i].action else { return };
             let u = &self.units[i];
             let side_u = if u.player == 0 { 0 } else { 1 };
             let still_valid = self.action_valid(u, action, t);
@@ -135,13 +130,13 @@ impl World {
             // a new move order (path set elsewhere) or an invalid target cancels the action
             if !still_valid || target_cell.is_none() || (u.path.is_empty() && u.cell() != target_cell.unwrap()) {
                 self.units[i].action = None;
-                continue;
+                return;
             }
             if u.cell() != target_cell.unwrap() || !u.path.is_empty() {
-                continue;
+                return;
             }
             if !self.units[i].beam.ready() {
-                continue;
+                return;
             }
             self.units[i].beam.fire();
             let rate = self.rates[side_u];
@@ -166,17 +161,21 @@ impl World {
                     let mut rnd = |n: u32| self.random(n);
                     frags.push(fragment(action, k, &mut rnd));
                 }
-                self.beams.push(BeamShot { action, target: t, side: side_u, rate, path, index: 0, trail: 2, frags });
+                self.push_beam(BeamShot { action, target: t, side: side_u, rate, path, index: 0, trail: 2, frags, slot: u32::MAX });
             }
         }
     }
 
     /// Flies the Advancers' beam bullets (speed 60: one step per tick). The upgrade bullet drops two yellow sparks every
     /// second step (`0x411993`); on landing the action happens (`0x40f590`).
-    pub(super) fn step_beams(&mut self) {
+    /// Side `p`'s shots this tick; the ones that arrived are removed and returned with their slots for [`Self::beam_lands`].
+    pub(super) fn fly_beams(&mut self, p: usize) -> Vec<(u32, BeamShot)> {
         let mut landed = Vec::new();
         let mut trails = Vec::new();
         for (n, b) in self.beams.iter_mut().enumerate() {
+            if b.side.min(2) != p {
+                continue;
+            }
             let (x, y) = b.path.points[b.index.min(b.path.points.len() - 1)];
             if b.action == Action::Upgrade {
                 b.trail -= 1;
@@ -198,10 +197,9 @@ impl World {
             }
         }
         self.effects.extend(trails);
-        for &n in landed.iter().rev() {
-            let b = self.beams.remove(n);
-            self.beam_lands(b);
-        }
+        let mut out: Vec<(u32, BeamShot)> = landed.iter().rev().map(|&n| self.beams.remove(n)).map(|b| (b.slot, b)).collect();
+        out.reverse();
+        out
     }
 
     /// An Advancer shot arrives at its building: repairs, upgrades or damages it.

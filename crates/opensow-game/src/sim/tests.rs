@@ -33,13 +33,15 @@ fn cheats_keep_units_alive_fill_the_purse_and_freeze_the_enemy() {
     let mut w = open_world(20, 20);
     w.cheats = Cheats { invulnerable: true, rich: true, freeze_enemy: true };
     w.add_unit(6, 0, 5 * CELL, 5 * CELL);
-    w.add_unit(6, 1, 12 * CELL, 5 * CELL);
+    let enemy = w.add_unit(6, 1, 12 * CELL, 5 * CELL);
+    // a second enemy unit keeps the game running: the win/lose check runs every tick (`0x421230`)
+    w.add_unit(6, 1, 18 * CELL, 18 * CELL);
     w.units[0].hp = 0;
     w.units[1].hp = 0;
     w.ai = true;
     w.step();
     assert_eq!(w.units.iter().find(|u| u.player == 0).map(|u| u.hp), Some(UnitKind::max_hp(6).unwrap()), "own unit restored");
-    assert!(w.units.iter().all(|u| u.player == 0 || u.hp <= 0), "the enemy is not protected");
+    assert!(w.unit(enemy).is_none_or(|u| u.hp <= 0), "the enemy is not protected");
     assert_eq!((w.credits[0], w.research[0]), (CREDITS_CAP, RESEARCH_CAP));
     assert_eq!(w.ai_timer, 0, "the computer player did not run");
     w.cheats.freeze_enemy = false;
@@ -55,8 +57,10 @@ fn dying_units_throw_pieces_and_leave_burning_wrecks() {
     w.add_unit(6, 0, 5 * CELL, 5 * CELL); // kind 6: tier 3 artillery -> top index 2 * 5 + 1
     w.units[0].hp = 0;
     w.step();
+    // the piece is made at the unit's turn and flies in the same tick's bullet pass (`0x42dd93`), so it has left its start
     let piece = w.bullets.iter().find(|b| b.bullet_type == 15).expect("a piece");
-    assert_eq!((piece.strength, piece.variant, piece.index), (40, 11, 0));
+    assert_eq!((piece.strength, piece.variant), (40, 11));
+    assert!(piece.index < piece.path.points.len());
     assert_eq!(w.wrecks.len(), 1);
     for _ in 0..400 {
         w.step();
@@ -1920,8 +1924,8 @@ fn the_turret_stands_on_one_of_the_constructors_eight_spots() {
 #[test]
 fn a_dead_units_slot_counts_for_the_threat_and_walkers_count_double() {
     let mut w = turret_world(0, 500, [true; 5]);
-    w.corpses.push(Corpse { x: 9 * CELL, y: 12 * CELL, left: 100, variant: 0, air: false, blasted: false, player: 0, kind: 43 });
-    w.corpses.push(Corpse { x: 9 * CELL, y: 12 * CELL, left: 100, variant: 0, air: false, blasted: false, player: 0, kind: 7 });
+    w.corpses.push(Corpse { x: 9 * CELL, y: 12 * CELL, left: 100, variant: 0, air: false, blasted: false, player: 0, kind: 43, slot: u32::MAX });
+    w.corpses.push(Corpse { x: 9 * CELL, y: 12 * CELL, left: 100, variant: 0, air: false, blasted: false, player: 0, kind: 7, slot: u32::MAX });
     w.ai_build_turret(1); // 2 + 1 = 3
     assert_eq!(turrets(&w).iter().map(|t| t.0).collect::<Vec<_>>(), [25]);
 }
@@ -2414,78 +2418,6 @@ fn a_custom_escort_walks_its_pods_through_the_route_to_the_goal() {
     assert_eq!(w.outcome, Some(Outcome::Defeat));
 }
 
-/// The computer against a custom escort (`escort_ai`): on Normal a quarter holds the goal, the rest wait on the convoy's
-/// way ahead of it, none walks off to the player's headquarters; Easy waits where it stands.
-#[test]
-fn the_computer_guards_the_goal_and_waits_ahead_of_the_convoy() {
-    let setup = |d: Difficulty| {
-        let mut w = open_world(60, 60);
-        let pod = w.add_unit(kinds::POD, 0, 5 * CELL + 16, 5 * CELL + 16);
-        w.add_structure(Structure {
-            object: 0,
-            kind: ObjectKind::Headquarters,
-            owner: Owner::Player,
-            cell: (2, 50),
-            hp: 50,
-            max_hp: 50,
-            aim: None,
-            weapon: 0,
-            target: None,
-            slots: Vec::new(),
-            active: 0,
-            kind_id: 100,
-            tally: [0; 3],
-            heal: 0,
-            upgrade: 0,
-            protected: true,
-            attacked: false,
-            sat_cd: 0,
-            advancer: None,
-            rally: None,
-            dying: None,
-        });
-        let green: Vec<u32> = (0..8).map(|k| w.add_unit(7, 1, (50 + k % 4) * CELL + 16, (10 + k / 4) * CELL + 16)).collect();
-        w.ai = true;
-        w.skirmish = true;
-        w.difficulty = d;
-        w.set_convoy(vec![(5, 45), (45, 45)]);
-        (w, pod, green)
-    };
-    let (mut w, _pod, green) = setup(Difficulty::Normal);
-    for _ in 0..600 {
-        w.step();
-    }
-    let role = |w: &World, id: u32| w.escort_roles.iter().find(|r| r.0 == id).map(|r| r.1);
-    let guards: Vec<u32> = green.iter().copied().filter(|&id| role(&w, id) == Some(escort_ai::Role::Goal)).collect();
-    assert_eq!(guards.len(), 2, "a quarter of eight: {:?}", w.escort_roles);
-    assert!(green.iter().all(|&id| role(&w, id).is_some()), "every unit has a part: {:?}", w.escort_roles);
-    // nobody goes for the headquarters; the posts lie on the way still ahead of the pod
-    assert!(w.units.iter().filter(|u| u.player == 1).all(|u| !matches!(u.chase, Some(Target::Structure(_)))));
-    for _ in 0..3000 {
-        w.step();
-    }
-    let on_way = |c: (i32, i32)| (c.0 - 5).abs() <= 3 && c.1 >= 6 || (c.1 - 45).abs() <= 3;
-    for &id in &green {
-        if let Some(u) = w.unit(id) {
-            // where it stands, or where it is walking to
-            let c = u.path.last().map_or(u.cell(), |&(x, y)| ((x / CELL as f32) as i32, (y / CELL as f32) as i32));
-            match role(&w, id) {
-                Some(escort_ai::Role::Goal) => assert!((c.0 - 45).abs() <= 4 && (c.1 - 45).abs() <= 4, "guard {id} at {c:?}"),
-                Some(escort_ai::Role::Intercept) => assert!(on_way(c), "interceptor {id} at {c:?}"),
-                _ => {}
-            }
-        }
-    }
-    // Easy: units far from the pod stay where they are (no goal guard, no posts, no march on the headquarters)
-    let (mut w, _, green) = setup(Difficulty::Easy);
-    let start: Vec<(i32, i32)> = green.iter().map(|&id| w.unit(id).unwrap().cell()).collect();
-    for _ in 0..600 {
-        w.step();
-    }
-    assert!(green.iter().all(|&id| role(&w, id) == Some(escort_ai::Role::Wait)), "{:?}", w.escort_roles);
-    assert_eq!(green.iter().map(|&id| w.unit(id).unwrap().cell()).collect::<Vec<_>>(), start);
-}
-
 /// The countdown's end modes outside the campaign (header word 67): 0 holding out wins, 1 running out of time loses.
 #[test]
 fn a_countdown_ends_a_skirmish_by_its_mode() {
@@ -2687,7 +2619,7 @@ fn a_spectated_game_runs_the_computer_for_both_sides_with_separate_timers() {
     w.spectate_ai = (3, 1000, 600, 0);
     w.tick = 120; // Easy thinks every 120 ticks
     w.step_ai_spectate();
-    assert!(w.unit(id).is_some_and(|u| u.chase.is_some()), "blue's idle unit gets orders");
+    assert!(w.unit(id).is_some_and(|u| !u.path.is_empty()), "blue's idle unit gets orders");
     assert_eq!(w.ai_timer, 1000, "green's timer is untouched by blue's run");
 }
 
@@ -2708,6 +2640,82 @@ fn the_campaign_computer_builds_turrets_only_when_the_strike_timer_runs_out() {
     assert!((1..=2).contains(&n), "the timer ran out: the routine runs twice at most, built {n}");
 }
 
+/// `0x42f882`: the campaign computer orders with `0x469fe0(target, 0)`, which plans one route (`0x46eb40`) and clears the
+/// order target again (`0x46a141..0x46a14d`). The unit walks to the neutral lab without keeping it as its target and, once
+/// the route ends, picks again with the strategy of that moment (here the headquarters).
+#[test]
+fn a_campaign_computer_order_is_one_route_and_the_unit_picks_again_when_it_ends() {
+    let mut w = open_world(48, 20);
+    w.structures.clear();
+    let mut hq = factory(Owner::Player, 13536, 100);
+    hq.kind = ObjectKind::Headquarters;
+    hq.cell = (40, 8);
+    hq.slots.clear();
+    w.add_structure(hq);
+    let mut lab = factory(Owner::Neutral, 6768, kinds::RESEARCH_LAB);
+    lab.kind = ObjectKind::ResearchLab;
+    lab.cell = (4, 8);
+    lab.slots.clear();
+    w.add_structure(lab);
+    let id = w.add_unit(7, 1, 14 * CELL + 16, 9 * CELL + 16);
+    w.ai_strategy = 4; // building first: the lab is the nearest
+    w.ai_timer = 100_000;
+    w.ai_strike = 100_000;
+    w.tick = 1;
+    w.step_ai(1);
+    let u = w.unit(id).unwrap();
+    assert!(u.chase.is_none(), "the order target is cleared again");
+    let end = *u.path.last().expect("a route to the lab");
+    assert!(end.0 < (14 * CELL) as f32, "the route leads to the lab: {end:?}");
+    w.ai_strategy = 1;
+    for _ in 0..3000 {
+        w.step();
+        if w.unit(id).is_some_and(|u| u.path.is_empty()) {
+            break;
+        }
+    }
+    let u = w.unit(id).unwrap();
+    assert!(u.path.is_empty() && u.cell().0 < 12, "arrived at the lab: {:?}", u.cell());
+    w.step_ai(1);
+    let end = *w.unit(id).unwrap().path.last().expect("a new route");
+    assert!(end.0 > (30 * CELL) as f32, "the new pick is the headquarters: {end:?}");
+}
+
+/// Missions 3 and 8 (escort) skip the strategy (`0x42f81d..0x42f828` -> `0x42f86e`): an idle unit goes for the nearest enemy
+/// unit, the pods included, and only without one for the headquarters, even when the strategy says headquarters.
+#[test]
+fn in_the_escort_missions_the_computer_goes_for_the_pods_not_the_headquarters() {
+    let run = |mission: Option<u32>, custom: bool| {
+        let mut w = open_world(48, 20);
+        w.structures.clear();
+        let mut hq = factory(Owner::Player, 13536, 100);
+        hq.kind = ObjectKind::Headquarters;
+        hq.cell = (40, 8);
+        hq.slots.clear();
+        w.add_structure(hq);
+        w.add_unit(kinds::POD, 0, 4 * CELL + 16, 9 * CELL + 16);
+        let id = w.add_unit(7, 1, 14 * CELL + 16, 9 * CELL + 16);
+        w.mission_no = mission;
+        if custom {
+            // a custom map's escort plays on the skirmish path
+            w.skirmish = true;
+            w.set_convoy(vec![(4, 18)]);
+        }
+        w.ai_strategy = 1; // the headquarters
+        w.ai_timer = 100_000;
+        w.ai_strike = 100_000;
+        w.tick = 1;
+        w.step_ai(1);
+        let u = w.unit(id).unwrap();
+        assert!(u.chase.is_none(), "the order is one route, as in the exe");
+        u.path.last().map(|p| p.0).expect("a route")
+    };
+    assert!(run(Some(3), false) < (14 * CELL) as f32, "mission 3: to the pod");
+    assert!(run(Some(8), false) < (14 * CELL) as f32, "mission 8: to the pod");
+    assert!(run(Some(5), false) > (30 * CELL) as f32, "another mission: strategy 1, the headquarters");
+    assert!(run(None, true) < (14 * CELL) as f32, "a custom escort: to the pod as in missions 3 and 8");
+}
+
 #[test]
 fn an_easy_computer_re_orders_idle_units_only_every_two_seconds() {
     let count = |d: Difficulty| {
@@ -2720,7 +2728,7 @@ fn an_easy_computer_re_orders_idle_units_only_every_two_seconds() {
         w.ai_timer = 1000;
         w.tick = 1;
         w.step_ai(1);
-        w.unit(id).is_some_and(|u| u.chase.is_some())
+        w.unit(id).is_some_and(|u| !u.path.is_empty())
     };
     assert!(count(Difficulty::Normal), "the exe orders an idle unit at once");
     assert!(!count(Difficulty::Easy), "an easy computer waits for its next think tick");
@@ -2977,7 +2985,9 @@ fn a_rogon_bomb_never_touches_a_walker_and_a_dying_pod_leaves_no_wreck() {
     }
     assert!(w.unit(pod).is_some(), "the walker's handle is in the other grid: no touch");
     assert!(w.unit(walker).is_some());
-    // a pod shot down explodes too, without the generic death clouds
+    // a pod shot down explodes too, without the generic death clouds. The walker goes first: the blasts would kill it, and green's
+    // unit turn comes after blue's bullet pass in the same tick, so its own death clouds would land in this count
+    w.units.retain(|u| u.id != walker);
     let before = w.effects.len();
     w.units.iter_mut().find(|u| u.id == pod).unwrap().hp = 0;
     w.step();

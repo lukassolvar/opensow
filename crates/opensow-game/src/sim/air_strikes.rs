@@ -38,15 +38,12 @@ impl World {
         let mut aircraft = std::mem::take(&mut self.aircraft);
         let mut events = Vec::new();
         for a in &mut aircraft {
-            let mut r = self.rng;
-            let mut rand = |n: u32| {
-                r = r.wrapping_mul(1_103_515_245).wrapping_add(12345);
-                ((r >> 8) % n.max(1)) as i32
-            };
+            // the aircraft code draws from the lockstep table (`0x467848..0x467a95`, `0x437b10`)
+            let (table, state) = (&mut self.game_rng, &mut self.rng);
+            let mut rand = |n: u32| draw(table, state, n) as i32;
             for e in a.step(t, &mut rand) {
                 events.push((a.side, a.right, e));
             }
-            self.rng = r;
             for (id, x, y) in std::mem::take(&mut a.sounds) {
                 if self.sounds.len() < 64 {
                     self.sounds.push((id, x, y, false));
@@ -68,7 +65,7 @@ impl World {
                             let mut b = Bullet::new(bullet_type, strength, side, path);
                             // 0x4684f2: a bomber's bomb takes the flight direction `[aircraft+0x34]` as `[+0x268c]` (bomba_l / bomba_r)
                             b.variant = (bullet_type == 18 && right) as u32;
-                            self.bullets.push(b);
+                            self.push_bullet(b);
                         }
                     }
                 }

@@ -28,9 +28,17 @@ pub enum Event {
     Fireball { x: i32, y: i32, period: u8 },
 }
 
+fn unassigned_slot() -> u32 {
+    u32::MAX
+}
+
 /// One aircraft of a launched strike, with the exe's per-object state (see the module docs for the field naming).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Aircraft {
+    /// Index in the launching side's aircraft table (`0x5ba910`, 30 per side, first free slot); the side's aircraft are
+    /// updated in slot order. `u32::MAX` until the simulation assigns one.
+    #[serde(default = "unassigned_slot")]
+    pub slot: u32,
     /// Handle of the aircraft for targeted hits (`[+0x1c]` in the exe, a number with side and class bits); here a number the
     /// simulation hands out (0 until it does).
     pub id: u32,
@@ -115,6 +123,7 @@ impl Aircraft {
         let map_width_px = map_cells * 32;
         let right = target_x <= 0x400;
         let mut a = Aircraft {
+            slot: u32::MAX,
             id: 0,
             force,
             side,

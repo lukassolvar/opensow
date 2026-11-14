@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// A landed bullet: position, type, strength, owner, target.
+pub(super) type Landed = (i32, i32, u8, i32, i32, Option<HitTarget>);
+
 impl World {
     /// The spawner's end-point scatter for one round (`0x47cfe1..0x47d03f`): per axis (x, then y) `random(2)` picks the sign
     /// (1 = plus) and `random(spread)` the size; `spread` is `aim::spread(kind)`. Single player only (remote games skip it).
@@ -97,32 +100,47 @@ impl World {
         unit.or(turret).or(building)
     }
 
-    /// One tick of a turret: search, aim, fire.
+    /// The building pass (`0x40de60`) of a turret that has healed in creates its gun unit once (`0x40dfd0..0x40e04d`, for every
+    /// owner: no owner test): it takes the first free slot of the owner's unit table and its initialiser `0x46bd30` draws the
+    /// hover phase `rand(20)` (`0x46bf31`, unused by a gun) and seeds `[unit+0x8c]` = 240 + random(900) (`0x46c10c`).
+    pub(super) fn create_gun(&mut self, i: usize) {
+        let s = &self.structures[i];
+        if !s.alive() || s.aim.is_none() || s.heal > 0 || self.turret_look.contains_key(&i) {
+            return;
+        }
+        let slot = self.free_unit_slot(owner_index(s.owner));
+        self.gun_slot.insert(i, slot);
+        self.random(20);
+        let seed = 240 + self.random(900) as i32;
+        self.turret_look.insert(i, seed);
+    }
+
+    /// One tick of a turret's gun unit (its turn in the owner's unit pass): look around, search, aim, fire.
     pub(super) fn step_structure(&mut self, i: usize, index: &HashMap<(i32, i32), Vec<Target>>) {
-        if !self.structures[i].alive() || self.structures[i].aim.is_none() || self.structures[i].heal > 0 {
+        if !self.structures[i].alive() || self.structures[i].aim.is_none() || !self.turret_look.contains_key(&i) {
             // a turret gets its gun top only when it has finished healing in (0x40de60 creates it when [bld+0x68] turns 0)
             return;
         }
         let owner_player = if self.structures[i].owner == Owner::Player { 0 } else { 1 };
+        // idle look-around (`0x46e114`, docs/art.md): a gun unit has no chassis, so its counter runs only while the top is idle
+        // (`[top+0x48] == 0`, `0x46e12d`); at 0 it draws `rand(900)` and `rand(steps)` (`0x46e147`, `0x46e178`, both
+        // unconditional) and takes the facing only when the top has no target. Neutral guns are units of player 2 and look
+        // around too.
+        if self.structures[i].aim.as_ref().is_some_and(|a| a.state == opensow_formats::aim::State::Idle) {
+            let look = self.turret_look.get_mut(&i).expect("seeded above");
+            *look -= 1;
+            if *look <= 0 {
+                let wait = 240 + self.random(900) as i32;
+                let steps = self.structures[i].aim.as_ref().map_or(32, |a| a.params.steps);
+                let face = self.random(steps);
+                self.turret_look.insert(i, wait);
+                if self.structures[i].target.is_none() {
+                    self.structures[i].aim.as_mut().unwrap().set_target_facing(face);
+                }
+            }
+        }
         if self.structures[i].owner == Owner::Neutral {
             return;
-        }
-        // idle look-around (`0x46e114`, docs/art.md): every 240..1139 ticks the top turns to a random facing when it has no target
-        // the gun unit is created here (healed in): its initialiser seeds `[unit+0x8c]` = 240 + random(900) (`0x46c10c`)
-        if !self.turret_look.contains_key(&i) {
-            let seed = 240 + self.random(900) as i32;
-            self.turret_look.insert(i, seed);
-        }
-        let look = self.turret_look.get_mut(&i).expect("seeded above");
-        *look -= 1;
-        if *look <= 0 {
-            let wait = 240 + self.random(900) as i32;
-            let steps = self.structures[i].aim.as_ref().map_or(32, |a| a.params.steps);
-            let face = self.random(steps);
-            self.turret_look.insert(i, wait);
-            if self.structures[i].target.is_none() {
-                self.structures[i].aim.as_mut().unwrap().set_target_facing(face);
-            }
         }
         let (min, max, steps) = {
             let p = &self.structures[i].aim.as_ref().unwrap().params;
@@ -150,11 +168,9 @@ impl World {
                 (None, Some(((tx, ty), _))) => Some(facing(ox, oy, tx, ty, steps)),
                 _ => None,
             };
-            let mut r = self.random(1 << 16);
-            let ev = self.structures[i].aim.as_mut().unwrap().tick(face, |n| {
-                r = r.wrapping_mul(1_103_515_245).wrapping_add(12345);
-                (r >> 8) % n.max(1)
-            });
+            // the reload jitter is drawn from the lockstep table when the search finds a target (`0x479cf3` -> `0x47c5f0`)
+            let (table, state) = (&mut self.game_rng, &mut self.rng);
+            let ev = self.structures[i].aim.as_mut().unwrap().tick(face, |n| draw(table, state, n));
             if let Some((barrel, _)) = ev.shot {
                 // the rockets fly to the target (type 1, drawn as `missile`); the damage is taken off the target directly (events 1, 10, 31)
                 let target = match (ai, apos) {
@@ -182,12 +198,10 @@ impl World {
         let tpos = t.and_then(|t| self.target_pos(t));
         let (ox, oy) = self.turret_anchor(i);
         let face = tpos.map(|(tx, ty)| facing(ox, oy, tx, ty, steps));
-        let mut r = self.random(1 << 16);
         let weapon = self.structures[i].weapon;
-        let ev = self.structures[i].aim.as_mut().unwrap().tick(face, |n| {
-            r = r.wrapping_mul(1_103_515_245).wrapping_add(12345);
-            (r >> 8) % n.max(1)
-        });
+        // the reload jitter is drawn from the lockstep table when the search finds a target (`0x479cf3` -> `0x47c5f0`)
+        let (table, state) = (&mut self.game_rng, &mut self.rng);
+        let ev = self.structures[i].aim.as_mut().unwrap().tick(face, |n| draw(table, state, n));
         if let (Some((barrel, shots)), Some(to)) = (ev.shot, tpos) {
             // each shot fires the `.po1` tables barrel..barrel+shots-1 (`recoil`), each from the muzzle point of the top's facing
             let facing_now = self.structures[i].aim.as_ref().unwrap().facing;
@@ -258,7 +272,7 @@ impl World {
             Some(path) => {
                 let mut b = Bullet::new(bt, strength, owner, path);
                 b.target = Some(target);
-                self.bullets.push(b);
+                self.push_bullet(b);
             }
             None => self.hit_target(target, strength),
         }
@@ -292,16 +306,22 @@ impl World {
         if path.points.is_empty() {
             return;
         }
-        self.bullets.push(Bullet::new(bt, strength as i32, owner, path));
+        self.push_bullet(Bullet::new(bt, strength as i32, owner, path));
     }
 
     /// One tick of every bullet: flight, trails, impact and damage.
-    pub(super) fn step_bullets(&mut self) {
+    /// The flight part of owner `p`'s bullets this tick (`0x411220`): they move and leave their trails; the ones at the end
+    /// of their path are removed and returned with their slots for [`Self::land_bullet`]. The flight draws only from the
+    /// visual generator, so flying them all before the impacts keeps the lockstep order.
+    pub(super) fn fly_bullets(&mut self, p: usize) -> Vec<(u32, Landed)> {
         let t = (self.tick % 60) as u32;
-        let mut landed: Vec<(i32, i32, u8, i32, i32, Option<HitTarget>)> = Vec::new();
+        let mut landed: Vec<(u32, Landed)> = Vec::new();
         let mut puffs: Vec<(i32, i32, AnimSpec)> = Vec::new();
         let mut smoke: Vec<(i32, i32, opensow_formats::effects::Trail)> = Vec::new();
         self.bullets.retain_mut(|b| {
+            if b.owner.clamp(0, 2) as usize != p {
+                return true;
+            }
             let steps = steps_at(b.speed, t);
             if b.bullet_type == 18 {
                 b.speed += steps; // the bomb accelerates by the steps of every tick (`0x41146d`: `[+0x2664] += steps`)
@@ -339,7 +359,7 @@ impl World {
             }
             if b.index >= b.path.points.len() {
                 let (x, y) = *b.path.points.last().unwrap();
-                landed.push((x, y, b.bullet_type, b.strength, b.owner, b.target));
+                landed.push((b.slot, (x, y, b.bullet_type, b.strength, b.owner, b.target)));
                 false
             } else {
                 true
@@ -354,9 +374,14 @@ impl World {
             let dx = tr.offset + self.fx_random(tr.jitter) as i32;
             self.effects.push(Effect { x: x + dx, y: y + dy, spec: tr.spec, age: 0 });
         }
-        for (x, y, bt, strength, owner, target) in landed {
+        landed
+    }
+
+    /// A bullet at the end of its path (`0x40f590`): impact sprites, sound, the hit or the area damage.
+    pub(super) fn land_bullet(&mut self, (x, y, bt, strength, owner, target): Landed) {
+        {
             if bt == 10 {
-                continue; // the satellite laser only hits its target handle (0x4108bc): no area damage, decal or sound
+                return; // the satellite laser only hits its target handle (0x4108bc): no area damage, decal or sound
             }
             for spec in impact_anims(bt) {
                 self.effects.push(Effect { x, y, spec, age: 0 });
@@ -373,7 +398,7 @@ impl World {
                 if let Some(t) = target {
                     self.hit_target(t, strength);
                 }
-                continue;
+                return;
             }
             self.explode(x, y, bt, strength, owner);
             if bt == 17 {

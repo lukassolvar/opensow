@@ -126,7 +126,7 @@ On 02-Ice Blizzard (no carryalls at the start, the air bases build them) on Norm
 Tests: `sim::airlift_ai::tests` (pure: blind call, anti-air-free spot, follow-ups side by side, room to land, goals by unit type), `the_skirmish_computer_airlifts_a_squad_to_a_building_under_attack`, `the_campaign_computer_never_calls_a_carryall`.
 
 ## Against an escort (custom maps)
-On a custom map whose win rule is escort the computer's ground units play against the convoy instead of their usual strategy: strike pods within reach, guard the goal, wait ahead of the convoy on its way (`sim/escort_ai.rs`, not in the exe; details and the per-difficulty table in docs/map-editor-ingame.md "Missions").
+On a custom map whose win rule is escort the computer plays as in the exe's escort missions 3 and 8: its idle ground units go for the nearest blue unit (the pods are units), else blue's headquarters, whatever the strategy, each order one route as in the campaign (`step_ai`; docs/ai.md item 4, docs/map-editor-ingame.md "Missions").
 
 ## Anti-air units and Advancers waiting for a capture
 - **Differs from the exe:** the exe sends idle anti-air units after the enemy Advancer wherever it is; in a skirmish they chase it only within 30 cells, otherwise they go to the enemy HQ with the other units (body shield; `step_ai` in `sim/computer.rs`).
