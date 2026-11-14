@@ -20,6 +20,7 @@
 //! | `tests` | tests that drive a `Game` like the window does |
 
 mod assets;
+mod audio;
 mod boot;
 mod custom_maps;
 mod devtools;

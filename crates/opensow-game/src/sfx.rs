@@ -19,7 +19,8 @@ pub const PRIORITY_VOICES: usize = 16;
 
 /// Sound effects and speech: decoded sounds, the players they run on, and the options' switches and volumes.
 pub struct Sfx {
-    device: Option<rodio::MixerDeviceSink>,
+    /// The game's output (`audio::mixer`): its mixer, rate and channels, and the generation the voices and `route` were made on.
+    out: Option<(rodio::mixer::Mixer, rodio::SampleRate, rodio::ChannelCount, u64)>,
     /// The voices' own mixer when the sound enhancement (`hifi`, a soft limiter on the sum) or the debug recording
     /// (`OPENSOW_AUDIO_DUMP=file`) is on; its player feeds the device. `None`: voices play straight into the device's mixer.
     route: Option<(rodio::mixer::Mixer, rodio::Player)>,
@@ -55,7 +56,7 @@ impl Sfx {
     /// Nothing loaded and no device opened yet.
     pub fn new() -> Sfx {
         Sfx {
-            device: None,
+            out: None,
             route: None,
             route_hifi: false,
             log: None,
@@ -74,45 +75,35 @@ impl Sfx {
         }
     }
 
-    /// Open the output device on first use (and the voices' mixer, `route`); false when there is none (sound then stays off).
+    /// The game's output (opened with the first sound, `audio::mixer`) and the voices' mixer (`route`); false when there is none.
+    /// When the output was replaced (it died) or the sound enhancement switch changed, the route is built again and the voices on
+    /// the old one, which are silent or would bypass the new route, are dropped.
     fn open(&mut self) -> bool {
-        if let Some(d) = self.device.as_ref() {
-            if self.route_hifi != crate::hifi::enabled() {
-                // the switch changed (Options page 2): a new mix route; sounds still on the old one stop with it
-                self.route = route(d);
-                self.route_hifi = crate::hifi::enabled();
-                self.voices.clear();
-                self.priority.clear();
-                self.speech = None;
-            }
-            return true;
-        }
-        match crate::intro::open_output(|| {}) {
-            Ok(mut d) => {
-                d.log_on_drop(false);
-                self.route = route(&d);
-                self.route_hifi = crate::hifi::enabled();
-                if std::env::var_os("OPENSOW_AUDIO_DUMP").is_some() {
-                    self.log = Some(std::time::Instant::now());
-                }
-                self.device = Some(d);
-                true
-            }
-            Err(_) => {
-                self.enabled = false;
-                false
+        let Some((mixer, rate, channels)) = crate::audio::mixer() else { return false };
+        let generation = crate::audio::generation();
+        let fresh = self.out.as_ref().is_none_or(|o| o.3 != generation);
+        if fresh || self.route_hifi != crate::hifi::enabled() {
+            self.voices.clear();
+            self.priority.clear();
+            self.speech = None;
+            self.route = route(&mixer, rate, channels);
+            self.route_hifi = crate::hifi::enabled();
+            if std::env::var_os("OPENSOW_AUDIO_DUMP").is_some() && self.log.is_none() {
+                self.log = Some(std::time::Instant::now());
             }
         }
+        self.out = Some((mixer, rate, channels, generation));
+        true
     }
 
     /// A new player on the voices' mixer.
     fn player(&self) -> Option<rodio::Player> {
-        let device = self.device.as_ref()?;
-        Some(rodio::Player::connect_new(self.route.as_ref().map_or(device.mixer(), |r| &r.0)))
+        let o = self.out.as_ref()?;
+        Some(rodio::Player::connect_new(self.route.as_ref().map_or(&o.0, |r| &r.0)))
     }
 
     fn out_rate(&self) -> Option<rodio::SampleRate> {
-        self.device.as_ref().map(|d| d.config().sample_rate())
+        self.out.as_ref().map(|o| o.1)
     }
 
     /// Say the speech file `name` (`Data\\Sounds\\Speech`), cutting off whatever is still being said.
@@ -200,9 +191,9 @@ impl Sfx {
         }
         let (Some(ch), Some(rate)) = (NonZero::new(w.channels), NonZero::new(w.sample_rate)) else { return };
         // fields, not `self.player()`: `w` still borrows the cache
-        let Some(device) = self.device.as_ref() else { return };
-        let out = device.config().sample_rate();
-        let player = rodio::Player::connect_new(self.route.as_ref().map_or(device.mixer(), |r| &r.0));
+        let Some(o) = self.out.as_ref() else { return };
+        let out = o.1;
+        let player = rodio::Player::connect_new(self.route.as_ref().map_or(&o.0, |r| &r.0));
         if crate::hifi::enabled() {
             let data =
                 self.hq.entry(id).or_insert_with(|| crate::hifi::prepare(w.pcm.iter().map(|&s| s as f32 / 32768.0), w.channels, w.sample_rate, true)).clone();
@@ -252,7 +243,9 @@ impl Sfx {
 /// The voices' mixer and the player that feeds it to `device`: with the sound enhancement a soft limiter (-1 dB threshold, 5 ms attack,
 /// 100 ms release) keeps the sum of many full-scale shots from clipping; with `OPENSOW_AUDIO_DUMP` the result is also appended to that
 /// file (raw 16-bit little-endian, device rate and channels) and every started effect is logged. Neither: `None`, the original path.
-fn route(device: &rodio::MixerDeviceSink) -> Option<(rodio::mixer::Mixer, rodio::Player)> {
+/// The mixer always holds one silent voice: rodio's mixer ends when it has no voice at all, and its player then drops it for good,
+/// so the first effect (whose wav is read after the route is built) or any later one could find a mixer nobody plays.
+fn route(device: &rodio::mixer::Mixer, rate: rodio::SampleRate, channels: rodio::ChannelCount) -> Option<(rodio::mixer::Mixer, rodio::Player)> {
     use std::io::Write;
     struct Tap<S> {
         inner: S,
@@ -289,7 +282,8 @@ fn route(device: &rodio::MixerDeviceSink) -> Option<(rodio::mixer::Mixer, rodio:
     if !crate::hifi::enabled() && dump.is_none() {
         return None;
     }
-    let (mixer, source) = rodio::mixer::mixer(device.config().channel_count(), device.config().sample_rate());
+    let (mixer, source) = rodio::mixer::mixer(channels, rate);
+    mixer.add(rodio::source::Zero::new(channels, rate));
     let mut source: Box<dyn Source + Send> = Box::new(source);
     if crate::hifi::enabled() {
         source = Box::new(source.limit(rodio::source::LimitSettings::default()));
@@ -297,14 +291,12 @@ fn route(device: &rodio::MixerDeviceSink) -> Option<(rodio::mixer::Mixer, rodio:
     if let Some(path) = dump {
         if let Ok(f) = std::fs::File::create(&path) {
             eprintln!(
-                "audio: recording the effects mix to {path} (raw 16-bit little-endian, {} Hz, {} channels)",
-                device.config().sample_rate(),
-                device.config().channel_count()
+                "audio: recording the effects mix to {path} (raw 16-bit little-endian, {rate} Hz, {channels} channels)"
             );
             source = Box::new(Tap { inner: source, out: std::io::BufWriter::new(f), n: 0 });
         }
     }
-    let master = rodio::Player::connect_new(device.mixer());
+    let master = rodio::Player::connect_new(device);
     master.append(source);
     Some((mixer, master))
 }
@@ -313,4 +305,30 @@ fn route(device: &rodio::MixerDeviceSink) -> Option<(rodio::mixer::Mixer, rodio:
 pub fn jitter() -> f32 {
     let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_micros()) % 201;
     0.9 + n as f32 / 1000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_effects_route_survives_a_pull_before_its_first_voice() {
+        let (ch, rate) = (NonZero::new(2).unwrap(), NonZero::new(48000).unwrap());
+        let (device, mut out) = rodio::mixer::mixer(ch, rate);
+        let Some((voices, _master)) = route(&device, rate, ch) else { return }; // enhancement off: no route
+        // the output pulls 0.1 s before any effect is there (the first effect's wav is still being read)
+        for _ in 0..9600 {
+            out.next();
+        }
+        voices.add(rodio::source::SineWave::new(440.0).take_duration(std::time::Duration::from_millis(200)));
+        let peak = (0..19200).filter_map(|_| out.next()).fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(peak > 0.1, "the effect reaches the output (peak {peak})");
+        // and after a quiet moment with no voice at all, the next one still does
+        for _ in 0..48000 {
+            out.next();
+        }
+        voices.add(rodio::source::SineWave::new(440.0).take_duration(std::time::Duration::from_millis(200)));
+        let peak = (0..19200).filter_map(|_| out.next()).fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(peak > 0.1, "a later effect too (peak {peak})");
+    }
 }

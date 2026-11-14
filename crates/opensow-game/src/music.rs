@@ -19,14 +19,14 @@ pub struct Music {
     /// The track asked for, started again when the switch comes back on.
     wanted: String,
     game: Option<GameDir>,
-    /// Earliest time to try opening the audio device again after its stream failed.
-    retry_at: Option<std::time::Instant>,
+    /// The output died under the track: start the wanted track again once a new output opens.
+    lost: bool,
 }
 
 impl Music {
     /// No track, music on, full volume.
     pub fn new() -> Music {
-        Music { sound: None, current: String::new(), on: true, volume: 100, wanted: String::new(), game: None, retry_at: None }
+        Music { sound: None, current: String::new(), on: true, volume: 100, wanted: String::new(), game: None, lost: false }
     }
 
     /// Start `name` (a file stem such as `Menu`) unless it is already the current track; silent when the file or device is missing.
@@ -43,6 +43,8 @@ impl Music {
             return;
         };
         self.sound = Sound::start_pcm(w.channels, w.sample_rate, w.pcm.iter().map(|&s| s as f32 / 32768.0).collect(), true);
+        // no output yet (the sound server is not up, or none at all): `tick` starts the track once one opens
+        self.lost = self.sound.is_none();
         self.apply_volume();
     }
 
@@ -67,20 +69,22 @@ impl Music {
         self.apply_volume();
     }
 
-    /// Called every frame: when the output stream reported an error (the device was switched or unplugged, the machine slept)
-    /// the track would play on silently, so a new stream is opened and the wanted track starts again (at most every 3 s).
+    /// Called every frame (after `audio::tick`): when the output died under the track (the device was switched or unplugged, the
+    /// sound server went away, the machine slept) the track is silent, so it starts again on the next output (`audio::mixer`
+    /// opens one at once, then retries at most every 3 s).
     pub fn tick(&mut self) {
-        let dead = self.sound.as_ref().is_some_and(|s| s.failed.load(std::sync::atomic::Ordering::Relaxed));
-        let lost = self.on && self.sound.is_none() && !self.wanted.is_empty() && self.retry_at.is_some();
-        if !(dead || lost) || self.retry_at.is_some_and(|t| std::time::Instant::now() < t) {
+        if self.sound.as_ref().is_some_and(|s| s.generation != crate::audio::generation()) {
+            eprintln!("music: the audio output was replaced, starting {} again", self.wanted);
+            self.stop();
+            self.lost = true;
+        }
+        if !self.lost || !self.on || self.sound.is_some() || self.wanted.is_empty() || crate::audio::mixer().is_none() {
             return;
         }
         let Some(game) = self.game.clone() else { return };
-        eprintln!("music: the audio device failed, reopening it ({})", self.wanted);
-        self.stop();
-        self.retry_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
         let wanted = self.wanted.clone();
         self.play(&game, &wanted);
+        self.lost = self.sound.is_none();
     }
 
     /// Stops the track.
@@ -102,7 +106,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_failed_stream_is_reopened_and_the_track_restarts() {
+    fn a_track_starts_again_when_the_output_is_replaced() {
         let Some(game) = GameDir::locate() else { return };
         let mut m = Music::new();
         m.play(&game, "uvod");
@@ -111,19 +115,19 @@ mod tests {
         }
         // healthy: nothing happens
         m.tick();
-        assert!(m.sound.is_some() && m.current == "uvod" && m.retry_at.is_none());
-        // the stream reports an error: the next tick opens a new one with the same track
-        m.sound.as_ref().unwrap().failed.store(true, std::sync::atomic::Ordering::Relaxed);
+        let g = m.sound.as_ref().unwrap().generation;
+        assert!(m.current == "uvod" && !m.lost);
+        // the output dies: the next tick starts the same track on a new one
+        crate::audio::kill();
         m.tick();
-        let s2 = m.sound.as_ref().expect("a new stream");
-        assert!(!s2.failed.load(std::sync::atomic::Ordering::Relaxed));
-        assert_eq!(m.current, "uvod");
-        // and not again right away if that one fails too
-        s2.failed.store(true, std::sync::atomic::Ordering::Relaxed);
-        m.tick();
-        assert!(m.sound.as_ref().unwrap().failed.load(std::sync::atomic::Ordering::Relaxed), "retry only after the delay");
-        // switched off: no track
+        let s = m.sound.as_ref().expect("playing again");
+        assert_eq!((s.generation, m.current.as_str(), m.lost), (g + 1, "uvod", false));
+        // another track on the same output does not open a new one
+        m.play(&game, "menu");
+        assert_eq!(m.sound.as_ref().unwrap().generation, g + 1);
+        // switched off: no track, and nothing comes back on its own
         m.set(false, 100);
+        crate::audio::kill();
         m.tick();
         assert!(m.sound.is_none());
     }

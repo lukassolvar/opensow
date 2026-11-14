@@ -19,5 +19,11 @@ ab_glyph = "0.2.32"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 
+# Linux: play through the PulseAudio server (PulseAudio itself, or PipeWire's pulse server) when one runs, plain ALSA otherwise.
+# cpal's ALSA path through PulseAudio's ALSA plugin never starts its streams (docs/audio.md, "PulseAudio"). Same cpal as
+# rodio's, so the feature reaches the copy rodio uses.
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = { version = "0.18.2", features = ["pulseaudio"] }
+
 [lints]
 workspace = true

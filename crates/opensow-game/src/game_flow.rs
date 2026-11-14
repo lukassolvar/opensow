@@ -420,6 +420,7 @@ impl Game {
 
     /// Advances everything by `dt` seconds: music, movies, the open screen, the mission.
     pub(super) fn update(&mut self, dt: f32, w: usize, h: usize) {
+        crate::audio::tick();
         self.music.tick();
         if let Some(b) = self.boot.as_mut() {
             if b.update(dt as f64) {

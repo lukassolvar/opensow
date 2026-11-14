@@ -148,46 +148,12 @@ impl Anim {
     }
 }
 
-/// Open the system's default output. rodio asks for a ~2048-frame buffer, which some devices (Bluetooth headphones such as
-/// AirPods accept only 15..=960) reject, leaving the game silent; so smaller buffers are tried until the device accepts one.
-/// `on_error` runs when the stream later fails (device unplugged or switched).
-pub fn open_output(on_error: impl Fn() + Clone + Send + 'static) -> Result<rodio::MixerDeviceSink, rodio::DeviceSinkError> {
-    use rodio::cpal::BufferSize;
-    let mut last = None;
-    let mut sizes = vec![BufferSize::Fixed(2048), BufferSize::Fixed(960), BufferSize::Fixed(512), BufferSize::Fixed(256), BufferSize::Default];
-    // OPENSOW_AUDIO_BUFFER=N tries N frames first (to compare devices / buffer sizes by ear); OPENSOW_AUDIO_BUFFER=0 the device default
-    if let Some(n) = std::env::var("OPENSOW_AUDIO_BUFFER").ok().and_then(|v| v.parse::<u32>().ok()) {
-        sizes.insert(0, if n == 0 { BufferSize::Default } else { BufferSize::Fixed(n) });
-    }
-    for size in sizes {
-        let cb = on_error.clone();
-        let r = rodio::DeviceSinkBuilder::from_default_device().and_then(|b| {
-            b.with_buffer_size(size)
-                .with_error_callback(move |e| {
-                    eprintln!("audio stream error: {e}");
-                    cb();
-                })
-                .open_stream()
-        });
-        match r {
-            Ok(mut d) => {
-                d.log_on_drop(false);
-                return Ok(d);
-            }
-            Err(e) => last = Some(e),
-        }
-    }
-    Err(last.expect("at least one attempt"))
-}
-
-/// A movie's sound output.
+/// A soundtrack (movie or music) playing on the game's one output (`audio`).
 pub struct Sound {
-    _device: rodio::MixerDeviceSink,
-    /// The player the soundtrack is queued on.
+    /// The player the soundtrack is queued on; dropping the `Sound` stops it.
     pub player: rodio::Player,
-    /// Set when the output stream reported an error (the device was unplugged or switched, the system slept...): rodio's player then
-    /// goes on "playing" into a dead stream, so the owner has to open a new one (`Music::tick`).
-    pub failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The output it plays on (`audio::generation`): once that changes, the output died and this player is silent (`Music::tick`).
+    pub generation: u64,
 }
 
 /// A movie being played: an MPEG-1 `.sgv` with its soundtrack.
@@ -313,19 +279,16 @@ impl Sound {
         Sound::start_pcm(audio.channels as u16, audio.sample_rate, audio.pcm.iter().map(|&s| s as f32 / 32768.0).collect(), false)
     }
 
-    /// Open the default audio device and play interleaved samples.
+    /// Play interleaved samples on the game's output (opened with the first sound, `audio::mixer`).
     pub fn start_pcm(channels: u16, rate: u32, samples: Vec<f32>, looping: bool) -> Option<Sound> {
-        let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let flag = failed.clone();
-        let mut device = open_output(move || flag.store(true, std::sync::atomic::Ordering::Relaxed)).ok()?;
-        device.log_on_drop(false);
-        let player = rodio::Player::connect_new(device.mixer());
-        let out = device.config().sample_rate();
+        let (mixer, out, _) = crate::audio::mixer()?;
+        let generation = crate::audio::generation();
+        let player = rodio::Player::connect_new(&mixer);
         if crate::hifi::enabled() && out.get() != rate {
             // windowed-sinc conversion to the device rate (docs/audio.md, "Sound enhancement"); a loop gets no fades, it wraps seamlessly
             let data = crate::hifi::prepare(samples, channels, rate, !looping);
             player.append(crate::hifi::Resampled::new(data, channels, rate, 1.0, out, looping));
-            return Some(Sound { _device: device, player, failed });
+            return Some(Sound { player, generation });
         }
         let buffer = rodio::buffer::SamplesBuffer::new(NonZero::new(channels)?, NonZero::new(rate)?, samples);
         if looping {
@@ -334,7 +297,7 @@ impl Sound {
         } else {
             player.append(buffer);
         }
-        Some(Sound { _device: device, player, failed })
+        Some(Sound { player, generation })
     }
 }
 

@@ -47,15 +47,38 @@ Units are DirectSound hundredths of a dB. Pan = `6 * (x - viewX - 320)` clamped 
 
 **Differs from the exe:** hearing radius. `Sfx::play_at` scales the distance from the view centre by 4/9 before `sfx::volume`, so world sounds are heard out to about 1500 px instead of the exe's 667 px (with a gentler fade); pan is unchanged.
 
-## Music after an audio device error (not in the exe)
-Each track opens its own output stream (`intro::Sound::start_pcm`). rodio keeps "playing" into a stream that died (the output device
-was switched or unplugged, the machine slept), so the music goes silent for good. The stream's error callback now sets
-`Sound::failed` (and prints `audio stream error: ...`); `Music::tick`, called at the start of every `Game::update`, then opens a new
-stream and starts the wanted track again (`music: the audio device failed, reopening it`), at most every 3 seconds. Not yet seen
-in the wild: it is the one plausible cause of "music stopped mid-game" found by reading the code (the loop itself was checked: a
-looping buffer keeps playing past its length). Sound effects and speech (`sfx.rs`) have their own stream and no such recovery.
+## One output (`opensow-game/src/audio.rs`, not in the exe)
+The exe plays everything through DirectSound buffers on one device. OpenSOW opens one output stream with the first sound and keeps it for
+the whole run: music, movie soundtracks, effects and speech are rodio players on its mixer (`audio::mixer`). Until 2026-11 every music
+track, boot page and movie opened its own stream, plus one for the effects; a new stream is slow to start on some systems (on PulseAudio
+it plays only after about a second), so track changes began with a gap and the boot pages, which restart `uvod.wav` every two seconds,
+were mostly silent.
 
-**Device buffer** (not in the exe): rodio asks the output for a 2048-frame buffer; Bluetooth headphones (AirPods accept 15..=960) reject it and the game was silent. `intro::open_output` tries 2048, 960, 512, 256, then the device default (`OPENSOW_AUDIO_BUFFER=N` tries N first); effects, speech and music all open the device through it.
+**Losing the output.** rodio keeps "playing" into a stream that died (device switched or unplugged, sound server gone, machine slept).
+`audio::tick`, at the start of every `Game::update`, drops the output when its stream reported an error that ends it (cpal's
+`DeviceNotAvailable`, `HostUnavailable`, `StreamInvalidated`), when more than 100 errors arrive within a second (a backend failing on
+every call once its server is gone), or when a silent heartbeat voice on the mixer has not moved for 3 s (`Stall`: a stream that stopped
+without an error; a new stream may take up to about 2 s to start). Underruns and a rerouted default device are only printed (the first
+three per second: `audio stream error: ...`). Dropping the output raises `audio::generation`; the music sees its player is stale and
+starts the wanted track again on a new output (`music: the audio output was replaced, starting ... again`), the effects rebuild their
+route and drop their voices at the next sound. Opening that fails is tried again on a later request after 3, 6, 12... up to 60 s
+(`audio: no output (...); trying again later`, `audio: output open again`), also when the very first open fails, so a game started before
+the sound server still gets sound. Checked in Linux containers playing into a virtual speaker (PulseAudio, PipeWire, plain ALSA; arm64 and
+x86_64) and in the Windows build under Wine: sound server killed and restarted during the boot music and during a skirmish, and started
+3 s after the game; the boot pages' three `uvod.wav` starts each match the file (correlation 1.000).
+
+**PulseAudio** (Ubuntu 22.04, Linux Mint 21 and other PulseAudio systems; not in the exe): Linux builds enable cpal's own PulseAudio
+backend (`pulseaudio` feature, `crates/opensow-game/Cargo.toml`), which cpal picks whenever a PulseAudio socket exists (PulseAudio itself
+or PipeWire's pulse server; plain ALSA otherwise). The default ALSA path fails through PulseAudio's ALSA plugin: cpal 0.18.2 gets `EIO`
+from `snd_pcm_avail_delay` before the stream has started and polls again without writing, so the stream never starts (no effects, the
+music restarted every few seconds, hundreds of `snd_pcm_avail_delay ... I/O error (5)` lines a second). The PulseAudio backend has quirks
+of its own, which the one output covers: a new stream plays only after about a second (once per run now; the first boot page's music
+starts late), and when the server goes away it may stop without an error (the heartbeat notices). A patched copy of cpal's ALSA code
+was tried and works too, but was not kept (27k vendored lines for an 11-line fix).
+
+**Device buffer** (not in the exe): rodio asks the output for a 2048-frame buffer; Bluetooth headphones (AirPods accept 15..=960) reject it and the game was silent. `audio::open_output` tries 2048, 960, 512, 256, then the device default (`OPENSOW_AUDIO_BUFFER=N` tries N first).
+
+**Diagnostics** (not in the exe): `OPENSOW_AUDIO_DEBUG=1` prints the output's state once a second (generation, rate, channels, heartbeat position, error flag), for reports of missing sound.
 
 **Debug tap** (not in the exe): `OPENSOW_AUDIO_DUMP=out/mix.raw` records the effects and speech mix as it goes to the device (after the limiter; raw 16-bit little-endian, device rate and channels) and prints a `sfx <time>s id ...` line for every effect that starts, to compare what is heard with what was played.
 
@@ -73,4 +96,7 @@ Options page 2 has the switch ("Enhanced sound", `enhance_sound` in `opensow.cfg
 - **Fades**: 2 ms in and 3 ms out on every effect and speech line (`hifi::prepare`); many files start or end mid-waveform
   (`Canon/01.wav` begins at 1484), which clicks.
 - **Limiter**: effects and speech play into their own mixer whose sum goes through rodio's limiter (-1 dB threshold, 4 dB knee, 5 ms attack,
-  100 ms release) before the device: a recorded battle clipped 505 samples, 347 in one moment, without it. Music has its own stream and no limiter.
+  100 ms release) before the device: a recorded battle clipped 505 samples, 347 in one moment, without it. Music plays beside that mixer and has no limiter.
+  The effects mixer always holds one silent voice: rodio's mixer reports its end when it has no voice, and the player feeding it to the
+  output then drops it for good, so effects stayed silent for the whole run when the output pulled before the first effect's voice was
+  connected (its wav is read first) - every time on a slow CPU (`sfx::tests`).
