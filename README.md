@@ -81,6 +81,14 @@ Make your own skirmish maps and missions in the game:
 
 ![](docs/screenshots/map-editor-escort.jpg)
 
+### GPU drawing
+
+The original draws every pixel on the processor. OpenSOW draws the frame on the graphics card
+(Metal on macOS, Vulkan or DirectX 12 on Windows, Vulkan on Linux), so the game stays at a smooth
+60 frames per second even on large 4K and 5K screens. The picture is pixel for pixel the same as
+the processor's, and without a usable graphics card the game falls back to drawing on the
+processor.
+
 ### Extra options
 
 Optional enhancements: sharper textures when zoomed in, soft shadows, explosion glow, better
@@ -101,10 +109,50 @@ the settings and updates itself.
    [latest release](https://github.com/lukassolvar/opensow/releases/latest)
    (`macos-aarch64`, `macos-x86_64`, `windows-x86_64`, `linux-x86_64` or `linux-aarch64`).
 2. Unpack it and start **opensow-launcher**.
-3. If the launcher does not find your game, click **Locate game**.
+3. Click **Find games automatically**: it looks in Steam's usual places on macOS, Linux and
+   Windows, other Steam libraries included. If it finds nothing, click **Locate game…** and pick
+   the `State of War` folder.
 4. Press **Play**.
 
 Controls: [docs/controls.md](docs/controls.md) and [docs/hotkeys.md](docs/hotkeys.md).
+
+### Getting the game files on macOS and Linux
+
+State of War is a Windows game, so Steam will not install it on macOS or Linux from the library.
+If you own it on Steam, you can still download its files through the Steam console:
+
+1. Start Steam and sign in with the account that owns State of War.
+2. Open the console: paste `steam://open/console` into your web browser's address bar (or run
+   `steam steam://open/console` in a terminal on Linux). A **Console** tab appears in Steam.
+3. Type this into the console and press Enter:
+
+   ```text
+   download_depot 748040 748041
+   ```
+
+4. Wait for `Depot download complete`. The message shows where the files went. The folder has
+   both games: `State of War` and, if you own it, `State of War Warmonger`.
+
+| System | Download folder |
+| --- | --- |
+| macOS | `~/Library/Application Support/Steam/Steam.AppBundle/Steam/Contents/MacOS/steamapps/content/app_748040/depot_748041/` |
+| Linux | `~/.local/share/Steam/steamapps/content/app_748040/depot_748041/` (also reachable as `~/.steam/steam/...`) |
+| Linux (Flatpak Steam) | `~/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/content/app_748040/depot_748041/` |
+
+**Find games automatically** in the launcher finds this folder; if it does not, click
+**Locate game…** and pick the `State of War` folder, or set `OPENSOW_GAME_DIR` to it. Warmonger next to it is found
+automatically.
+
+Steam may remove the content folder when it cleans up, so you can move the `State of War` folder
+(and `State of War Warmonger`) somewhere permanent, such as `~/Games/`, and point the launcher at
+it.
+
+Other ways to get the files:
+
+- **Linux with Proton**: turn on Steam Play for State of War (Properties → Compatibility), install
+  it from the library as usual; OpenSOW finds it under `steamapps/common/`.
+- **A Windows PC**: install the game there and copy its install folder (the one with `Data`) to
+  your Mac or Linux machine.
 
 ## How to install and develop
 
@@ -114,7 +162,7 @@ You need a stable Rust toolchain and your own install of State of War.
 git clone https://github.com/lukassolvar/opensow.git
 ```
 
-Set `OPENSOW_GAME_DIR` to your install (on macOS the Steam location is found automatically), then
+Set `OPENSOW_GAME_DIR` to your install (Steam installs are found automatically), then
 run the launcher or the game:
 
 ```bash

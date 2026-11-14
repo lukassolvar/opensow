@@ -8,7 +8,7 @@ use crate::update::{Fail, Release};
 use ab_glyph::{Font as _, FontVec, PxScale, ScaleFont};
 use opensow_formats::lang::Language;
 use opensow_formats::launcher::Settings;
-use opensow_formats::{GameDir, DEFAULT_MAC_STEAM_DIR};
+use opensow_formats::{default_steam_dirs, sysfont, GameDir};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
@@ -255,6 +255,8 @@ pub struct App {
     cache: RefCell<Option<Backdrop>>,
 }
 
+/// The text face, best first; a file missing at its path is also looked up by name in the font folders (`sysfont::find`), and
+/// with none of them any plain sans-serif face is used.
 const FONTS: &[&str] = &[
     "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
     "/Library/Fonts/Arial Unicode.ttf",
@@ -264,6 +266,7 @@ const FONTS: &[&str] = &[
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
     "/System/Library/Fonts/Helvetica.ttc",
 ];
 
@@ -276,6 +279,7 @@ const BOLD_FONTS: &[&str] = &[
     "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
 ];
 
 const NATIVE_NAMES: [&str; 8] = ["English", "Slovenčina", "Čeština", "Polski", "Magyar", "Русский", "简体中文", "繁體中文"];
@@ -470,8 +474,9 @@ fn accent(page: Page) -> u32 {
 
 impl App {
     pub fn new(settings: Settings, game: GameSettings, data_dir: PathBuf) -> App {
-        let font = FONTS.iter().find_map(|p| std::fs::read(p).ok().and_then(|d| FontVec::try_from_vec(d).ok()));
-        let bold = BOLD_FONTS.iter().find_map(|p| std::fs::read(p).ok().and_then(|d| FontVec::try_from_vec(d).ok()));
+        let first = |paths: Vec<PathBuf>| paths.iter().find_map(|p| std::fs::read(p).ok().and_then(|d| FontVec::try_from_vec(d).ok()));
+        let font = first(sysfont::find(FONTS)).or_else(|| first(sysfont::any_sans()));
+        let bold = first(sysfont::find(BOLD_FONTS));
         // a saved language the port no longer offers (Polish, Hungarian, Russian) reads as "From game files"
         let mut settings = settings;
         settings.language = settings.language.filter(|l| l.supported());
@@ -861,10 +866,9 @@ impl App {
 
     /// Fill the empty or broken slots from the places the game is normally installed.
     pub fn detect(&mut self) {
-        let home = std::env::var_os("HOME").map(PathBuf::from);
         let mut base: Option<PathBuf> = std::env::var_os(opensow_formats::GAME_DIR_ENV).map(PathBuf::from).filter(|p| p.join("Data").is_dir());
         if base.is_none() {
-            base = home.map(|h| h.join(DEFAULT_MAC_STEAM_DIR)).filter(|p| p.join("Data").is_dir());
+            base = default_steam_dirs().into_iter().next();
         }
         let mut found = 0;
         if let Some(b) = base {

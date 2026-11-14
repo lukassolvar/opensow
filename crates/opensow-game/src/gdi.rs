@@ -2,7 +2,8 @@
 //!
 //! The campaign map's text is `CreateFontA(13, 6, 0, 0, 400, ..., "Times New Roman")` (`0x422747`, font `[0x5ddf34]`): a cell height of 13 px and a
 //! requested average character width of 6 px, which GDI reaches by widening the face. The game cannot ship the font, so it is read from the
-//! system when it exists (macOS, Windows, Liberation on Linux); otherwise callers fall back to the bitmap fonts.
+//! system when it exists (macOS, Windows, Liberation on Linux; a listed file missing at its path is also looked up by name in the font
+//! folders, `opensow_formats::sysfont`); otherwise callers fall back to the bitmap fonts.
 
 use ab_glyph::{Font as _, FontVec, PxScale, ScaleFont};
 use opensow_viewer::render::{blend, pack};
@@ -22,6 +23,11 @@ const CANDIDATES: &[&str] = &[
     "/usr/share/fonts/liberation/LiberationSerif-Bold.ttf",
     "/usr/share/fonts/TTF/LiberationSerif-Bold.ttf",
 ];
+
+/// The first of `list` (`sysfont::find` order) that parses as a font.
+fn first_font(list: &[&str]) -> Option<FontVec> {
+    opensow_formats::sysfont::find(list).iter().find_map(|p| std::fs::read(p).ok().and_then(|d| FontVec::try_from_vec(d).ok()))
+}
 
 /// A glyph pixel's coverage as an 8-bit alpha (integer mixing, so the GPU replay gives the same pixels).
 fn alpha(cov: f32) -> u32 {
@@ -55,8 +61,8 @@ impl Gdi {
 
     /// The same face with another cell height and horizontal stretch (`CreateFontA(height, width, ...)`; width 0 = natural = 1.0).
     pub fn load_sized(height: f32, xscale: f32) -> Option<Gdi> {
-        CANDIDATES.iter().find_map(|p| std::fs::read(p).ok().and_then(|d| FontVec::try_from_vec(d).ok())).map(|font| {
-            let fallback = FALLBACKS.iter().find_map(|p| std::fs::read(p).ok().and_then(|d| FontVec::try_from_vec(d).ok()));
+        first_font(CANDIDATES).map(|font| {
+            let fallback = first_font(FALLBACKS);
             Gdi { font, fallback, height, xscale: xscale.into() }
         })
     }
@@ -94,8 +100,8 @@ impl Gdi {
         if l == opensow_formats::lang::Language::English {
             return None;
         }
-        let font = ARIAL.iter().find_map(|p| std::fs::read(p).ok().and_then(|d| FontVec::try_from_vec(d).ok()))?;
-        let fallback = FALLBACKS.iter().find_map(|p| std::fs::read(p).ok().and_then(|d| FontVec::try_from_vec(d).ok()));
+        let font = first_font(ARIAL)?;
+        let fallback = first_font(FALLBACKS);
         Some(Gdi { font, fallback, height, xscale: 1.0.into() })
     }
 

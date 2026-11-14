@@ -53,6 +53,7 @@ pub mod sparks;
 pub mod sprite;
 pub mod srf;
 pub mod strings;
+pub mod sysfont;
 pub mod turretai;
 pub mod units;
 pub mod video;
@@ -112,6 +113,76 @@ pub const GAME_DIR_ENV: &str = "OPENSOW_GAME_DIR";
 /// Default Steam install location on macOS (depot downloaded via the Steam console).
 pub const DEFAULT_MAC_STEAM_DIR: &str =
     "Library/Application Support/Steam/Steam.AppBundle/Steam/Contents/MacOS/steamapps/content/app_748040/depot_748041/State of War";
+
+/// Steam's app id for State of War; its depot `748041` holds both games' folders (docs/launcher.md).
+const STEAM_APP: &str = "748040";
+
+/// Steam's own folders (the ones with `steamapps`) in their default places: macOS, Linux (native, the legacy
+/// `~/.steam` link, Flatpak) and Windows (`Program Files (x86)`/`Program Files`).
+fn steam_roots(home: Option<&Path>, program_files: &[PathBuf]) -> Vec<PathBuf> {
+    let in_home = ["Library/Application Support/Steam", ".local/share/Steam", ".steam/steam", ".var/app/com.valvesoftware.Steam/.local/share/Steam"];
+    home.into_iter().flat_map(|h| in_home.map(|d| join_parts(h, d))).chain(program_files.iter().map(|p| p.join("Steam"))).collect()
+}
+
+/// `base` joined with each `/`-separated part of `rel` in turn, so Windows paths keep `\` throughout.
+fn join_parts(base: &Path, rel: &str) -> PathBuf {
+    rel.split('/').fold(base.to_path_buf(), |p, part| p.join(part))
+}
+
+/// The `"path"` values of a `libraryfolders.vdf`: every Steam library on the machine.
+fn vdf_values(text: &str, key: &str) -> Vec<PathBuf> {
+    text.lines()
+        .filter_map(|l| {
+            let parts: Vec<&str> = l.trim().split('"').collect();
+            (parts.len() == 5 && parts[1].eq_ignore_ascii_case(key) && parts[0].is_empty()).then(|| PathBuf::from(parts[3].replace("\\\\", "\\")))
+        })
+        .collect()
+}
+
+/// Install folders of the base game below Steam `roots`, in this order per root: the console download
+/// (`steamapps/content/app_748040/depot_748041`, plus the macOS app-bundle one), then a normal library install
+/// (`steamapps/common/<installdir>` from `appmanifest_748040.acf`, else any `common` folder named "State of War").
+/// A folder whose `State of War` subfolder holds the game counts as that subfolder. Only folders with `Data` are returned.
+fn steam_game_dirs(home: Option<&Path>, roots: &[PathBuf]) -> Vec<PathBuf> {
+    let depot = format!("steamapps/content/app_{STEAM_APP}/depot_748041");
+    let mut dirs: Vec<PathBuf> = home.map(|h| join_parts(h, DEFAULT_MAC_STEAM_DIR)).into_iter().collect();
+    for root in roots {
+        dirs.push(join_parts(root, &depot));
+        let vdf = std::fs::read_to_string(join_parts(root, "steamapps/libraryfolders.vdf")).unwrap_or_default();
+        for lib in std::iter::once(root.clone()).chain(vdf_values(&vdf, "path")) {
+            let common = join_parts(&lib, "steamapps/common");
+            let acf = std::fs::read_to_string(join_parts(&lib, &format!("steamapps/appmanifest_{STEAM_APP}.acf"))).unwrap_or_default();
+            dirs.extend(vdf_values(&acf, "installdir").into_iter().map(|d| common.join(d)));
+            let mut named: Vec<PathBuf> = std::fs::read_dir(&common)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|e| {
+                    let n = e.file_name().to_string_lossy().to_ascii_lowercase();
+                    n.contains("state of war") && !n.contains("warmonger")
+                })
+                .map(|e| e.path())
+                .collect();
+            named.sort();
+            dirs.extend(named);
+        }
+    }
+    let mut out: Vec<PathBuf> = Vec::new();
+    for d in dirs {
+        let found = [d.join("State of War"), d].into_iter().find(|p| p.join("Data").is_dir() && !GameDir::is_warmonger_dir(p));
+        if let Some(f) = found.filter(|f| !out.contains(f)) {
+            out.push(f);
+        }
+    }
+    out
+}
+
+/// Every base-game install Steam has put in its default places on this machine (macOS, Linux, Windows), best first.
+pub fn default_steam_dirs() -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from);
+    let pf: Vec<PathBuf> = ["ProgramFiles(x86)", "ProgramFiles"].iter().filter_map(std::env::var_os).map(PathBuf::from).collect();
+    steam_game_dirs(home.as_deref(), &steam_roots(home.as_deref(), &pf))
+}
 
 /// Environment variable pointing at the Warmonger install (the folder containing `State of War Warmonger.exe` and `Data`).
 pub const WARMONGER_DIR_ENV: &str = "OPENSOW_WARMONGER_DIR";
@@ -194,14 +265,14 @@ impl GameDir {
         GameDir { root, warmonger: None, edition: Edition::Original, chosen: None }
     }
 
-    /// Find the game via `OPENSOW_GAME_DIR`, falling back to the default Steam path; the Warmonger install is looked up too.
+    /// Find the game via `OPENSOW_GAME_DIR`, falling back to the default Steam paths (macOS, Linux); the Warmonger install is looked up too.
     pub fn locate() -> Option<GameDir> {
         let saved = launcher::load();
         let candidates = std::env::var_os(GAME_DIR_ENV)
             .map(PathBuf::from)
             .into_iter()
             .chain(saved.original.clone())
-            .chain(std::env::var_os("HOME").map(|h| Path::new(&h).join(DEFAULT_MAC_STEAM_DIR)));
+            .chain(default_steam_dirs());
         let mut game = candidates.filter(|p| p.join("Data").is_dir()).map(GameDir::new).next()?;
         // the environment wins over the launcher's saved folder
         for w in std::env::var_os(WARMONGER_DIR_ENV).map(PathBuf::from).into_iter().chain(saved.warmonger) {
@@ -419,6 +490,39 @@ mod edition_tests {
         let mut files = g.level_files();
         files.sort();
         assert_eq!(files, ["00-the first step.net", "01-First Spark.net", "M00.map", "M01.map", "M05.map", "mI.sgv", "mO.sgv"]);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn steam_libraries_are_searched_for_the_game() {
+        let base = std::env::temp_dir().join(format!("opensow-steam-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (home, pf, lib) = (base.join("home"), base.join("pf"), base.join("D/SteamLibrary"));
+        assert!(vdf_values("\"path\"\t\t\"D:\\\\Games\\\\Steam\"", "path") == [PathBuf::from("D:\\Games\\Steam")], "escaped backslashes");
+        let roots = steam_roots(Some(&home), &[pf.clone()]);
+        assert!(steam_game_dirs(Some(&home), &roots).is_empty());
+        // Windows: a second library listed in libraryfolders.vdf, its manifest names the folder
+        touch(&pf, &format!("Steam/steamapps/libraryfolders.vdf"));
+        std::fs::write(pf.join("Steam/steamapps/libraryfolders.vdf"), format!("\"libraryfolders\"\n{{\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n}}\n", lib.display()))
+            .unwrap();
+        touch(&lib, "steamapps/appmanifest_748040.acf");
+        std::fs::write(lib.join("steamapps/appmanifest_748040.acf"), "\"AppState\"\n{\n\t\"installdir\"\t\t\"SOW\"\n}\n").unwrap();
+        touch(&lib, "steamapps/common/SOW/State of War/Data/Levels/M01.map");
+        touch(&lib, "steamapps/common/SOW/State of War Warmonger/Data/Levels/M01.map");
+        touch(&lib, "steamapps/common/SOW/State of War Warmonger/State of War Warmonger.exe");
+        let found = steam_game_dirs(Some(&home), &roots);
+        assert_eq!(found, [lib.join("steamapps/common/SOW/State of War")]);
+        assert!(GameDir::new(found[0].clone()).find_sibling_warmonger().is_some());
+        // Linux: a Proton install found by name, and the console download wins over it
+        touch(&home, ".local/share/Steam/steamapps/common/State of War/Data/x");
+        touch(&home, ".local/share/Steam/steamapps/content/app_748040/depot_748041/State of War/Data/x");
+        let found = steam_game_dirs(Some(&home), &roots);
+        assert_eq!(found[0], home.join(".local/share/Steam/steamapps/content/app_748040/depot_748041/State of War"));
+        assert_eq!(found[1], home.join(".local/share/Steam/steamapps/common/State of War"));
+        assert_eq!(found.len(), 3);
+        // macOS: the app-bundle depot comes first
+        touch(&home, &format!("{DEFAULT_MAC_STEAM_DIR}/Data/x"));
+        assert_eq!(steam_game_dirs(Some(&home), &roots)[0], home.join(DEFAULT_MAC_STEAM_DIR));
         let _ = std::fs::remove_dir_all(base);
     }
 

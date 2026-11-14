@@ -34,7 +34,7 @@ opensow <command> [args]
   level <file.edt|.net>              print header values, objects and markers of a level script
   map <Mxx.map> <out.png>            render blocked/border/flag cells as a 1px-per-cell image
 
-The game is found via $OPENSOW_GAME_DIR or the default Steam depot path.";
+The game is found via $OPENSOW_GAME_DIR or the default Steam places (macOS, Linux, Windows).";
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
