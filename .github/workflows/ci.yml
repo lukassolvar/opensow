@@ -8,8 +8,8 @@ on:
   push:
     branches: [main]
     paths-ignore: ["docs/**", "**.md", "LICENSE-*", ".github/FUNDING.yml"]
+  # every pull request, docs-only ones too: the `main` ruleset requires these checks
   pull_request:
-    paths-ignore: ["docs/**", "**.md", "LICENSE-*", ".github/FUNDING.yml"]
   workflow_dispatch:
 
 permissions:

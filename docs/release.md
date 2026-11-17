@@ -61,8 +61,9 @@ The `dist` profile (`Cargo.toml`) is `release` with thin LTO and stripped symbol
    title or notes.
 
 ## CI
-`ci.yml` runs on every push to `main` and every pull request (changes to docs and Markdown only are skipped; a newer push
-cancels the older run):
+`ci.yml` runs on every push to `main` (changes to docs and Markdown only are skipped) and on every pull request, docs-only
+ones included, because the `main` ruleset requires its `lint` and `test` checks before a merge; a newer push cancels the
+older run:
 - `lint` (Ubuntu): `cargo fmt --check`, clippy on all targets, clippy without the `dev` feature;
 - `test` on Ubuntu 22.04, macOS 15 and Windows 2022: `cargo test --release` (tests that need the game's files skip: no
   game data on the runners);
