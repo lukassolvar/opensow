@@ -192,19 +192,58 @@ pub fn glow(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, ax: i32
     let peak = (brightness * 300.0).min(150.0);
     let (scx, scy) = ((mx - view.x) * view.zoom, (my - view.y) * view.zoom);
     let rs = (radius * view.zoom).min(360.0);
-    let (x0, y0) = ((scx - rs).floor() as i32, (scy - rs).floor() as i32);
-    let side = (rs * 2.0).ceil() as usize + 2;
+    // centred on the screen pixel holding the centre, so the grid depends only on the radius and the peak and is shared
+    let half = rs.ceil() as i32;
+    let (x0, y0) = (scx.floor() as i32 - half, scy.floor() as i32 - half);
+    let side = 2 * half as usize + 1;
     if x0 >= w as i32 || y0 >= h as i32 || x0 + side as i32 <= 0 || y0 + side as i32 <= 0 {
         return;
     }
-    let mut grid = vec![0u32; side * side];
-    for gy in 0..side {
-        for gx in 0..side {
-            let (dx, dy) = ((x0 + gx as i32) as f32 + 0.5 - scx, (y0 + gy as i32) as f32 + 0.5 - scy);
-            grid[gy * side + gx] = (peak * falloff((dx * dx + dy * dy).sqrt() / rs)).round() as u32;
-        }
+    let (key, grid) = glow_grid(rs, peak.round() as u32);
+    let rgb = (tint(0), tint(1), tint(2));
+    if record::active() {
+        record::cover_shared(x0, y0, side, &grid, crate::render::pack(rgb.0, rgb.1, rgb.2), key);
+    } else {
+        cover_grid(buf, w, h, x0, y0, side, &grid, rgb);
     }
-    cover_grid(buf, w, h, x0, y0, side, &grid, (tint(0), tint(1), tint(2)));
+}
+
+/// Most light grids [`glow_grid`] keeps (the zoom eases through many radii; past this the cache starts over).
+const GLOW_GRIDS_MAX: usize = 256;
+
+/// A light grid with its key (see [`glow_grid`]).
+type GlowGrid = (u64, std::sync::Arc<[u32]>);
+
+thread_local! {
+    /// The glow's light grids by (radius bits, peak): a flame stream draws hundreds of the same puff a frame.
+    static GLOW_GRIDS: std::cell::RefCell<std::collections::HashMap<(u32, u32), GlowGrid>> = Default::default();
+}
+
+/// Never reused, so a key names one grid's contents for good (the recording shares grids by it).
+static NEXT_GRID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// The square alpha grid of a glow of radius `rs` screen pixels and peak alpha `peak`, centred on its middle cell, with its key.
+fn glow_grid(rs: f32, peak: u32) -> GlowGrid {
+    GLOW_GRIDS.with_borrow_mut(|cache| {
+        if let Some(g) = cache.get(&(rs.to_bits(), peak)) {
+            return g.clone();
+        }
+        if cache.len() >= GLOW_GRIDS_MAX {
+            cache.clear();
+        }
+        let half = rs.ceil() as i32;
+        let side = 2 * half as usize + 1;
+        let mut grid = vec![0u32; side * side];
+        for gy in 0..side {
+            for gx in 0..side {
+                let (dx, dy) = ((gx as i32 - half) as f32, (gy as i32 - half) as f32);
+                grid[gy * side + gx] = (peak as f32 * falloff((dx * dx + dy * dy).sqrt() / rs)).round() as u32;
+            }
+        }
+        let g = (NEXT_GRID.fetch_add(1, Ordering::Relaxed), std::sync::Arc::<[u32]>::from(grid));
+        cache.insert((rs.to_bits(), peak), g.clone());
+        g
+    })
 }
 
 #[cfg(test)]
@@ -283,5 +322,48 @@ mod tests {
         assert!(c(&soft, 19, 30) < 200 && c(&soft, 19, 30) > c(&soft, 30, 30), "the soft one bleeds out a little");
         assert_eq!(c(&soft, 10, 30), 200, "and not far");
         assert!(c(&soft, 20, 30) > c(&soft, 30, 30), "and is lighter on the edge");
+    }
+
+    /// A flame stream draws hundreds of the same puff a frame: the glow reuses one light grid for them, the recording stores it
+    /// once, and the CPU picture still equals the replayed one.
+    #[test]
+    fn glows_of_the_same_puff_share_one_grid() {
+        use opensow_formats::sprite::Frame;
+        let (w, h) = (160, 120);
+        let orange = 0xfc00u16 | 0x03e0; // bright RGB565 yellow
+        let frame =
+            Frame { width: 12, height: 12, hot_x: 6, hot_y: 6, extra: [0; 4], pixels: vec![orange; 144], mask: vec![true; 144], enhanced: Default::default() };
+        let view = View { x: 0.0, y: 0.0, zoom: 2.5 };
+        let (a, b) = (glow_grid(33.0, 120), glow_grid(33.0, 120));
+        assert_eq!(a.0, b.0, "the same key");
+        assert!(std::sync::Arc::ptr_eq(&a.1, &b.1), "the same grid");
+        assert_ne!(glow_grid(33.0, 121).0, a.0, "another peak, another grid");
+        assert_eq!(a.1.len(), 67 * 67, "odd side, centred on its middle cell");
+        assert_eq!(a.1[33 * 67 + 33], 120, "peak in the middle");
+        assert_eq!(a.1[0], 0, "nothing in the corner");
+
+        let grey = crate::render::pack(40, 40, 40);
+        let puffs = [(20, 20), (24, 21), (28, 22), (31, 23)];
+        upscale::set_world(true);
+        set(false, false, true, false);
+        let mut cpu = vec![grey; w * h];
+        for &(x, y) in &puffs {
+            glow(&mut cpu, w, h, &view, &frame, x, y);
+        }
+        record::begin(w, h);
+        let mut dummy = vec![grey; w * h];
+        for &(x, y) in &puffs {
+            glow(&mut dummy, w, h, &view, &frame, x, y);
+        }
+        let rec = record::end().expect("recording");
+        upscale::set_world(false);
+        set(true, true, true, true);
+        assert_eq!(rec.cmds.len(), puffs.len());
+        let side = rec.cmds[0].stride as usize;
+        assert_eq!(rec.local.len(), side * side, "one grid for all four puffs");
+        let mut replayed = vec![grey; w * h];
+        record::replay(&rec, &mut replayed);
+        assert_eq!(cpu, replayed);
+        assert!(cpu.iter().any(|&p| p != grey), "the glow lit something");
     }
 }
