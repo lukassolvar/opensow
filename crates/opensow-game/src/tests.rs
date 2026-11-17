@@ -776,6 +776,49 @@ fn playing_a_mission() {
 }
 
 #[test]
+fn swapped_mouse_buttons_trade_places_in_a_mission() {
+    let Some(mut g) = game() else { return };
+    let (w, h) = (1024, 768);
+    g.start("M01");
+    {
+        let world = &mut g.play.as_mut().unwrap().world;
+        let (x, y) = world.player_units().find(|u| u.kind == kinds::ADVANCER).map(|u| u.px()).unwrap();
+        for _ in 0..4 {
+            world.add_unit_near(7, 0, x, y + 48);
+        }
+    }
+    g.settings.swap_buttons = true;
+    g.update(0.0, w, h);
+    let selected = |g: &Game| g.play.as_ref().unwrap().world.units.iter().filter(|u| u.selected).count();
+    let moving = |g: &Game| g.play.as_ref().unwrap().world.units.iter().any(|u| u.selected && !u.path.is_empty());
+    // selecting stays on the left button
+    g.mouse_button(MouseButton::Left, true, 80, 40, w, h);
+    g.mouse_button(MouseButton::Left, false, w as i32 - 2, h as i32 - 30, w, h);
+    assert!(selected(&g) >= 4, "the left button box-selects");
+    let (mut gx, mut gy) = (0, 0);
+    'scan: for y in (100..h as i32 - 100).step_by(20) {
+        for x in (100..w as i32 - 100).step_by(20) {
+            g.mouse_moved(x, y, w, h);
+            if g.play.as_ref().unwrap().pointer() == opensow_formats::cursor::Pointer::Move {
+                (gx, gy) = (x, y);
+                break 'scan;
+            }
+        }
+    }
+    assert!(gx > 0, "no open ground on screen");
+    // the right click gives the move order and keeps the selection
+    g.mouse_button(MouseButton::Right, true, gx, gy, w, h);
+    g.mouse_button(MouseButton::Right, false, gx, gy, w, h);
+    assert!(moving(&g), "the right click orders the move");
+    assert!(selected(&g) >= 4);
+    // the left click where an order would go does the original right click: it deselects
+    g.mouse_moved(gx, gy, w, h);
+    g.mouse_button(MouseButton::Left, true, gx, gy, w, h);
+    g.mouse_button(MouseButton::Left, false, gx, gy, w, h);
+    assert_eq!(selected(&g), 0, "the left click deselects");
+}
+
+#[test]
 fn multiplayer_button_opens_the_network_screens() {
     let Some(mut g) = game() else { return };
     let (w, h) = (1280, 800);
@@ -881,6 +924,13 @@ fn options_page_two_toggles_the_enhancement() {
     click(&mut g, options::Hit::ExtraArrow(7, true));
     click(&mut g, options::Hit::Ok);
     assert!(!g.options.extra.zoom && !g.settings.zoom, "OK applies the map zoom switch");
+    // the mouse button swap (the last row, off by default)
+    assert!(!g.settings.swap_buttons);
+    g.act(Action::Options);
+    click(&mut g, options::Hit::Page(1));
+    click(&mut g, options::Hit::Extra(8));
+    click(&mut g, options::Hit::Ok);
+    assert!(g.options.extra.swap_buttons && g.settings.swap_buttons, "OK applies the mouse button swap");
 }
 
 #[test]
@@ -1062,6 +1112,25 @@ fn mission_hotkeys_follow_the_exes_key_handler() {
     assert!(g.play.as_ref().unwrap().paused);
     g.key(&chr("p"), true, w, h);
     assert!(!g.play.as_ref().unwrap().paused);
+    // rebound keys (Options, Controls pages): pause on K, P is free then; the window's physical key wins over the logical one
+    let keys = g.options.keys;
+    g.options.keys.bind(keybinds::Act::Pause, 0, winit::keyboard::KeyCode::KeyK);
+    g.key(&chr("p"), true, w, h);
+    assert!(!g.play.as_ref().unwrap().paused, "P no longer pauses");
+    g.key(&chr("k"), true, w, h);
+    assert!(g.play.as_ref().unwrap().paused, "K pauses");
+    g.code = Some(winit::keyboard::KeyCode::KeyK);
+    g.key(&chr("x"), true, w, h);
+    g.code = None;
+    assert!(!g.play.as_ref().unwrap().paused, "the physical K resumes whatever the layout types");
+    // a bound middle mouse button pauses and resumes too; the left / right buttons stay the original's
+    g.options.keys.bind(keybinds::Act::Pause, 1, MouseButton::Middle);
+    g.mouse_button(MouseButton::Middle, true, w as i32 / 2, h as i32 / 2, w, h);
+    g.mouse_button(MouseButton::Middle, false, w as i32 / 2, h as i32 / 2, w, h);
+    assert!(g.play.as_ref().unwrap().paused, "the middle button pauses");
+    g.mouse_button(MouseButton::Middle, true, w as i32 / 2, h as i32 / 2, w, h);
+    assert!(!g.play.as_ref().unwrap().paused, "and resumes");
+    g.options.keys = keys;
     // Tab selects one live own unit at a time and walks the list; H the Advancers
     g.key(&Key::Named(NamedKey::Tab), true, w, h);
     let sel = |g: &Game| g.play.as_ref().unwrap().world.units.iter().enumerate().filter(|(_, u)| u.selected).map(|(i, _)| i).collect::<Vec<_>>();

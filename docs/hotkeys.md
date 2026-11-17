@@ -2,6 +2,12 @@
 
 The per-frame key handler of the running game is `0x415ba0` (continued up to `0x416876`); `0x415a00` refreshes the key flags first. The flags are bytes at `[pointer + 0x64 + DirectInput scan code]` (pointer object of player 0 = `0x6bed08`, so scan code `s` is at `0x6bed6c + s`): 0 up, 1 pressed this frame, 2 held. Checks of `== 1` are one-shot hotkeys, checks of `== 2` are held keys. In a network game the same scan codes travel as input records (docs/network.md). R is `0x13` (= `+0x77`), which is how the offsets below were anchored. **Keys are scan codes, so the physical key counts**: OpenSOW reads the physical digit (`Game::digit_of`, winit `PhysicalKey`) so 1-5 work unshifted on layouts like Czech, where the number row types `+ ě š č ř` (before, only Shift+digit worked there). Tests: `mission_hotkeys_follow_the_exes_key_handler` (tests.rs).
 
+**Rebindable (not in the exe):** every mission key below (and the development shortcuts) is an action of `keybinds.rs` (`Act`, two key slots each) that the Options menu's Controls view rebinds (the CONTROLS button; docs/options.md, "Controls view"). The tables give the defaults, which are the exe's keys. `Game::hotkey` looks the key up in `GameOptions::keys` (`Game::action_of`); the window passes the physical key (winit `KeyCode`, like the exe's scan codes), tests and headless runs map the logical one (`keybinds::code_of`). The mouse buttons past left and right (middle = 3, back = 4, forward = 5, others) can be bound in a slot like a key (`keybinds::Input::Mouse`; `Game::bound_input` runs them in a mission with the keys' pause and chat rules, held scroll included, and the window checks a bound fullscreen button). Shift keeps its meaning on whatever key or button is bound: Shift + quick save loads, Shift + a bookmark key sets it, Shift + next Advancer picks an idle one. Fixed: Esc (the in-game menu, and Cancel on every screen), the left and right mouse buttons (select and command), Shift / Ctrl / Alt / the system keys, and in development builds F12 and `` ` `` (dev panel). Menu screens and text lines (chat, save names, the lobby) keep their own keys.
+
+**Differs from the exe:** the letter hotkeys (W A S D, H, X, R, P, the development letters) follow the physical key now, like the exe's scan codes; before the rebinding they followed the typed letter, so on AZERTY or QWERTZ layouts they sit where a US keyboard has them. The Controls pages name keys by their US-layout labels.
+
+**Differs from the exe:** the F1 key help overlay is the original picture (`extras\shortcuts`) and still shows the original keys after a rebinding.
+
 ## In a mission (state 7)
 
 | Key (scan) | Flag | Exe | Effect | OpenSOW |
@@ -72,9 +78,9 @@ Quality-of-life additions (they change input and information only, never the sim
 
 Development shortcuts:
 
-`Q` select all (the original has numpad `*`), `T` raise tech levels, `B M C Y F` arm an air strike (docs/air.md: **not decoded in the exe**, the original starts strikes only from the air pills), `` ` `` / F12 dev panel, `L` level list and `P` prototype settings on the menus. They stay as development shortcuts.
+`Q` select all (the original has numpad `*`), `T` buy every affordable tech-level upgrade at once (`World::tech_up_all`: each costs its research points, the mission's level limits hold, only the player's own live factories; the same as clicking each upgrade, and what the exe's AI does in `0x42f490`, so no cheat), `B M C Y F` arm an air strike (docs/air.md: **not decoded in the exe**, the original starts strikes only from the air pills), `` ` `` / F12 dev panel, `L` level list and `P` prototype settings on the menus. They stay as development shortcuts; the mission ones (`Q`, `T`, `B M C Y F`) are rebindable like the rest, the menu ones and the dev panel keys are fixed. F11 (fullscreen, not in the exe) is rebindable too (`Act::Fullscreen`, checked by the window before the game sees the key).
 
-**Differs from the exe:** these keys (and `L` / `P` on the menus) do nothing in the exe; here they select, raise tech levels or launch strikes without the air pills.
+**Differs from the exe:** these keys (and `L` / `P` on the menus) do nothing in the exe; here they select, buy the affordable upgrades or launch strikes without the air pills.
 
 ## Other states
 

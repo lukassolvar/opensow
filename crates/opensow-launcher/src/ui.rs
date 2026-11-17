@@ -612,6 +612,8 @@ impl App {
     const ROW_Y: f32 = 158.0;
     const ROW_H: f32 = 44.0;
     const EXTRA_H: f32 = 74.0;
+    /// Rows per column of the Extras tab (two columns).
+    const EXTRA_ROWS: usize = crate::settings::EXTRAS.len().div_ceil(2);
 
     /// The volume that goes with a sound switch.
     fn volume_of(f: Field) -> Option<Field> {
@@ -729,7 +731,7 @@ impl App {
                     }
                     Tab::Extras => {
                         for k in 0..crate::settings::EXTRAS.len() {
-                            let (col, row) = (k / 4, k % 4);
+                            let (col, row) = (k / Self::EXTRA_ROWS, k % Self::EXTRA_ROWS);
                             let y = 158.0 + row as f32 * Self::EXTRA_H;
                             let on = self.game.extras[k];
                             push(
@@ -1131,7 +1133,7 @@ impl App {
             Tab::Extras => {
                 self.text(c, &self.fit(tx.extras_note(), 13.5, self.view.pw - c0 - 40.0), c0, 126.0, 13.5, DIM, false);
                 for k in 0..crate::settings::EXTRAS.len() {
-                    let (col, row) = (k / 4, k % 4);
+                    let (col, row) = (k / Self::EXTRA_ROWS, k % Self::EXTRA_ROWS);
                     let (x0, y) = ([c0, c1][col], 158.0 + row as f32 * Self::EXTRA_H);
                     let (label, hint) = tx.field(Field::Extra(k));
                     let room = cw - 60.0;
@@ -1735,7 +1737,10 @@ mod tests {
         assert!(find(&a, Action::Step(Field::MusicVolume, -1)).unwrap().enabled);
         assert!(!find(&a, Action::Step(Field::MusicVolume, 1)).unwrap().enabled, "100 is the top");
         a.tab = Tab::Extras;
-        assert_eq!(a.buttons().iter().filter(|b| matches!(b.action, Action::Toggle(Field::Extra(_)))).count(), 8);
+        assert_eq!(a.buttons().iter().filter(|b| matches!(b.action, Action::Toggle(Field::Extra(_)))).count(), 9);
+        for b in a.buttons() {
+            assert!(b.rect.y + b.rect.h <= PAGE_H, "{:?} below the page", b.action);
+        }
     }
 
     #[test]

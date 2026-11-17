@@ -1,6 +1,7 @@
 //! The options menu (`CMenuOptions`, `0x44c590`): the original art, controls and sounds. Notes: docs/options.md.
 
 use crate::assets::{load_backdrop, Assets};
+use crate::keybinds::{self, Act, Keybinds};
 use crate::tr::Tr;
 use crate::ui::{self, Image};
 use opensow_formats::config::{Audio, Options, SettingsFile};
@@ -43,11 +44,24 @@ pub struct Extra {
     pub turret_range: bool,
     /// The mouse wheel zooms the mission map (not in the original, which has one fixed scale; docs/game.md).
     pub zoom: bool,
+    /// Orders (move, attack, the Advancer's repair / destroy / upgrade) go on the right button's click; the left click where an
+    /// order would go does the original right click; selecting stays on the left (not in the original; docs/controls.md).
+    pub swap_buttons: bool,
 }
 
 impl Default for Extra {
     fn default() -> Self {
-        Extra { enhance: true, soft_shadows: true, contact_shadows: true, glow: true, turret_shadows: true, sound: true, turret_range: true, zoom: true }
+        Extra {
+            enhance: true,
+            soft_shadows: true,
+            contact_shadows: true,
+            glow: true,
+            turret_shadows: true,
+            sound: true,
+            turret_range: true,
+            zoom: true,
+            swap_buttons: false,
+        }
     }
 }
 
@@ -70,6 +84,7 @@ impl Extra {
                     "enhance_sound" => e.sound = on,
                     "turret_range" => e.turret_range = on,
                     "map_zoom" => e.zoom = on,
+                    "swap_buttons" => e.swap_buttons = on,
                     _ => {}
                 }
             }
@@ -80,7 +95,7 @@ impl Extra {
     /// The extra settings as the text of their file.
     pub fn write(&self) -> String {
         format!(
-            "enhance_textures={}\nsoft_shadows={}\ncontact_shadows={}\nexplosion_glow={}\nturret_shadows={}\nenhance_sound={}\nturret_range={}\nmap_zoom={}\n",
+            "enhance_textures={}\nsoft_shadows={}\ncontact_shadows={}\nexplosion_glow={}\nturret_shadows={}\nenhance_sound={}\nturret_range={}\nmap_zoom={}\nswap_buttons={}\n",
             self.enhance as u8,
             self.soft_shadows as u8,
             self.contact_shadows as u8,
@@ -88,7 +103,8 @@ impl Extra {
             self.turret_shadows as u8,
             self.sound as u8,
             self.turret_range as u8,
-            self.zoom as u8
+            self.zoom as u8,
+            self.swap_buttons as u8
         )
     }
 }
@@ -100,6 +116,8 @@ pub struct GameOptions {
     pub cfg: Options,
     /// This port's own settings.
     pub extra: Extra,
+    /// The mission keys (Controls pages; `key_` lines of `opensow.cfg`).
+    pub keys: Keybinds,
     /// Music volume, 0..=100.
     pub music_volume: i32,
     /// Speech volume, 0..=100.
@@ -133,6 +151,7 @@ impl GameOptions {
         GameOptions {
             cfg: f.options.clone(),
             extra: Extra::default(),
+            keys: Keybinds::default(),
             music_volume: a.music_volume as i32,
             voice_volume: a.voice_volume as i32,
             fx_volume: a.fx_volume as i32,
@@ -162,7 +181,9 @@ impl GameOptions {
             return GameOptions::default();
         }
         let mut o = std::fs::read(FILE).ok().and_then(|d| SettingsFile::parse(&d).ok()).map_or_else(GameOptions::first_run, |f| GameOptions::from_file(&f));
-        o.extra = std::fs::read_to_string(EXTRA_FILE).map(|t| Extra::parse(&t)).unwrap_or_default();
+        let text = std::fs::read_to_string(EXTRA_FILE).unwrap_or_default();
+        o.extra = Extra::parse(&text);
+        o.keys = Keybinds::parse(&text);
         o
     }
 
@@ -182,7 +203,7 @@ impl GameOptions {
     pub fn save(&self) {
         if !cfg!(test) {
             let _ = std::fs::write(FILE, self.to_file().write());
-            let _ = std::fs::write(EXTRA_FILE, self.extra.write());
+            let _ = std::fs::write(EXTRA_FILE, self.extra.write() + &self.keys.write());
         }
     }
 }
@@ -273,14 +294,22 @@ pub enum Hit {
     Extra(usize),
     /// The green arrow left (`false`) or right (`true`) of row `k`'s value on page 2; either one toggles the switch.
     ExtraArrow(usize, bool),
+    /// Key slot `slot` (0 or 1) of action `k` ([`keybinds::ALL`]) on the Controls pages: a click waits for the new key.
+    Bind(usize, usize),
+    /// DEFAULTS on the Controls pages: every key back to the original's.
+    Defaults,
+    /// CONTROLS on page 1 (the exe's): opens the key bindings (their own pages, O.K. / CANCEL lead back here).
+    Controls,
 }
 
 /// Pages of the menu: the exe's own, then the port's (`Hit::Page`).
 pub const PAGES: usize = 2;
+/// Pages of the Controls view (`keybinds::PAGE_ROWS`).
+pub const CONTROLS_PAGES: usize = keybinds::PAGE_ROWS.len();
 
 /// Rows of page 2: (label, one-line explanation), English ([`Tr::option_rows`] has the other languages). Row `k`'s label sits at
 /// [`own_rect`]; its value (On / Off) between two green arrows starting at [`OWN_ARROWS_X`], like the exe's arrow rows.
-pub const OWN_ROWS: [(&str, &str); 8] = [
+pub const OWN_ROWS: [(&str, &str); 9] = [
     ("Enhanced textures", "Smooths sprites and the ground when you zoom in"),
     ("Soft shadows", "Blurs the edges of shadows"),
     ("Contact shadows", "Dark halo where buildings and units meet the ground"),
@@ -289,6 +318,7 @@ pub const OWN_ROWS: [(&str, &str); 8] = [
     ("Enhanced sound", "Cleaner, smoother effects, speech and music"),
     ("Turret range", "Shows how far a turret reaches while you place it"),
     ("Map zoom", "Zoom with the mouse wheel (original: fixed scale)"),
+    ("Swap mouse buttons", "Move and attack orders on the right button"),
 ];
 /// Left edge of the left arrow of every page-2 row (design space).
 const OWN_ARROWS_X: i32 = 236;
@@ -297,16 +327,46 @@ const OWN_VALUE_W: i32 = 60;
 
 /// Click area of row `k`'s label on page 2 (design space).
 fn own_rect(k: usize) -> ui::Rect {
-    ui::Rect { x: 62, y: 118 + 36 * k as i32, w: OWN_ARROWS_X - 62 - 6, h: 20 }
+    ui::Rect { x: 62, y: 116 + 34 * k as i32, w: OWN_ARROWS_X - 62 - 6, h: 20 }
 }
 
-/// Click area of the page arrow that leads to page `to` (a right arrow at the right edge going forward, a left one at the left edge back).
-fn page_rect(to: usize) -> ui::Rect {
-    if to == 1 {
+/// Click area of the page arrow forward (a right arrow at the right edge) or back (a left one at the left edge).
+fn page_rect(forward: bool) -> ui::Rect {
+    if forward {
         ui::Rect { x: 596, y: 227, w: 32, h: 28 }
     } else {
         ui::Rect { x: 12, y: 227, w: 32, h: 28 }
     }
+}
+
+/// Top of the first row of a Controls page and the row pitch (design space).
+const BIND_Y0: i32 = 84;
+const BIND_DY: i32 = 21;
+/// Left edge of a Controls row's label, of its two key slots, and a slot's size.
+const BIND_LABEL_X: i32 = 52;
+const BIND_SLOT_X: [i32; 2] = [318, 456];
+const BIND_SLOT_W: i32 = 128;
+const BIND_SLOT_H: i32 = 19;
+
+/// Click area of key slot `slot` of action `k` (an index into [`keybinds::ALL`]; its row is its place on its page).
+fn bind_rect(k: usize, slot: usize) -> ui::Rect {
+    let row = keybinds::PAGE_ROWS.iter().find(|r| r.contains(&k)).map_or(0, |r| k - r.start) as i32;
+    ui::Rect { x: BIND_SLOT_X[slot.min(1)], y: BIND_Y0 + BIND_DY * row, w: BIND_SLOT_W, h: BIND_SLOT_H }
+}
+
+/// Click area of DEFAULTS on the Controls pages.
+const DEFAULTS_RECT: ui::Rect = ui::Rect { x: 456, y: 36, w: 128, h: 22 };
+/// Click area of CONTROLS on page 1 (under the exe's sound rows, where the picture is empty).
+const CONTROLS_RECT: ui::Rect = ui::Rect { x: 456, y: 212, w: 128, h: 22 };
+
+/// What the help line of the Controls pages says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Notice {
+    Hint,
+    /// The key or button was taken from this action.
+    Moved(keybinds::Input, Act),
+    /// The key cannot be bound.
+    Fixed,
 }
 
 /// What a click on the menu asks the game to do.
@@ -346,6 +406,14 @@ pub struct OptionsMenu {
     tr: Tr,
     /// Which page is shown (0 = the exe's controls, 1 = this port's).
     pub page: usize,
+    /// The Controls view and its page, while it is open (over `page`, which it returns to).
+    pub controls: Option<usize>,
+    /// The keys when the Controls view opened: its CANCEL puts them back.
+    keys_before: Keybinds,
+    /// The key slot (action index, slot) that waits for a key on the Controls pages.
+    capture: Option<(usize, usize)>,
+    /// The help line of the Controls pages.
+    notice: Notice,
     /// Mouse position in the 640x480 design space.
     cursor: (i32, i32),
     canvas: Vec<u32>,
@@ -408,6 +476,10 @@ impl OptionsMenu {
             hover: None,
             tr: Tr::new(language),
             page: 0,
+            controls: None,
+            keys_before: Keybinds::default(),
+            capture: None,
+            notice: Notice::Hint,
             cursor: (-1, -1),
             canvas: vec![0; W * H],
             sounds: Vec::new(),
@@ -447,9 +519,21 @@ impl OptionsMenu {
         if inside(0) {
             return Some(Hit::Cancel);
         }
-        let to = if self.page == 0 { 1 } else { 0 };
-        if page_rect(to).contains(p.0, p.1) {
-            return Some(Hit::Page(to));
+        let (page, pages) = self.view_page();
+        if page + 1 < pages && page_rect(true).contains(p.0, p.1) {
+            return Some(Hit::Page(page + 1));
+        }
+        if page > 0 && page_rect(false).contains(p.0, p.1) {
+            return Some(Hit::Page(page - 1));
+        }
+        if let Some(rows) = self.controls_rows() {
+            if DEFAULTS_RECT.contains(p.0, p.1) {
+                return Some(Hit::Defaults);
+            }
+            return rows.flat_map(|k| [(k, 0), (k, 1)]).find(|&(k, slot)| bind_rect(k, slot).contains(p.0, p.1)).map(|(k, slot)| Hit::Bind(k, slot));
+        }
+        if self.page == 0 && CONTROLS_RECT.contains(p.0, p.1) {
+            return Some(Hit::Controls);
         }
         if self.page == 1 {
             let arrow =
@@ -468,7 +552,10 @@ impl OptionsMenu {
     /// Design-space point at the centre of a control (for scripted clicks).
     pub fn centre(&self, hit: Hit) -> (i32, i32) {
         let own = match hit {
-            Hit::Page(to) => Some(page_rect(to)),
+            Hit::Page(to) => Some(page_rect(to > self.view_page().0)),
+            Hit::Controls => Some(CONTROLS_RECT),
+            Hit::Bind(k, slot) => Some(bind_rect(k, slot)),
+            Hit::Defaults => Some(DEFAULTS_RECT),
             Hit::Extra(k) => Some(own_rect(k)),
             Hit::ExtraArrow(k, right) => Some(self.own_arrow_rect(k, right)),
             _ => None,
@@ -481,7 +568,7 @@ impl OptionsMenu {
             Hit::Cancel => 0,
             Hit::Arrow(k) => ARROW0 + k,
             Hit::Label(k) => LABEL0 + k,
-            Hit::Page(_) | Hit::Extra(_) | Hit::ExtraArrow(..) => unreachable!(),
+            Hit::Page(_) | Hit::Extra(_) | Hit::ExtraArrow(..) | Hit::Bind(..) | Hit::Defaults | Hit::Controls => unreachable!(),
         };
         self.rect(frame).map_or((0, 0), |r| (r.x + r.w / 2, r.y + r.h / 2))
     }
@@ -503,8 +590,64 @@ impl OptionsMenu {
         let p = (((x as f32 - ox) / s) as i32, ((y as f32 - oy) / s) as i32);
         match self.hit_at(p) {
             Some(hit) => self.press(hit),
-            None => Event::None,
+            None => {
+                self.stop_capture();
+                Event::None
+            }
         }
+    }
+
+    /// A right click at a window position: on a Controls key slot it empties the slot.
+    pub fn right_click(&mut self, x: i32, y: i32, w: usize, h: usize) {
+        let (ox, oy, s) = fit(w, h);
+        let p = (((x as f32 - ox) / s) as i32, ((y as f32 - oy) / s) as i32);
+        self.capture = None;
+        if let Some(Hit::Bind(k, slot)) = self.hit_at(p) {
+            self.opts.keys.clear(keybinds::ALL[k], slot);
+            self.notice = Notice::Hint;
+            self.sounds.push(34); // options-onoff
+        }
+    }
+
+    /// The action rows of the Controls page on screen, if the Controls view is open.
+    fn controls_rows(&self) -> Option<std::ops::Range<usize>> {
+        self.controls.and_then(|i| keybinds::PAGE_ROWS.get(i)).cloned()
+    }
+
+    /// The page on screen and how many the view has (the options' pages, or the Controls view's).
+    fn view_page(&self) -> (usize, usize) {
+        match self.controls {
+            Some(c) => (c, CONTROLS_PAGES),
+            None => (self.page, PAGES),
+        }
+    }
+
+    /// A key slot waits for a key: the game sends the next key press to [`OptionsMenu::capture`] (Esc to `stop_capture`).
+    pub fn capturing(&self) -> bool {
+        self.capture.is_some()
+    }
+
+    /// Stops waiting for a key.
+    pub fn stop_capture(&mut self) {
+        self.capture = None;
+    }
+
+    /// The key or mouse button pressed while a slot waits: bound there (taken from another action if it had it), or refused
+    /// when it is fixed.
+    pub fn capture(&mut self, code: impl Into<keybinds::Input>) {
+        let code = code.into();
+        let Some((k, slot)) = self.capture else { return };
+        if !keybinds::bindable(code) {
+            self.notice = Notice::Fixed;
+            self.sounds.push(39); // ingame-nie
+            return;
+        }
+        self.capture = None;
+        self.notice = match self.opts.keys.bind(keybinds::ALL[k], slot, code) {
+            Some(from) => Notice::Moved(code, from),
+            None => Notice::Hint,
+        };
+        self.sounds.push(33); // options-arrow
     }
 
     /// Escape: the same as CANCEL.
@@ -514,8 +657,27 @@ impl OptionsMenu {
 
     /// What clicking a control does (the two jump tables `0x44c4b8` / `0x44c4d8`), with the control's sound.
     pub fn press(&mut self, hit: Hit) -> Event {
+        if !matches!(hit, Hit::Bind(..)) {
+            self.capture = None;
+        }
+        if self.controls.is_some() && matches!(hit, Hit::Ok | Hit::Cancel) {
+            // the Controls view's O.K. keeps its keys, CANCEL puts back the ones it opened with; both lead back to the options
+            if hit == Hit::Cancel {
+                self.opts.keys = self.keys_before;
+            }
+            self.sounds.push(if hit == Hit::Ok { 38 } else { 39 });
+            self.controls = None;
+            self.notice = Notice::Hint;
+            return Event::None;
+        }
         let o = &mut self.opts;
         match hit {
+            Hit::Controls => {
+                self.sounds.push(34); // options-onoff
+                self.keys_before = o.keys;
+                self.controls = Some(0);
+                self.notice = Notice::Hint;
+            }
             Hit::Ok => {
                 self.sounds.push(38); // ingame-ano
                 return Event::Done(self.opts.clone());
@@ -528,7 +690,21 @@ impl OptionsMenu {
             }
             Hit::Page(to) => {
                 self.sounds.push(33); // options-arrow
-                self.page = to.min(PAGES - 1);
+                match self.controls.as_mut() {
+                    Some(c) => *c = to.min(CONTROLS_PAGES - 1),
+                    None => self.page = to.min(PAGES - 1),
+                }
+                self.notice = Notice::Hint;
+            }
+            Hit::Bind(k, slot) => {
+                self.sounds.push(34); // options-onoff
+                self.capture = Some((k.min(keybinds::COUNT - 1), slot.min(1)));
+                self.notice = Notice::Hint;
+            }
+            Hit::Defaults => {
+                self.sounds.push(34);
+                o.keys = Keybinds::default();
+                self.notice = Notice::Hint;
             }
             Hit::Extra(k) | Hit::ExtraArrow(k, _) => {
                 // the arrows sound like the exe's arrows, the label like its labels
@@ -542,6 +718,7 @@ impl OptionsMenu {
                     5 => o.extra.sound ^= true,
                     6 => o.extra.turret_range ^= true,
                     7 => o.extra.zoom ^= true,
+                    8 => o.extra.swap_buttons ^= true,
                     _ => {}
                 }
             }
@@ -646,7 +823,7 @@ impl OptionsMenu {
         self.text(canvas, self.tr.enhancements(), 21, 62, true);
         let lh = ui::text_height(&self.fonts, 1.0);
         let e = &self.opts.extra;
-        let values = [e.enhance, e.soft_shadows, e.contact_shadows, e.glow, e.turret_shadows, e.sound, e.turret_range, e.zoom];
+        let values = [e.enhance, e.soft_shadows, e.contact_shadows, e.glow, e.turret_shadows, e.sound, e.turret_range, e.zoom, e.swap_buttons];
         for (k, (label, hint)) in self.tr.option_rows().iter().enumerate() {
             let r = own_rect(k);
             let hot = matches!(self.hover, Some(Hit::Extra(j) | Hit::ExtraArrow(j, _)) if j == k);
@@ -678,31 +855,97 @@ impl OptionsMenu {
         ui::text(canvas, W, H, &self.fonts, s, x, y, 1.0, fg, (0, 30, 0));
     }
 
-    /// The arrow that leads to the other page, and the page number at the top right.
+    /// The arrows that lead to the next and the previous page, and the page number at the top right.
     fn render_page_arrow(&self, canvas: &mut [u32]) {
-        let to = if self.page == 0 { 1 } else { 0 };
-        let r = page_rect(to);
-        // a green triangle in the exe's arrow colours, drawn here (the exe's arrow art comes with its own slot)
-        let hot = self.hover == Some(Hit::Page(to));
-        let (fill, edge) = if hot { ((140, 255, 150), (20, 120, 40)) } else { ((40, 220, 70), (10, 80, 25)) };
-        let (cx, cy) = (r.x + r.w / 2, r.y + r.h / 2);
-        let dir = if to == 1 { 1.0f32 } else { -1.0 };
-        for dy in -12i32..=12 {
-            for dx in -12i32..=12 {
-                // distance from the base line towards the apex, 0..=20; half-height shrinks linearly to 0 at the apex
-                let t = (dx as f32 * dir + 10.0) / 20.0;
-                let half = 11.0 * (1.0 - t);
-                let inside = |shrink: f32| (0.0..=1.0).contains(&t) && (dy as f32).abs() <= half - shrink && t >= shrink / 20.0 && t <= 1.0 - shrink / 11.0;
-                if inside(0.0) {
-                    let c = if inside(2.0) { fill } else { edge };
-                    let (x, y) = (cx + dx, cy + dy);
-                    if (0..W as i32).contains(&x) && (0..H as i32).contains(&y) {
-                        canvas[y as usize * W + x as usize] = pack(c.0, c.1, c.2);
+        for forward in [true, false] {
+            let (page, pages) = self.view_page();
+            let to = if forward { page + 1 } else { page.wrapping_sub(1) };
+            if to >= pages {
+                continue;
+            }
+            let r = page_rect(forward);
+            // a green triangle in the exe's arrow colours, drawn here (the exe's arrow art comes with its own slot)
+            let hot = self.hover == Some(Hit::Page(to));
+            let (fill, edge) = if hot { ((140, 255, 150), (20, 120, 40)) } else { ((40, 220, 70), (10, 80, 25)) };
+            let (cx, cy) = (r.x + r.w / 2, r.y + r.h / 2);
+            let dir = if forward { 1.0f32 } else { -1.0 };
+            for dy in -12i32..=12 {
+                for dx in -12i32..=12 {
+                    // distance from the base line towards the apex, 0..=20; half-height shrinks linearly to 0 at the apex
+                    let t = (dx as f32 * dir + 10.0) / 20.0;
+                    let half = 11.0 * (1.0 - t);
+                    let inside = |shrink: f32| (0.0..=1.0).contains(&t) && (dy as f32).abs() <= half - shrink && t >= shrink / 20.0 && t <= 1.0 - shrink / 11.0;
+                    if inside(0.0) {
+                        let c = if inside(2.0) { fill } else { edge };
+                        let (x, y) = (cx + dx, cy + dy);
+                        if (0..W as i32).contains(&x) && (0..H as i32).contains(&y) {
+                            canvas[y as usize * W + x as usize] = pack(c.0, c.1, c.2);
+                        }
                     }
                 }
             }
         }
-        self.text(canvas, &format!("{}/{}", self.page + 1, PAGES), W as i32 - 56, 10, false);
+        let (page, pages) = self.view_page();
+        self.text(canvas, &format!("{}/{}", page + 1, pages), W as i32 - 56, 10, false);
+    }
+
+    /// A dark box with a thin frame (the Controls key slots and DEFAULTS); `lit` brightens the frame.
+    fn slot_box(canvas: &mut [u32], r: ui::Rect, lit: bool, active: bool) {
+        let edge = if active {
+            (255, 200, 60)
+        } else if lit {
+            (140, 255, 150)
+        } else {
+            (40, 150, 60)
+        };
+        for y in r.y.max(0)..(r.y + r.h).min(H as i32) {
+            for x in r.x.max(0)..(r.x + r.w).min(W as i32) {
+                let p = &mut canvas[y as usize * W + x as usize];
+                let border = y == r.y || y == r.y + r.h - 1 || x == r.x || x == r.x + r.w - 1;
+                *p = if border {
+                    pack(edge.0, edge.1, edge.2)
+                } else {
+                    // darken what is under the box to a third
+                    let c = |sh: u32| ((*p >> sh & 255) / 3) as u8;
+                    pack(c(16), c(8), c(0))
+                };
+            }
+        }
+    }
+
+    /// A Controls page: its heading, DEFAULTS, the help line, then one row per action: its label and two key slots.
+    fn render_controls(&self, canvas: &mut [u32], rows: std::ops::Range<usize>) {
+        let t = self.tr.controls_title();
+        let tw = self.text_w(t);
+        self.text(canvas, t, W as i32 / 2 - tw / 2 - 0x2a, 10, true);
+        let lh = ui::text_height(&self.fonts, 1.0);
+        self.text(canvas, self.tr.controls_heading(self.controls.unwrap_or(0)), 21, 40, true);
+        let hot = self.hover == Some(Hit::Defaults);
+        Self::slot_box(canvas, DEFAULTS_RECT, hot, false);
+        let d = self.tr.defaults();
+        let r = DEFAULTS_RECT;
+        self.text(canvas, d, r.x + (r.w - self.text_w(d)) / 2, r.y + (r.h - lh) / 2, hot);
+        let line = match (&self.notice, self.capture) {
+            (Notice::Fixed, _) => self.tr.key_fixed().to_owned(),
+            (_, Some(_)) => self.tr.capture_hint().to_owned(),
+            (Notice::Moved(code, from), None) => self.tr.key_moved(&keybinds::key_name(*code), &self.tr.bind_label(*from)),
+            (Notice::Hint, None) => self.tr.controls_hint().to_owned(),
+        };
+        self.hint(canvas, &line, 21, 62);
+        for k in rows {
+            let act = keybinds::ALL[k];
+            let row = bind_rect(k, 0);
+            let lit = matches!(self.hover, Some(Hit::Bind(j, _)) if j == k) || matches!(self.capture, Some((j, _)) if j == k);
+            self.text(canvas, &self.tr.bind_label(act), BIND_LABEL_X, row.y + (row.h - lh) / 2, lit);
+            for (slot, code) in self.opts.keys.keys(act).into_iter().enumerate() {
+                let r = bind_rect(k, slot);
+                let active = self.capture == Some((k, slot));
+                let hot = self.hover == Some(Hit::Bind(k, slot));
+                Self::slot_box(canvas, r, hot, active);
+                let name = if active { self.tr.press_key().to_owned() } else { code.map_or_else(|| "-".to_owned(), keybinds::key_name) };
+                self.text(canvas, &name, r.x + (r.w - self.text_w(&name)) / 2, r.y + (r.h - lh) / 2, hot || active);
+            }
+        }
     }
 
     fn render(&mut self) {
@@ -717,7 +960,7 @@ impl OptionsMenu {
                 }
             }
         }
-        if self.page == 1 {
+        if self.page >= 1 || self.controls.is_some() {
             self.wipe_arrow_slots(&mut canvas);
         }
         // the two turning cogs: both shadows, then both cogs (`0x44afea..0x44b093`), under every button
@@ -732,7 +975,9 @@ impl OptionsMenu {
         for (f, x, y, mode) in &cogs {
             blit(&mut canvas, f, *x, *y, *mode);
         }
-        if self.page == 1 {
+        if let Some(rows) = self.controls_rows() {
+            self.render_controls(&mut canvas, rows);
+        } else if self.page == 1 {
             self.render_extra(&mut canvas);
         } else {
             let on = |k: usize| self.hover == Some(Hit::Label(k));
@@ -782,6 +1027,14 @@ impl OptionsMenu {
             ] {
                 self.number(&mut canvas, x, row_y(k), v);
             }
+        }
+        if self.controls.is_none() && self.page == 0 {
+            // CONTROLS, on the exe's page only
+            let hot = self.hover == Some(Hit::Controls);
+            Self::slot_box(&mut canvas, CONTROLS_RECT, hot, false);
+            let (t, r) = (self.tr.controls_button(), CONTROLS_RECT);
+            let lh = ui::text_height(&self.fonts, 1.0);
+            self.text(&mut canvas, t, r.x + (r.w - self.text_w(t)) / 2, r.y + (r.h - lh) / 2, hot);
         }
         self.render_page_arrow(&mut canvas);
         for (i, hit) in [Hit::Cancel, Hit::Ok].into_iter().enumerate() {
@@ -844,6 +1097,10 @@ mod tests {
             hover: None,
             tr: Tr::new(opensow_formats::lang::Language::English),
             page: 0,
+            controls: None,
+            keys_before: Keybinds::default(),
+            capture: None,
+            notice: Notice::Hint,
             cursor: (0, 0),
             canvas: vec![0; W * H],
             sounds: Vec::new(),
@@ -975,9 +1232,108 @@ mod tests {
     }
 
     #[test]
+    fn controls_pages_rebind_clear_and_reset_keys() {
+        use winit::keyboard::KeyCode;
+        let mut m = menu(GameOptions::default());
+        // CONTROLS is on the exe's page only and opens the Controls view on its first page
+        m.press(Hit::Page(1));
+        assert_ne!(m.hit_at(m.centre(Hit::Controls)), Some(Hit::Controls), "not on the port's page");
+        assert_eq!(m.hit_at(m.centre(Hit::Page(2))), None, "page 2 is the last options page");
+        m.press(Hit::Page(0));
+        assert_eq!(m.hit_at(m.centre(Hit::Controls)), Some(Hit::Controls));
+        m.press(Hit::Controls);
+        assert_eq!((m.controls, m.page), (Some(0), 0));
+        assert_ne!(m.hit_at(m.centre(Hit::Controls)), Some(Hit::Controls), "no CONTROLS inside the view");
+        // the first page holds the camera rows; another page's rows are not clickable
+        let pause = Act::Pause.index();
+        assert_eq!(m.hit_at(m.centre(Hit::Bind(0, 1))), Some(Hit::Bind(0, 1)));
+        assert_ne!(m.hit_at(m.centre(Hit::Bind(pause, 0))), Some(Hit::Bind(pause, 0)), "pause is on the last page");
+        m.press(Hit::Page(1));
+        m.press(Hit::Page(2));
+        assert_eq!(m.controls, Some(2));
+        assert_eq!(m.hit_at(m.centre(Hit::Bind(pause, 0))), Some(Hit::Bind(pause, 0)));
+        assert_eq!(m.hit_at(m.centre(Hit::Page(1))), Some(Hit::Page(1)), "the way back");
+        assert_eq!(m.hit_at(m.centre(Hit::Page(3))), None, "the last Controls page");
+        assert_eq!(m.hit_at(m.centre(Hit::Defaults)), Some(Hit::Defaults));
+        // click a slot, press a key: bound, taken from the action that had it
+        m.press(Hit::Bind(pause, 0));
+        assert!(m.capturing());
+        m.capture(KeyCode::Escape);
+        assert!(m.capturing(), "Esc cannot be bound; the slot keeps waiting");
+        assert_eq!(m.notice, Notice::Fixed);
+        m.capture(KeyCode::ShiftLeft);
+        assert!(m.capturing(), "neither can Shift");
+        m.capture(KeyCode::KeyX);
+        assert!(!m.capturing());
+        assert_eq!(m.opts.keys.action(KeyCode::KeyX), Some(Act::Pause));
+        assert_eq!(m.opts.keys.keys(Act::Scatter), [None, None]);
+        assert_eq!(m.notice, Notice::Moved(KeyCode::KeyX.into(), Act::Scatter));
+        // the middle, back and forward mouse buttons bind like keys
+        m.press(Hit::Bind(pause, 1));
+        m.capture(winit::event::MouseButton::Middle);
+        assert!(!m.capturing());
+        assert_eq!(m.opts.keys.action(winit::event::MouseButton::Middle), Some(Act::Pause));
+        m.opts.keys.clear(Act::Pause, 1);
+        // a click anywhere else gives up waiting
+        m.press(Hit::Bind(pause, 1));
+        m.press(Hit::Page(1));
+        assert!(!m.capturing());
+        // the view's CANCEL forgets its changes and leads back to the options page it came from
+        assert_eq!(m.press(Hit::Cancel), Event::None);
+        assert_eq!((m.controls, m.page), (None, 0));
+        assert_eq!(m.opts.keys, Keybinds::default());
+        // its O.K. keeps them; the options' O.K. then saves them, their CANCEL forgets them
+        m.press(Hit::Controls);
+        m.opts.keys.bind(Act::Pause, 1, KeyCode::KeyL);
+        assert_eq!(m.press(Hit::Ok), Event::None);
+        assert_eq!(m.controls, None);
+        let Event::Done(d) = m.press(Hit::Ok) else { panic!() };
+        assert_eq!(d.keys.keys(Act::Pause), [Some(KeyCode::KeyP.into()), Some(KeyCode::KeyL.into())]);
+        let Event::Cancel(c) = m.press(Hit::Cancel) else { panic!() };
+        assert_eq!(c.keys, Keybinds::default());
+        // Esc inside the view is its CANCEL; DEFAULTS puts every key back
+        m.press(Hit::Controls);
+        m.opts.keys.bind(Act::Pause, 1, KeyCode::KeyL);
+        assert_eq!(m.escape(), Event::None);
+        assert_eq!(m.opts.keys, Keybinds::default());
+        m.press(Hit::Controls);
+        m.opts.keys.clear(Act::Pause, 0);
+        m.press(Hit::Defaults);
+        assert_eq!(m.opts.keys, Keybinds::default());
+    }
+
+    #[test]
+    fn controls_pages_draw_every_state() {
+        let mut m = menu(GameOptions::default());
+        for page in 0..PAGES {
+            m.page = page;
+            m.render();
+        }
+        for page in 0..CONTROLS_PAGES {
+            m.controls = Some(page);
+            m.render();
+            m.press(Hit::Bind(keybinds::PAGE_ROWS[page].start, 1));
+            m.render();
+            m.capture(winit::keyboard::KeyCode::Escape);
+            m.render();
+            m.stop_capture();
+        }
+    }
+
+    #[test]
     fn own_settings_file_round_trips() {
         for on in [true, false] {
-            let e = Extra { enhance: on, soft_shadows: !on, contact_shadows: on, glow: !on, turret_shadows: on, sound: !on, turret_range: on, zoom: !on };
+            let e = Extra {
+                enhance: on,
+                soft_shadows: !on,
+                contact_shadows: on,
+                glow: !on,
+                turret_shadows: on,
+                sound: !on,
+                turret_range: on,
+                zoom: !on,
+                swap_buttons: on,
+            };
             assert_eq!(Extra::parse(&e.write()), e);
         }
         assert_eq!(Extra::parse(""), Extra::default(), "a missing file keeps the defaults");
@@ -988,6 +1344,8 @@ mod tests {
         assert_eq!(Extra::parse("turret_range=0\n"), Extra { turret_range: false, ..Extra::default() });
         assert!(Extra::default().zoom, "map zoom starts on");
         assert_eq!(Extra::parse("map_zoom=0\n"), Extra { zoom: false, ..Extra::default() });
+        assert!(!Extra::default().swap_buttons, "the mouse buttons start unswapped");
+        assert_eq!(Extra::parse("swap_buttons=1\n"), Extra { swap_buttons: true, ..Extra::default() });
     }
 
     #[test]

@@ -10,6 +10,7 @@ impl Game {
             assets,
             numpad: false,
             digit: None,
+            code: None,
             game_speed: 1.0,
             settings: Settings::default(),
             levels,
@@ -318,6 +319,7 @@ impl Game {
         self.settings.cloud_detail = o.cfg.detail;
         self.settings.turret_range = o.extra.turret_range;
         self.settings.zoom = o.extra.zoom;
+        self.settings.swap_buttons = o.extra.swap_buttons;
     }
 
     /// Above zoom 1 the world is drawn from 2x enhanced copies of the original art (viewer `upscale`, docs/enhance.md): the Options

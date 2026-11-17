@@ -392,9 +392,18 @@ fn screen_switches(game: &mut Game, args: &[String], w: usize, h: usize) {
         Some("prototype") => Screen::Options,
         Some("options") => {
             game.open_options();
-            // --page 0|1; --hover N: 0..13 arrow, 14.. label, 100+k row k of page 2, 200 page arrow, 300+k / 400+k left / right arrow of row k
+            // --page 0|1; --controls N opens the Controls view on its page N; --hover N: 0..13 arrow, 14.. label, 100+k row k of page 2,
+            // 200 page arrow forward (back on the last page), 300+k / 400+k left / right arrow of row k, 500+2k+slot key slot of
+            // action k, 600 DEFAULTS, 700 CONTROLS; --capture N: key slot 500+N waits for a key
             if let (Some(m), Some(n)) = (game.options_menu.as_mut(), get("--page").and_then(|n| n.parse::<usize>().ok())) {
                 m.page = n.min(options::PAGES - 1);
+            }
+            if let (Some(m), Some(n)) = (game.options_menu.as_mut(), get("--controls").and_then(|n| n.parse::<usize>().ok())) {
+                m.press(options::Hit::Controls);
+                m.controls = Some(n.min(options::CONTROLS_PAGES - 1));
+            }
+            if let (Some(m), Some(n)) = (game.options_menu.as_mut(), get("--capture").and_then(|n| n.parse::<usize>().ok())) {
+                m.press(options::Hit::Bind(n / 2, n % 2));
             }
             if let (Some(m), Some(hit)) = (game.options_menu.as_mut(), get("--hover").and_then(|n| n.parse::<usize>().ok())) {
                 let p = m.centre(match hit {
@@ -403,7 +412,13 @@ fn screen_switches(game: &mut Game, args: &[String], w: usize, h: usize) {
                     100..=199 => options::Hit::Extra(hit - 100),
                     300..=399 => options::Hit::ExtraArrow(hit - 300, false),
                     400..=499 => options::Hit::ExtraArrow(hit - 400, true),
-                    _ => options::Hit::Page(if m.page == 0 { 1 } else { 0 }),
+                    500..=599 => options::Hit::Bind((hit - 500) / 2, (hit - 500) % 2),
+                    600 => options::Hit::Defaults,
+                    700 => options::Hit::Controls,
+                    _ => {
+                        let (page, pages) = m.controls.map_or((m.page, options::PAGES), |c| (c, options::CONTROLS_PAGES));
+                        options::Hit::Page(if page + 1 < pages { page + 1 } else { page - 1 })
+                    }
                 });
                 let (ox, oy, sc) = (0.0, 0.0, 1.0f32);
                 let _ = (ox, oy, sc);

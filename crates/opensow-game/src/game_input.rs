@@ -124,11 +124,18 @@ impl Game {
             return;
         }
         if let Some(m) = self.options_menu.as_mut() {
-            if down && button == MouseButton::Left {
+            if down && m.capturing() && !matches!(button, MouseButton::Left | MouseButton::Right) {
+                // a Controls slot waits: the middle, back, forward and other buttons are bound like keys
+                m.capture(button);
+                self.options_sounds();
+            } else if down && button == MouseButton::Left {
                 let e = m.click(x, y, w, h);
                 self.options_sounds();
                 self.apply_audio();
                 self.options_event(e);
+            } else if down && button == MouseButton::Right {
+                m.right_click(x, y, w, h);
+                self.options_sounds();
             }
             return;
         }
@@ -214,6 +221,11 @@ impl Game {
             }
             return;
         }
+        if !matches!(button, MouseButton::Left | MouseButton::Right) {
+            // the other buttons do what they are bound to (Options, Controls; not in the exe)
+            self.bound_input(keybinds::Input::Mouse(button), down);
+            return;
+        }
         let Some(p) = self.play.as_mut() else { return };
         if p.paused {
             return; // the pause (`0x435330`) reads no mouse button
@@ -231,13 +243,25 @@ impl Game {
         }
     }
 
-    /// The digit a key stands for: the physical key's (top row or numpad, any layout; Czech needs shift for the logical digits),
-    /// else the character itself.
-    pub(super) fn digit_of(&self, key: &Key) -> Option<u8> {
-        self.digit.or_else(|| match key {
-            Key::Character(c) if c.len() == 1 && c.as_bytes()[0].is_ascii_digit() => Some(c.as_bytes()[0] - b'0'),
-            _ => None,
-        })
+    /// The physical key of the event being handled: the window's, else mapped from the logical key (tests, headless runs).
+    pub(super) fn code_of(&self, key: &Key) -> Option<winit::keyboard::KeyCode> {
+        self.code.or_else(|| keybinds::code_of(key, self.numpad, self.digit))
+    }
+
+    /// The mission action the key is bound to (Options, Controls pages; docs/hotkeys.md).
+    pub(super) fn action_of(&self, key: &Key) -> Option<keybinds::Act> {
+        self.code_of(key).and_then(|c| self.options.keys.action(c))
+    }
+
+    /// Whether this key or button press toggles fullscreen: the one bound to it, unless a text line or the Controls page is
+    /// waiting for a key.
+    pub(super) fn fullscreen_key(&self, code: impl Into<keybinds::Input>) -> bool {
+        let typing = self.saveui.is_some()
+            || self.net_menu.is_some()
+            || self.play.as_ref().is_some_and(|p| p.chat.is_some())
+            || self.wants_text()
+            || self.options_menu.as_ref().is_some_and(|m| m.capturing());
+        !typing && self.options.keys.action(code) == Some(keybinds::Act::Fullscreen)
     }
 
     /// A key went down or up: global keys first, then the open screen or the mission.
@@ -293,7 +317,15 @@ impl Game {
             return;
         }
         if let Some(m) = self.options_menu.as_mut() {
-            if down && matches!(key, Key::Named(NamedKey::Escape)) {
+            if down && m.capturing() {
+                // the Controls page waits for a key: Esc gives up, any other key is bound (or refused)
+                if matches!(key, Key::Named(NamedKey::Escape)) {
+                    m.stop_capture();
+                } else if let Some(c) = self.code.or_else(|| keybinds::code_of(key, self.numpad, self.digit)) {
+                    m.capture(c);
+                }
+                self.options_sounds();
+            } else if down && matches!(key, Key::Named(NamedKey::Escape)) {
                 let e = m.escape();
                 self.options_sounds();
                 self.options_event(e);
@@ -360,7 +392,7 @@ impl Game {
         }
         if self.screen.is_none() && self.play.as_ref().is_some_and(|p| p.paused) {
             // the pause (`0x435330`) only waits for the pause key again (`[player+0x7d]` = scan code 0x19 = P, docs/hotkeys.md)
-            if down && matches!(key, Key::Character(c) if c.eq_ignore_ascii_case("p")) {
+            if down && self.action_of(key) == Some(keybinds::Act::Pause) {
                 if let Some(p) = self.play.as_mut() {
                     p.paused = false;
                 }
@@ -403,23 +435,7 @@ impl Game {
             }
             return;
         }
-        let name = match key {
-            Key::Named(NamedKey::ArrowLeft) => Some("left"),
-            Key::Named(NamedKey::ArrowRight) => Some("right"),
-            Key::Named(NamedKey::ArrowUp) => Some("up"),
-            Key::Named(NamedKey::ArrowDown) => Some("down"),
-            Key::Character(c) => match c.to_ascii_lowercase().as_str() {
-                "a" => Some("left"),
-                "d" => Some("right"),
-                "w" => Some("up"),
-                "s" => Some("down"),
-                _ => None,
-            },
-            _ => None,
-        };
-        if let (Some(n), Some(p)) = (name, self.play.as_mut()) {
-            p.key(n, down);
-        }
+        self.scroll_input(self.action_of(key), down);
         if let Key::Named(NamedKey::Shift) = key {
             self.shift = down;
         }
@@ -429,27 +445,92 @@ impl Game {
         self.hotkey(key, w, h);
     }
 
-    /// A key press that no open screen, movie or chat line took: the hotkeys of the menus and of a running mission
-    /// (docs/hotkeys.md).
+    /// A key press that no open screen, movie or chat line took: Esc, then the mission's hotkeys through the key bindings
+    /// (docs/hotkeys.md; Options, Controls pages).
     fn hotkey(&mut self, key: &Key, w: usize, h: usize) {
         match key {
-            Key::Named(NamedKey::Escape) => match self.screen {
-                None if self.play.is_some() => {
-                    self.open_pause();
-                    self.ingame_sounds();
+            Key::Named(NamedKey::Escape) => {
+                match self.screen {
+                    None if self.play.is_some() => {
+                        self.open_pause();
+                        self.ingame_sounds();
+                    }
+                    Some(Screen::Pause) => {
+                        self.play_sfx(35);
+                        self.act(Action::Resume)
+                    }
+                    Some(Screen::Main) => {}
+                    Some(_) => self.act(Action::Back),
+                    None => {}
                 }
-                Some(Screen::Pause) => {
-                    self.play_sfx(35);
-                    self.act(Action::Resume)
-                }
-                Some(Screen::Main) => {}
-                Some(_) => self.act(Action::Back),
-                None => {}
-            },
-            Key::Character(c) if c.eq_ignore_ascii_case("p") && matches!(self.screen, Some(Screen::Main | Screen::Pause)) => self.act(Action::Prototype),
+                return;
+            }
+            // developer shortcut on the menus (fixed, not a mission key)
+            Key::Character(c) if c.eq_ignore_ascii_case("p") && matches!(self.screen, Some(Screen::Main | Screen::Pause)) => {
+                self.act(Action::Prototype);
+                return;
+            }
+            _ => {}
+        }
+        if self.screen.is_some() {
+            return;
+        }
+        if let Some(act) = self.action_of(key) {
+            self.run_action(act);
+        }
+        let _ = (w, h);
+    }
+
+    /// A held scroll action (keys or buttons) starts or stops moving the camera.
+    fn scroll_input(&mut self, act: Option<keybinds::Act>, down: bool) {
+        use keybinds::Act;
+        let name = match act {
+            Some(Act::ScrollLeft) => "left",
+            Some(Act::ScrollRight) => "right",
+            Some(Act::ScrollUp) => "up",
+            Some(Act::ScrollDown) => "down",
+            _ => return,
+        };
+        if let Some(p) = self.play.as_mut() {
+            p.key(name, down);
+        }
+    }
+
+    /// A bound mouse button (middle, back, forward, others) in a mission: the same as its action's key, with the pause and
+    /// chat rules of the keys (docs/hotkeys.md).
+    pub(super) fn bound_input(&mut self, input: keybinds::Input, down: bool) {
+        if self.screen.is_some() || self.results.is_some() {
+            return;
+        }
+        let act = self.options.keys.action(input);
+        let Some(p) = self.play.as_mut() else { return };
+        if p.chat.is_some() {
+            return;
+        }
+        if p.paused {
+            // the pause waits only for the pause action
+            if down && act == Some(keybinds::Act::Pause) {
+                p.paused = false;
+            }
+            return;
+        }
+        self.scroll_input(act, down);
+        if let (true, Some(act)) = (down, act) {
+            self.run_action(act);
+        }
+    }
+
+    /// What a mission action does (docs/hotkeys.md), whichever key or button it is bound to.
+    fn run_action(&mut self, act: keybinds::Act) {
+        use keybinds::Act;
+        if self.screen.is_some() {
+            return;
+        }
+        let shift = self.shift;
+        match act {
             // quick save / quick load: key flag `[player+0xa3]` = scan code 0x3f = F5, with a shift key (`[+0x8e]` / `[+0x9a]`) it loads
-            Key::Named(NamedKey::F5) if self.screen.is_none() && self.play.is_some() => {
-                if self.shift {
+            Act::QuickSave if self.play.is_some() => {
+                if shift {
                     self.quick_load();
                 } else {
                     self.quick_save = true;
@@ -457,78 +538,14 @@ impl Game {
             }
             // F2 (`0x415c05`, key flag `[player+0xa0]`): in a numbered mission without remote players it plays sound 0x32 and leaves for the
             // campaign map (state 0x1a = `0x433d90`, "after a mission") with the mission number as the result code `[0x5baa90]`
-            Key::Named(NamedKey::F2) if self.screen.is_none() && self.play.as_ref().is_some_and(|p| p.world.mission_no.is_some_and(|n| n != 0)) => {
+            Act::Abandon if self.play.as_ref().is_some_and(|p| p.world.mission_no.is_some_and(|n| n != 0)) => {
                 self.play_sfx(0x32);
                 self.play = None;
                 self.open_lands(false);
             }
-            // P pauses (`0x415d05`: `[player+0x7d]`, scan code 0x19; docs/hotkeys.md)
-            Key::Character(c) if self.screen.is_none() && c.eq_ignore_ascii_case("p") => {
-                if let Some(p) = self.play.as_mut() {
-                    p.paused ^= true;
-                }
-            }
-            // Space and numpad 0 (`0x416177`): the view goes to the position of the last message event
-            Key::Named(NamedKey::Space) if self.screen.is_none() => {
-                if let Some(p) = self.play.as_mut() {
-                    p.look_at_event();
-                }
-            }
-            Key::Character(_) | Key::Dead(_) | Key::Unidentified(_) if self.screen.is_none() && self.numpad && self.digit_of(key) == Some(0) => {
-                if let Some(p) = self.play.as_mut() {
-                    p.look_at_event();
-                }
-            }
-            Key::Named(NamedKey::Tab) if self.screen.is_none() => {
-                if let Some(p) = self.play.as_mut() {
-                    p.select_next_unit();
-                }
-            }
-            Key::Named(NamedKey::Backspace) if self.screen.is_none() => {
-                if let Some(p) = self.play.as_mut() {
-                    p.look_at_hq();
-                }
-            }
-            Key::Named(NamedKey::Enter) if self.screen.is_none() && !self.numpad => {
-                if let Some(p) = self.play.as_mut() {
-                    p.chat_open();
-                }
-            }
-            Key::Named(NamedKey::Enter) if self.screen.is_none() && self.numpad => {
-                if let Some(p) = self.play.as_mut() {
-                    p.centre_on_selection();
-                }
-            }
-            // Shift+H (not in the original): the next idle Advancer, and the view goes to it
-            Key::Character(c) if self.screen.is_none() && self.shift && c.eq_ignore_ascii_case("h") => {
-                if let Some(p) = self.play.as_mut() {
-                    p.select_next_idle_advancer();
-                }
-            }
-            Key::Character(c) if self.screen.is_none() && (c.eq_ignore_ascii_case("h") || (self.numpad && c.as_str() == "+")) => {
-                if let Some(p) = self.play.as_mut() {
-                    p.select_next_advancer();
-                }
-            }
-            Key::Character(c) if self.screen.is_none() && self.numpad && matches!(c.as_str(), "*" | "/" | "-") => {
-                if let Some(p) = self.play.as_mut() {
-                    p.select_visible(match c.as_str() {
-                        "/" => Some(true),
-                        "-" => Some(false),
-                        _ => None,
-                    });
-                }
-            }
-            // numpad 1-9: camera bookmarks (shift sets); the top-row 1-5 stay the turret keys
-            Key::Character(_) | Key::Dead(_) | Key::Unidentified(_) if self.screen.is_none() && self.numpad && matches!(self.digit_of(key), Some(1..=9)) => {
-                let (shift, n) = (self.shift, self.digit_of(key).unwrap_or(1) as usize - 1);
-                if let Some(p) = self.play.as_mut() {
-                    p.bookmark(n, shift);
-                }
-            }
             // F3 / F4 (`0x415c49` / `0x415cb1`): game speed -/+ 0.5 between 0.5 and 3.0, not in a network game
-            Key::Named(NamedKey::F3 | NamedKey::F4) if self.screen.is_none() && self.play.is_some() => {
-                let step = if *key == Key::Named(NamedKey::F3) { -0.5 } else { 0.5 };
+            Act::SpeedDown | Act::SpeedUp if self.play.is_some() => {
+                let step = if act == Act::SpeedDown { -0.5 } else { 0.5 };
                 self.game_speed = (self.game_speed + step).clamp(0.5, 3.0);
                 let speed = self.game_speed;
                 if let Some(p) = self.play.as_mut() {
@@ -537,19 +554,13 @@ impl Game {
             }
             // F1 (`0x415bda`): sound 0x20 and the key help overlay on / off (`[0x5baa9b]`, drawn by `0x420a40`); the FPS counter
             // is the "draw fps" cheat's own flag `[0x5baad5]`
-            Key::Named(NamedKey::F1) if self.screen.is_none() && self.play.is_some() => {
+            Act::KeyHelp if self.play.is_some() => {
                 if let Some(p) = self.play.as_mut() {
                     p.show_keys ^= true;
                 }
                 self.play_sfx(0x20);
             }
-            // X (`0x4167e1` -> `0x418dc0`): the selected units scatter away from the middle of their box (docs/hotkeys.md)
-            Key::Character(c) if self.screen.is_none() && c.eq_ignore_ascii_case("x") => {
-                if let Some(p) = self.play.as_mut() {
-                    p.world.scatter_selected();
-                }
-            }
-            Key::Character(c) if self.screen.is_none() && c.eq_ignore_ascii_case("q") => {
+            Act::SelectAll => {
                 if let Some(p) = self.play.as_mut() {
                     p.world.select_all();
                     p.sel_building = None;
@@ -559,42 +570,55 @@ impl Game {
                     }
                 }
             }
-            Key::Character(_) | Key::Dead(_) | Key::Unidentified(_) if self.screen.is_none() && !self.numpad && matches!(self.digit_of(key), Some(1..=5)) => {
-                let tier = self.digit_of(key).unwrap_or(1) as u32;
-                if let Some(p) = self.play.as_mut() {
-                    p.turret_key(tier);
-                }
-            }
-            Key::Character(c) if self.screen.is_none() && matches!(c.to_ascii_lowercase().as_str(), "b" | "m" | "c" | "y" | "f") => {
-                use opensow_formats::air::AirForce as F;
-                if let Some(p) = self.play.as_mut() {
-                    let f = match c.to_ascii_lowercase().as_str() {
-                        "b" => F::Bomber,
-                        "m" => F::Asteroid,
-                        "c" => F::Carryall,
-                        "y" => F::Tripler,
-                        _ => F::Fighter,
-                    };
-                    if p.world.strike_lock == 0 {
-                        p.strike = Some(f);
+            _ => {
+                let Some(p) = self.play.as_mut() else { return };
+                match act {
+                    // P pauses (`0x415d05`: `[player+0x7d]`, scan code 0x19; docs/hotkeys.md)
+                    Act::Pause => p.paused ^= true,
+                    // Space and numpad 0 (`0x416177`): the view goes to the position of the last message event
+                    Act::LookAtEvent => p.look_at_event(),
+                    Act::NextUnit => p.select_next_unit(),
+                    Act::LookAtHq => p.look_at_hq(),
+                    Act::Chat => p.chat_open(),
+                    Act::CentreSelection => p.centre_on_selection(),
+                    // Shift+H (not in the original): the next idle Advancer, and the view goes to it
+                    Act::NextAdvancer if shift => p.select_next_idle_advancer(),
+                    Act::NextAdvancer => p.select_next_advancer(),
+                    Act::SelectVisible => p.select_visible(None),
+                    Act::SelectVisibleAntiAir => p.select_visible(Some(true)),
+                    Act::SelectVisibleGround => p.select_visible(Some(false)),
+                    // numpad 1-9: camera bookmarks (shift sets)
+                    Act::Bookmark(k) => {
+                        p.bookmark(k as usize, shift);
                     }
-                }
-            }
-            Key::Character(c) if self.screen.is_none() && c.eq_ignore_ascii_case("t") => {
-                if let Some(p) = self.play.as_mut() {
-                    p.world.tech_up_all(0);
-                }
-            }
-            Key::Character(c) if self.screen.is_none() && c.eq_ignore_ascii_case("r") => {
-                if let Some(p) = self.play.as_mut() {
+                    // X (`0x4167e1` -> `0x418dc0`): the selected units scatter away from the middle of their box (docs/hotkeys.md)
+                    Act::Scatter => {
+                        p.world.scatter_selected();
+                    }
+                    Act::Turret(k) => {
+                        p.turret_key(k as u32 + 1);
+                    }
+                    Act::StrikeBomber | Act::StrikeAsteroid | Act::StrikeCarryall | Act::StrikeTripler | Act::StrikeFighter => {
+                        use opensow_formats::air::AirForce as F;
+                        let f = match act {
+                            Act::StrikeBomber => F::Bomber,
+                            Act::StrikeAsteroid => F::Asteroid,
+                            Act::StrikeCarryall => F::Carryall,
+                            Act::StrikeTripler => F::Tripler,
+                            _ => F::Fighter,
+                        };
+                        if p.world.strike_lock == 0 {
+                            p.strike = Some(f);
+                        }
+                    }
+                    Act::TechUp => {
+                        p.world.tech_up_all(0);
+                    }
                     // `0x416769`: R with a selected own factory arms the rally point mode, else it toggles the Advancer's repair mode
-                    if !p.arm_rally() {
-                        p.world.repair_mode ^= true;
-                    }
+                    Act::RallyOrRepair if !p.arm_rally() => p.world.repair_mode ^= true,
+                    _ => {}
                 }
             }
-            _ => {}
         }
-        let _ = (w, h);
     }
 }

@@ -767,7 +767,7 @@ impl Tr {
     }
 
     /// Page 2's rows in [`crate::options::OWN_ROWS`] order: (label, one-line explanation).
-    pub fn option_rows(self) -> [(&'static str, &'static str); 8] {
+    pub fn option_rows(self) -> [(&'static str, &'static str); 9] {
         match self.0 {
             1 => [
                 ("Vylepšené textúry", "Vyhladí jednotky, budovy a terén pri priblížení"),
@@ -778,6 +778,7 @@ impl Tr {
                 ("Vylepšený zvuk", "Čistejšie a plynulejšie efekty, reč a hudba"),
                 ("Dosah veží", "Pri umiestňovaní veže ukáže, kam dostrelí"),
                 ("Priblíženie mapy", "Približovanie kolieskom myši (pôvodne pevná mierka)"),
+                ("Prehodiť tlačidlá myši", "Rozkazy na presun a útok pravým tlačidlom"),
             ],
             2 => [
                 ("Vylepšené textury", "Vyhladí jednotky, budovy a terén při přiblížení"),
@@ -788,6 +789,7 @@ impl Tr {
                 ("Vylepšený zvuk", "Čistší a plynulejší efekty, řeč a hudba"),
                 ("Dosah věží", "Při umísťování věže ukáže, kam dostřelí"),
                 ("Přiblížení mapy", "Přibližování kolečkem myši (původně pevné měřítko)"),
+                ("Prohodit tlačítka myši", "Rozkazy k přesunu a útoku pravým tlačítkem"),
             ],
             3 => [
                 ("增强纹理", "放大时平滑单位、建筑和地面"),
@@ -798,6 +800,7 @@ impl Tr {
                 ("增强音效", "更清晰、更平滑的音效、语音和音乐"),
                 ("炮塔射程", "放置炮塔时显示其射程"),
                 ("地图缩放", "用鼠标滚轮缩放（原版为固定比例）"),
+                ("交换鼠标按键", "用右键下达移动和攻击命令"),
             ],
             4 => [
                 ("增強紋理", "放大時平滑單位、建築和地面"),
@@ -808,8 +811,168 @@ impl Tr {
                 ("增強音效", "更清晰、更平滑的音效、語音和音樂"),
                 ("砲塔射程", "放置砲塔時顯示其射程"),
                 ("地圖縮放", "用滑鼠滾輪縮放（原版為固定比例）"),
+                ("交換滑鼠按鍵", "用右鍵下達移動和攻擊命令"),
             ],
             _ => crate::options::OWN_ROWS,
+        }
+    }
+
+    /// Heading of Controls page `k` (0 camera, 1 units and orders, 2 air force and game; `keybinds::PAGE_ROWS`).
+    pub fn controls_heading(self, k: usize) -> &'static str {
+        let t = match k {
+            0 => ["CAMERA", "KAMERA", "KAMERA", "镜头", "鏡頭"],
+            1 => ["UNITS", "JEDNOTKY", "JEDNOTKY", "单位", "單位"],
+            _ => ["GAME", "HRA", "HRA", "游戏", "遊戲"],
+        };
+        self.pick(t)
+    }
+
+    /// The button on the options pages that opens the key bindings.
+    pub fn controls_button(self) -> &'static str {
+        self.pick(["CONTROLS", "OVLÁDANIE", "OVLÁDÁNÍ", "控制", "控制"])
+    }
+
+    /// The title of the Controls view.
+    pub fn controls_title(self) -> &'static str {
+        self.pick(["Controls", "Ovládanie", "Ovládání", "控制", "控制"])
+    }
+
+    /// The button that puts every key back to its default.
+    pub fn defaults(self) -> &'static str {
+        self.pick(["DEFAULTS", "PÔVODNÉ", "VÝCHOZÍ", "默认", "預設"])
+    }
+
+    /// The help line of the Controls pages.
+    pub fn controls_hint(self) -> &'static str {
+        self.pick([
+            "Click a slot, then press a key or mouse button. Right click clears it.",
+            "Klikni na políčko a stlač kláves alebo tlačidlo myši. Pravé tlačidlo ho zmaže.",
+            "Klikni na políčko a stiskni klávesu nebo tlačítko myši. Pravé tlačítko ho smaže.",
+            "点击按键格后按下键盘键或鼠标键。右键清除。",
+            "點擊按鍵格後按下鍵盤鍵或滑鼠鍵。右鍵清除。",
+        ])
+    }
+
+    /// Shown in the slot that waits for a key.
+    pub fn press_key(self) -> &'static str {
+        self.pick(["press a key", "stlač kláves", "stiskni klávesu", "请按键", "請按鍵"])
+    }
+
+    /// The help line while a slot waits for a key.
+    pub fn capture_hint(self) -> &'static str {
+        self.pick([
+            "Press a key or mouse button (Esc cancels).",
+            "Stlač kláves alebo tlačidlo myši (Esc zruší).",
+            "Stiskni klávesu nebo tlačítko myši (Esc zruší).",
+            "请按键盘键或鼠标键（Esc 取消）。",
+            "請按鍵盤鍵或滑鼠鍵（Esc 取消）。",
+        ])
+    }
+
+    /// The help line after a key that cannot be bound.
+    pub fn key_fixed(self) -> &'static str {
+        self.pick([
+            "That key cannot be used: Esc, Shift, Ctrl, Alt and the left / right mouse buttons are fixed.",
+            "Tento kláves sa nedá použiť: Esc, Shift, Ctrl, Alt a ľavé / pravé tlačidlo myši sú pevné.",
+            "Tuto klávesu nelze použít: Esc, Shift, Ctrl, Alt a levé / pravé tlačítko myši jsou pevné.",
+            "该键不可使用：Esc、Shift、Ctrl、Alt 和鼠标左右键是固定的。",
+            "該鍵不可使用：Esc、Shift、Ctrl、Alt 和滑鼠左右鍵是固定的。",
+        ])
+    }
+
+    /// The help line after a key was taken from another action.
+    pub fn key_moved(self, key: &str, from: &str) -> String {
+        match self.0 {
+            1 => format!("{key} už nerobí: {from}"),
+            2 => format!("{key} už nedělá: {from}"),
+            3 => format!("{key} 已从“{from}”移除"),
+            4 => format!("{key} 已從「{from}」移除"),
+            _ => format!("{key} no longer does: {from}"),
+        }
+    }
+
+    /// The row label of a key action on the Controls pages.
+    pub fn bind_label(self, act: crate::keybinds::Act) -> String {
+        use crate::keybinds::Act as A;
+        let l = self.0;
+        let t = |t: [&'static str; 5]| t[l].to_owned();
+        match act {
+            A::ScrollUp => t(["Scroll up", "Posun hore", "Posun nahoru", "向上滚动", "向上捲動"]),
+            A::ScrollDown => t(["Scroll down", "Posun dole", "Posun dolů", "向下滚动", "向下捲動"]),
+            A::ScrollLeft => t(["Scroll left", "Posun vľavo", "Posun vlevo", "向左滚动", "向左捲動"]),
+            A::ScrollRight => t(["Scroll right", "Posun vpravo", "Posun vpravo", "向右滚动", "向右捲動"]),
+            A::LookAtHq => t(["View headquarters", "Pohľad na veliteľstvo", "Pohled na velitelství", "查看总部", "查看總部"]),
+            A::LookAtEvent => t(["View last message", "Pohľad na poslednú správu", "Pohled na poslední zprávu", "查看最近消息", "查看最近訊息"]),
+            A::CentreSelection => t(["Centre on selection", "Vycentrovať na výber", "Vycentrovat na výběr", "居中到所选单位", "置中到所選單位"]),
+            A::Bookmark(k) => {
+                let n = k + 1;
+                match l {
+                    1 | 2 => format!("Záložka kamery {n} (Shift: ulož)"),
+                    3 => format!("镜头书签 {n}（Shift：设置）"),
+                    4 => format!("鏡頭書籤 {n}（Shift：設定）"),
+                    _ => format!("Camera bookmark {n} (Shift: set)"),
+                }
+            }
+            A::NextUnit => t(["Next unit", "Ďalšia jednotka", "Další jednotka", "下一个单位", "下一個單位"]),
+            A::NextAdvancer => t([
+                "Next Advancer (Shift: idle)",
+                "Ďalší Advancer (Shift: nečinný)",
+                "Další Advancer (Shift: nečinný)",
+                "下一个工程车（Shift：空闲）",
+                "下一個工程車（Shift：閒置）",
+            ]),
+            A::SelectVisible => {
+                t(["Select units on screen", "Vybrať jednotky na obrazovke", "Vybrat jednotky na obrazovce", "选择屏幕上的单位", "選擇畫面上的單位"])
+            }
+            A::SelectVisibleAntiAir => t([
+                "Select anti-air on screen",
+                "Vybrať protivzdušné na obrazovke",
+                "Vybrat protivzdušné na obrazovce",
+                "选择屏幕上的防空单位",
+                "選擇畫面上的防空單位",
+            ]),
+            A::SelectVisibleGround => {
+                t(["Select others on screen", "Vybrať ostatné na obrazovke", "Vybrat ostatní na obrazovce", "选择屏幕上的其他单位", "選擇畫面上的其他單位"])
+            }
+            A::SelectAll => t(["Select all units", "Vybrať všetky jednotky", "Vybrat všechny jednotky", "选择全部单位", "選擇全部單位"]),
+            A::Scatter => t(["Scatter", "Rozptýliť", "Rozprchnout", "散开", "散開"]),
+            A::RallyOrRepair => t(["Rally point / repair", "Zhromaždisko / oprava", "Shromaždiště / oprava", "集结点 / 修理", "集結點 / 修理"]),
+            A::Turret(k) => {
+                let n = k + 1;
+                match l {
+                    1 => format!("Postaviť vežu {n}"),
+                    2 => format!("Postavit věž {n}"),
+                    3 => format!("建造炮塔 {n}"),
+                    4 => format!("建造砲塔 {n}"),
+                    _ => format!("Build turret {n}"),
+                }
+            }
+            A::StrikeBomber => t(["Air strike: Bomber", "Letecký útok: bombardér", "Letecký útok: bombardér", "空袭：轰炸机", "空襲：轟炸機"]),
+            A::StrikeAsteroid => t(["Air strike: Meteor storm", "Letecký útok: meteory", "Letecký útok: meteory", "空袭：流星雨", "空襲：流星雨"]),
+            A::StrikeCarryall => t(["Air strike: CarryAll", "Letecký útok: CarryAll", "Letecký útok: CarryAll", "空袭：运输机", "空襲：運輸機"]),
+            A::StrikeTripler => t(["Air strike: Tripler", "Letecký útok: Tripler", "Letecký útok: Tripler", "空袭：三联机", "空襲：三聯機"]),
+            A::StrikeFighter => t(["Air strike: Fighter", "Letecký útok: stíhačka", "Letecký útok: stíhačka", "空袭：战斗机", "空襲：戰鬥機"]),
+            A::TechUp => t([
+                "Buy all affordable upgrades",
+                "Kúpiť všetky dostupné vylepšenia",
+                "Koupit všechna dostupná vylepšení",
+                "购买所有可负担的升级",
+                "購買所有可負擔的升級",
+            ]),
+            A::Pause => t(["Pause", "Pauza", "Pauza", "暂停", "暫停"]),
+            A::Chat => t(["Chat", "Chat", "Chat", "聊天", "聊天"]),
+            A::KeyHelp => t(["Key help", "Pomoc ku klávesom", "Nápověda ke klávesám", "按键帮助", "按鍵說明"]),
+            A::Abandon => t(["Leave mission", "Opustiť misiu", "Opustit misi", "放弃任务", "放棄任務"]),
+            A::SpeedDown => t(["Slower game", "Pomalšia hra", "Pomalejší hra", "减慢游戏", "減慢遊戲"]),
+            A::SpeedUp => t(["Faster game", "Rýchlejšia hra", "Rychlejší hra", "加快游戏", "加快遊戲"]),
+            A::QuickSave => t([
+                "Quick save (Shift: load)",
+                "Rýchle uloženie (Shift: načítať)",
+                "Rychlé uložení (Shift: načíst)",
+                "快速存档（Shift：读取）",
+                "快速存檔（Shift：讀取）",
+            ]),
+            A::Fullscreen => t(["Full screen", "Celá obrazovka", "Celá obrazovka", "全屏", "全螢幕"]),
         }
     }
 }

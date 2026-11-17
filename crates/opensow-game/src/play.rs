@@ -98,6 +98,9 @@ pub struct Play {
     pub autosave_at: u64,
     /// Options page 2 "Turret range" (from [`Settings::turret_range`] each update): the placement ring is drawn.
     pub turret_range: bool,
+    /// Options page 2 "Swap mouse buttons" (from [`Settings::swap_buttons`] each update): orders go on the right button's click,
+    /// the left button's click where an order would go does the original right click (not in the original; docs/controls.md).
+    pub orders_on_right: bool,
     /// Options page 2 "Map zoom" (from [`Settings::zoom`] each update): the wheel zooms; off keeps the original scale.
     pub zoom_on: bool,
     /// "speed 1.5x" lines of F3 / F4 (`0x402ec0` events 0x19 / 0x1a, string 144 + `"  %.1fx"`): (world tick, text). They
@@ -267,6 +270,7 @@ impl Play {
             last_unit_click: None,
             autosave_at: 0,
             turret_range: settings.turret_range,
+            orders_on_right: settings.swap_buttons,
             zoom_on: settings.zoom,
             notes: Vec::new(),
             bookmarks: [None; 9],
@@ -798,45 +802,17 @@ impl Play {
                 return;
             }
             // The left button is the command button (exe `0x417686..0x417e47`, docs/controls.md): what a click does is what
-            // the pointer shows at the release.
+            // the pointer shows at the release. With the buttons swapped the orders go on the right button and this click does
+            // the original right click instead; selecting stays here.
+            if self.orders_on_right && self.order_pointer() {
+                self.cancel_click(p.0, p.1);
+                return;
+            }
+            if self.give_order(p) {
+                return;
+            }
             let selected = self.world.units.iter().any(|u| u.selected && u.player == 0);
             match self.pointer() {
-                Pointer::Destroy | Pointer::Repair | Pointer::Upgrade => {
-                    // the Advancer's order (`0x46b8b0` / `0x46b9f0` / `0x46bb30`)
-                    if let Some(t) = self.world.structure_at(p.0, p.1) {
-                        let advancers: Vec<u32> = self.world.player_units().filter(|u| u.selected && u.kind == kinds::ADVANCER).map(|u| u.id).collect();
-                        let mut ordered = false;
-                        for id in advancers {
-                            ordered |= self.world.order_action(id, t);
-                        }
-                        if ordered {
-                            self.ui_sounds.push(55); // tt-dest
-                            self.world.blink(t); // `0x4086a0`: the target building flashes
-                        }
-                    }
-                }
-                Pointer::Attack => {
-                    if let Some(t) = self.world.enemy_at(p.0, p.1) {
-                        if let Target::Structure(k) = t {
-                            self.world.blink(k);
-                        }
-                        self.world.order_attack_selected(t);
-                        self.ui_sounds.push(59); // unit-attack
-                    }
-                }
-                Pointer::Move if selected => {
-                    // the group go-to (`0x418220`, only with the move pointer)
-                    self.world.order_move_selected(p.0, p.1);
-                    self.ui_sounds.push(61); // unit-dest
-                                             // the click marker (`0x418457`): `click` frames 0..8, 3 ticks each, at the clicked cell's centre
-                    let (cx, cy) = (p.0.div_euclid(CELL) * CELL + CELL / 2, p.1.div_euclid(CELL) * CELL + CELL / 2);
-                    self.world.effects.push(sim::Effect {
-                        x: cx,
-                        y: cy,
-                        spec: opensow_formats::effects::AnimSpec { array: 0x5e6140, from: 0, to: 8, period: 3, repeat: 1, mode: 6 },
-                        age: 0,
-                    });
-                }
                 Pointer::Own => {
                     let unit_there = self.world.units.iter().any(|u| u.hp > 0 && u.player == 0 && (u.x - p.0 as f32).hypot(u.sprite_y() - p.1 as f32) < 22.0);
                     self.sel_building = None;
@@ -877,6 +853,63 @@ impl Play {
                 }
             }
         }
+    }
+
+    /// The pointer gives an order on a click: the Advancer's three, attack, or the go-to with a selection.
+    fn order_pointer(&self) -> bool {
+        let selected = self.world.units.iter().any(|u| u.selected && u.player == 0);
+        match self.pointer() {
+            Pointer::Destroy | Pointer::Repair | Pointer::Upgrade | Pointer::Attack => true,
+            Pointer::Move => selected,
+            _ => false,
+        }
+    }
+
+    /// The order a click at map point `p` gives by the pointer (exe `0x417686..0x417e47`); `false` when the pointer gives none.
+    fn give_order(&mut self, p: (i32, i32)) -> bool {
+        if !self.order_pointer() {
+            return false;
+        }
+        match self.pointer() {
+            Pointer::Destroy | Pointer::Repair | Pointer::Upgrade => {
+                // the Advancer's order (`0x46b8b0` / `0x46b9f0` / `0x46bb30`)
+                if let Some(t) = self.world.structure_at(p.0, p.1) {
+                    let advancers: Vec<u32> = self.world.player_units().filter(|u| u.selected && u.kind == kinds::ADVANCER).map(|u| u.id).collect();
+                    let mut ordered = false;
+                    for id in advancers {
+                        ordered |= self.world.order_action(id, t);
+                    }
+                    if ordered {
+                        self.ui_sounds.push(55); // tt-dest
+                        self.world.blink(t); // `0x4086a0`: the target building flashes
+                    }
+                }
+            }
+            Pointer::Attack => {
+                if let Some(t) = self.world.enemy_at(p.0, p.1) {
+                    if let Target::Structure(k) = t {
+                        self.world.blink(k);
+                    }
+                    self.world.order_attack_selected(t);
+                    self.ui_sounds.push(59); // unit-attack
+                }
+            }
+            Pointer::Move => {
+                // the group go-to (`0x418220`, only with the move pointer)
+                self.world.order_move_selected(p.0, p.1);
+                self.ui_sounds.push(61); // unit-dest
+                                         // the click marker (`0x418457`): `click` frames 0..8, 3 ticks each, at the clicked cell's centre
+                let (cx, cy) = (p.0.div_euclid(CELL) * CELL + CELL / 2, p.1.div_euclid(CELL) * CELL + CELL / 2);
+                self.world.effects.push(sim::Effect {
+                    x: cx,
+                    y: cy,
+                    spec: opensow_formats::effects::AnimSpec { array: 0x5e6140, from: 0, to: 8, period: 3, repeat: 1, mode: 6 },
+                    age: 0,
+                });
+            }
+            _ => {}
+        }
+        true
     }
 
     /// The sounds of selecting the whole army (the group select `0x43ad60`): `tt-click` (54) for every Advancer, `unit-select` (60) once if any other unit joined.
@@ -945,6 +978,16 @@ impl Play {
         if self.placing.take().is_some() | self.strike.take().is_some() | self.rallying.take().is_some() | self.dev_spawn.take().is_some() {
             return;
         }
+        // swapped buttons: the right click gives the order the left one gives in the original
+        if self.orders_on_right && self.give_order((mx, my)) {
+            return;
+        }
+        self.cancel_click(mx, my);
+    }
+
+    /// The original right click on the map at map point `(mx, my)` outside the placement modes (`0x417934`): with an Advancer
+    /// selected a click on an own building toggles repair mode (`0x417964`), anything else deselects (`0x43ad60`).
+    fn cancel_click(&mut self, mx: i32, my: i32) {
         if self.world.player_units().any(|u| u.selected && u.kind == kinds::ADVANCER)
             && self.world.structure_at(mx, my).is_some_and(|t| self.world.structures[t].owner == Owner::Player)
         {
@@ -1128,6 +1171,7 @@ impl Play {
     /// Advances real time by `dt` seconds: scrolls the camera and runs as many game ticks as are due.
     pub fn update(&mut self, dt: f32, settings: &Settings, w: usize, h: usize) {
         self.turret_range = settings.turret_range;
+        self.orders_on_right = settings.swap_buttons;
         self.zoom_on = settings.zoom;
         if !self.zoom_on {
             self.fixed_scale(w, h);
