@@ -22,7 +22,7 @@ nothing. The GPU replay is OpenSOW's too (docs/game.md); the exe draws with its 
 - **Explosion glow**: an additive effect sprite (`Blit::Additive`, 64..24 000 px: explosions, muzzle flashes) also lights the
   ground: a radial coverage grid centred on the sprite's brightness-weighted centre, radius 1.1x its size, colour = its mean colour
   pulled 40 % towards warm orange, peak alpha `min(150, 300 * mean brightness)`. Clouds (big frames) and dark sprites are skipped.
-- **Turret shadows** (not in the exe, off by default; `turret_shadows` in `opensow.cfg`): in the original only the A.A. turret casts a shadow. The
+- **Turret shadows** (not in the exe, on by default; `turret_shadows` in `opensow.cfg`): in the original only the A.A. turret casts a shadow. The
   sentry bases' `builds\shadow\sentry01..03.sha` have only empty (0x0) frames and `units\tur_01/02/03/05_*.sha` do not exist (the
   tops' shadows are `units\<top>_<team>.sha`, present only for `2AA`; same in Warmonger). With the switch on, every turret part (object
   kinds 25..29, base and top) without shadow art gets its own silhouette drawn as a shadow, moved right and up by `turret_shadow_offset`

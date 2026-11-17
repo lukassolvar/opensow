@@ -47,7 +47,7 @@ pub struct Extra {
 
 impl Default for Extra {
     fn default() -> Self {
-        Extra { enhance: true, soft_shadows: true, contact_shadows: true, glow: true, turret_shadows: false, sound: true, turret_range: true, zoom: true }
+        Extra { enhance: true, soft_shadows: true, contact_shadows: true, glow: true, turret_shadows: true, sound: true, turret_range: true, zoom: true }
     }
 }
 

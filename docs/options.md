@@ -108,7 +108,7 @@ A green arrow at the right edge of the exe's page (design 596,227) leads to page
 | Soft shadows | `Extra::soft_shadows` (on) | blurred shadow edges (docs/fx.md) |
 | Contact shadows | `Extra::contact_shadows` (on) | dark halo around buildings and under units (docs/fx.md) |
 | Explosion glow | `Extra::glow` (on) | explosions and muzzle flashes light the ground (docs/fx.md); the three effects are forced off by `--no-fx` / `OPENSOW_FX=0` |
-| Turret shadows | `Extra::turret_shadows` (**off**) | every turret casts a shadow, not only the A.A. turret (docs/fx.md) |
+| Turret shadows | `Extra::turret_shadows` (on) | every turret casts a shadow, not only the A.A. turret (docs/fx.md) |
 | Enhanced sound | `Extra::sound` (on) | sinc resampling, 2/3 ms fades and a limiter on the effects mix (docs/audio.md, "Sound enhancement"); `--no-sound-enhance` / `OPENSOW_SOUND_ENHANCE=0` force it off |
 | Turret range | `Extra::turret_range` (on) | while a turret is being placed, the cells its gun reaches are tinted (docs/hotkeys.md); reaches the play screen through `Settings::turret_range` |
 | Map zoom | `Extra::zoom` (on) | the mouse wheel zooms the mission map (docs/game.md, "Camera zoom"); off = the original fixed scale 1 (`Play::fixed_scale`: the wheel is ignored, the view returns to 1 around its middle, or to the least zoom that fills a window larger than the map); reaches the play screen through `Settings::zoom`. The map editor keeps its zoom |

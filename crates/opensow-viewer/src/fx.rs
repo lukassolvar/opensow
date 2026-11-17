@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 static SOFT_SHADOWS: AtomicBool = AtomicBool::new(true);
 static CONTACT: AtomicBool = AtomicBool::new(true);
 static GLOW: AtomicBool = AtomicBool::new(true);
-static TURRET_SHADOWS: AtomicBool = AtomicBool::new(false);
+static TURRET_SHADOWS: AtomicBool = AtomicBool::new(true);
 
 /// Switches (Options page 2; `--no-fx` forces all off).
 pub fn set(soft_shadows: bool, contact: bool, glow: bool, turret_shadows: bool) {

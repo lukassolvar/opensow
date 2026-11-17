@@ -21,7 +21,7 @@ pub const EXTRAS: [(&str, bool); 8] = [
     ("soft_shadows", true),
     ("contact_shadows", true),
     ("explosion_glow", true),
-    ("turret_shadows", false),
+    ("turret_shadows", true),
     ("enhance_sound", true),
     ("turret_range", true),
     ("map_zoom", true),
@@ -225,8 +225,9 @@ mod tests {
         assert_eq!(s.switch(Field::Radar), Some(true));
         s.toggle(Field::Radar);
         assert_eq!(s.switch(Field::Radar), Some(false));
+        assert_eq!(s.switch(Field::Extra(4)), Some(true), "turret shadows are on by default");
         s.toggle(Field::Extra(4));
-        assert_eq!(s.switch(Field::Extra(4)), Some(true));
+        assert_eq!(s.switch(Field::Extra(4)), Some(false));
     }
 
     #[test]
