@@ -1,5 +1,5 @@
 //! opensow-launcher [--screenshot out.png [--size WxH] [--page home|original|warmonger|settings] [--tab launcher|game|extras]
-//!                   [--lang CZ] [--original DIR] [--warmonger DIR] [--hover X,Y] [--message TEXT] [--update STATE]]
+//!                   [--lang CZ] [--original DIR] [--warmonger DIR] [--hover X,Y] [--message TEXT] [--update STATE] [--time SECS]]
 //!
 //! Window with a sidebar (home, State of War, Warmonger, settings): locate each game, start it, choose the language and edit the
 //! game's settings (docs/launcher.md). Folders and language are saved at once to `launcher.cfg` (formats::launcher), which the game
@@ -19,11 +19,12 @@ use settings::GameSettings;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 use ui::{Action, App, Page, Slot, Tab, UpdateState};
 use update::{Fail, Release};
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseButton, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
+use winit::event::{ElementState, MouseButton, StartCause, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
 
 enum UserEvent {
@@ -41,6 +42,10 @@ struct Launcher {
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
     proxy: EventLoopProxy<UserEvent>,
+    /// When the window opened; the update badge's pulse runs on it.
+    start: Instant,
+    /// When the next animation frame is due.
+    next_frame: Instant,
 }
 
 /// Ask the system for a folder (blocking; runs on its own thread).
@@ -114,15 +119,22 @@ impl Launcher {
     fn act(&mut self, a: Action) {
         match a {
             Action::Nav(p) => {
+                if self.app.page != p {
+                    self.app.begin_fade(ui::FadeKind::Page);
+                }
                 self.app.page = p;
                 self.app.refresh();
                 return;
             }
             Action::Tab(t) => {
+                if self.app.tab != t {
+                    self.app.begin_fade(ui::FadeKind::Page);
+                }
                 self.app.tab = t;
                 return;
             }
             Action::Lang(l) => {
+                self.app.begin_fade(ui::FadeKind::Swap);
                 self.app.settings.language = l;
                 // the page follows at once; the window's title too
                 if let Some(w) = &self.window {
@@ -172,9 +184,16 @@ impl Launcher {
                 return;
             }
             Action::ReleaseNotes => {
-                if let UpdateState::Available(r) | UpdateState::Downloading(r, _) | UpdateState::Installed(r) = &self.app.update {
-                    update::open_url(&r.url);
+                match &self.app.update {
+                    UpdateState::Available(r) | UpdateState::Downloading(r, _) | UpdateState::Installed(r) => update::open_url(&r.url),
+                    _ => update::open_url(&update::releases_url()),
                 }
+                return;
+            }
+            Action::Updates => {
+                self.app.begin_fade(ui::FadeKind::Page);
+                self.app.page = Page::Settings;
+                self.app.tab = Tab::Launcher;
                 return;
             }
             Action::Restart => {
@@ -207,7 +226,14 @@ impl Launcher {
         self.app.update = UpdateState::Checking;
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
-            let _ = proxy.send_event(UserEvent::Checked(update::fetch_latest()));
+            // a newer release brings its notes in the other languages too
+            let r = update::fetch_latest().map(|mut r| {
+                if r.is_newer() {
+                    update::fetch_translations(&mut r);
+                }
+                r
+            });
+            let _ = proxy.send_event(UserEvent::Checked(r));
         });
     }
 
@@ -259,6 +285,8 @@ impl ApplicationHandler<UserEvent> for Launcher {
         let ctx = softbuffer::Context::new(window.clone()).expect("context");
         self.surface = Some(softbuffer::Surface::new(&ctx, window.clone()).expect("surface"));
         self.window = Some(window);
+        self.app.time = self.start.elapsed().as_secs_f32();
+        self.app.intro();
     }
 
     fn user_event(&mut self, _: &ActiveEventLoop, ev: UserEvent) {
@@ -270,6 +298,11 @@ impl ApplicationHandler<UserEvent> for Launcher {
                 }
             }
             UserEvent::Checked(r) => {
+                // the home page's card changes to the new release's notes: fade
+                if matches!(r, Ok(ref r) if r.is_newer()) {
+                    self.app.time = self.start.elapsed().as_secs_f32();
+                    self.app.begin_fade(ui::FadeKind::Swap);
+                }
                 self.app.update = match r {
                     Ok(r) if r.is_newer() => UpdateState::Available(r),
                     Ok(_) => UpdateState::UpToDate,
@@ -293,7 +326,36 @@ impl ApplicationHandler<UserEvent> for Launcher {
         }
     }
 
+    /// While something moves, frames at `App::frame_interval`; otherwise the launcher sleeps until an event comes.
+    fn new_events(&mut self, _: &ActiveEventLoop, cause: StartCause) {
+        if matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Init) {
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+    }
+
+    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        // frames keep their rhythm: the next one is due one interval after the last was due, not after it finished drawing
+        el.set_control_flow(match self.app.frame_interval() {
+            Some(s) => {
+                let now = Instant::now();
+                let step = Duration::from_secs_f32(s);
+                if self.next_frame <= now {
+                    self.next_frame = (self.next_frame + step).max(now + Duration::from_millis(2));
+                }
+                ControlFlow::WaitUntil(self.next_frame)
+            }
+            None => {
+                self.next_frame = Instant::now();
+                ControlFlow::Wait
+            }
+        });
+    }
+
     fn window_event(&mut self, el: &ActiveEventLoop, _: WindowId, ev: WindowEvent) {
+        // the moment this event happens, for the animations it starts
+        self.app.time = self.start.elapsed().as_secs_f32();
         match ev {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::CursorMoved { position, .. } => {
@@ -348,12 +410,21 @@ fn write_png(path: &str, buf: &[u32], w: usize, h: usize) {
 fn demo_update(state: &str) -> UpdateState {
     let asset = |n: &str| update::Asset { name: n.into(), browser_download_url: String::new(), size: 40_000_000 };
     let r = Release {
-        tag: "v0.2.0".into(),
-        version: (0, 2, 0),
+        tag: "v0.3.0".into(),
+        version: (0, 3, 0),
         name: "Skirmish map editor".into(),
         url: String::new(),
         archive: Some(asset("opensow.zip")),
         checksum: Some(asset("opensow.zip.sha256")),
+        notes: [
+            "## New\n- **Network play over LAN.**\n- **Replays of skirmish games.**\n## Fixed\n- **Carryalls pick up the right unit.**\n- **Music volume is kept.**\n- **Faster map loading.**",
+            "## Novinky\n- **Hra po lokálnej sieti.**\n- **Záznamy potýčok.**\n## Opravy\n- **Transportéry berú správnu jednotku.**\n- **Hlasitosť hudby sa pamätá.**\n- **Rýchlejšie načítanie máp.**",
+            "## Novinky\n- **Hra po místní síti.**\n- **Záznamy potyček.**\n## Opravy\n- **Transportéry berou správnou jednotku.**\n- **Hlasitost hudby se pamatuje.**\n- **Rychlejší načítání map.**",
+            "",
+            "",
+        ]
+        .map(update::parse_notes),
+        translations: vec![],
     };
     match state {
         "checking" => UpdateState::Checking,
@@ -394,12 +465,14 @@ fn main() {
         println!("repo {} platform {} this version {}", update::repo(), update::platform(), update::VERSION);
         match update::fetch_latest() {
             Ok(r) => println!(
-                "latest {} ({}) newer {} archive {:?} checksum {:?}",
+                "latest {} ({}) newer {} archive {:?} checksum {:?} notes {} translated {:?}",
                 r.tag,
                 r.name,
                 r.is_newer(),
                 r.archive.map(|a| a.name),
-                r.checksum.map(|a| a.name)
+                r.checksum.map(|a| a.name),
+                r.notes[0].len(),
+                r.translations.iter().map(|(_, a)| a.name.clone()).collect::<Vec<_>>()
             ),
             Err(f) => println!("{f:?}"),
         }
@@ -434,6 +507,8 @@ fn main() {
         if let Some(u) = get("--update") {
             app.update = demo_update(&u);
         }
+        // the moment of the update badge's pulse (seconds)
+        app.time = get("--time").and_then(|t| t.parse().ok()).unwrap_or(0.0);
         app.page = match get("--page").as_deref() {
             Some("original") => Page::Game(Slot::Original),
             Some("warmonger") => Page::Game(Slot::Warmonger),
@@ -465,7 +540,14 @@ fn main() {
         desktop::install();
     }
     let el = EventLoop::<UserEvent>::with_user_event().build().expect("event loop");
-    let mut l = Launcher { app: App::new(settings, game, data_dir), window: None, surface: None, proxy: el.create_proxy() };
+    let mut l = Launcher {
+        app: App::new(settings, game, data_dir),
+        window: None,
+        surface: None,
+        proxy: el.create_proxy(),
+        start: Instant::now(),
+        next_frame: Instant::now(),
+    };
     if l.app.settings.check_updates {
         l.check_update();
     }
