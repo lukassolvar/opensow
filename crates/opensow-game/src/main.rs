@@ -39,6 +39,7 @@ mod hud;
 mod infobox;
 mod ingame;
 mod intro;
+mod keybinds;
 mod lands;
 mod mapeditor_ui;
 mod menu;
@@ -110,6 +111,9 @@ struct Game {
     numpad: bool,
     /// The digit of the physical key being handled (top row 1-9, or numpad 0-9), whatever the layout: the original reads scan codes.
     digit: Option<u8>,
+    /// The physical key of the event being handled (set by the window; tests and headless runs leave it `None` and the
+    /// logical key is mapped, `keybinds::code_of`).
+    code: Option<winit::keyboard::KeyCode>,
     /// Game speed factor `[0x49ceec]` (F3 / F4, 0.5..3.0 in steps of 0.5; it stays from mission to mission).
     game_speed: f32,
     settings: Settings,

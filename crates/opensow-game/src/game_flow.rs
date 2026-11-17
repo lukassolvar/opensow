@@ -10,6 +10,7 @@ impl Game {
             assets,
             numpad: false,
             digit: None,
+            code: None,
             game_speed: 1.0,
             settings: Settings::default(),
             levels,
