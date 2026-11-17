@@ -767,7 +767,7 @@ impl Tr {
     }
 
     /// Page 2's rows in [`crate::options::OWN_ROWS`] order: (label, one-line explanation).
-    pub fn option_rows(self) -> [(&'static str, &'static str); 8] {
+    pub fn option_rows(self) -> [(&'static str, &'static str); 9] {
         match self.0 {
             1 => [
                 ("Vylepšené textúry", "Vyhladí jednotky, budovy a terén pri priblížení"),
@@ -778,6 +778,7 @@ impl Tr {
                 ("Vylepšený zvuk", "Čistejšie a plynulejšie efekty, reč a hudba"),
                 ("Dosah veží", "Pri umiestňovaní veže ukáže, kam dostrelí"),
                 ("Priblíženie mapy", "Približovanie kolieskom myši (pôvodne pevná mierka)"),
+                ("Prehodiť tlačidlá myši", "Rozkazy na presun a útok pravým tlačidlom"),
             ],
             2 => [
                 ("Vylepšené textury", "Vyhladí jednotky, budovy a terén při přiblížení"),
@@ -788,6 +789,7 @@ impl Tr {
                 ("Vylepšený zvuk", "Čistší a plynulejší efekty, řeč a hudba"),
                 ("Dosah věží", "Při umísťování věže ukáže, kam dostřelí"),
                 ("Přiblížení mapy", "Přibližování kolečkem myši (původně pevné měřítko)"),
+                ("Prohodit tlačítka myši", "Rozkazy k přesunu a útoku pravým tlačítkem"),
             ],
             3 => [
                 ("增强纹理", "放大时平滑单位、建筑和地面"),
@@ -798,6 +800,7 @@ impl Tr {
                 ("增强音效", "更清晰、更平滑的音效、语音和音乐"),
                 ("炮塔射程", "放置炮塔时显示其射程"),
                 ("地图缩放", "用鼠标滚轮缩放（原版为固定比例）"),
+                ("交换鼠标按键", "用右键下达移动和攻击命令"),
             ],
             4 => [
                 ("增強紋理", "放大時平滑單位、建築和地面"),
@@ -808,6 +811,7 @@ impl Tr {
                 ("增強音效", "更清晰、更平滑的音效、語音和音樂"),
                 ("砲塔射程", "放置砲塔時顯示其射程"),
                 ("地圖縮放", "用滑鼠滾輪縮放（原版為固定比例）"),
+                ("交換滑鼠按鍵", "用右鍵下達移動和攻擊命令"),
             ],
             _ => crate::options::OWN_ROWS,
         }

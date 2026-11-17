@@ -67,6 +67,8 @@ pub struct Settings {
     pub turret_range: bool,
     /// Options page 2 "Map zoom": the mouse wheel zooms the mission map; off = the original fixed scale (not in the original).
     pub zoom: bool,
+    /// Options page 2 "Swap mouse buttons": orders go on the right click, selecting stays on the left (not in the original; docs/controls.md).
+    pub swap_buttons: bool,
 }
 
 impl Default for Settings {
@@ -83,6 +85,7 @@ impl Default for Settings {
             cloud_detail: 0,
             turret_range: true,
             zoom: true,
+            swap_buttons: false,
         }
     }
 }
