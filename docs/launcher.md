@@ -20,7 +20,7 @@ Folders are set by Locate game (system folder dialog: osascript / zenity / Power
 ## Updates
 Settings → Launcher → *Updates* shows this launcher's version (`CARGO_PKG_VERSION` of `opensow-launcher`), a **Check for updates** button and the switch **Check when the launcher starts** (on by default; `check_updates=0` in `launcher.cfg`). Code: `update.rs`. The check asks GitHub's public API for `/repos/lukassolvar/opensow/releases/latest` (`update::REPO`; `OPENSOW_UPDATE_REPO=owner/name` points elsewhere); a newer version shows "Version X is available: <title>", **Download and install X** and **Release notes** (opens the release page), and the sidebar's Settings entry says "Update X". While a private repository or one without releases answers 404, the page says "No release has been published yet". The check at start is quiet: its result only shows on that page and in the sidebar.
 
-**What a release must look like** (nothing builds these yet):
+**What a release must look like** (built by `.github/workflows/release.yml`, docs/release.md):
 - tag `vX.Y.Z` (higher than the crates' version; drafts and pre-releases are ignored, and `-beta` style tags are not read);
 - per system one archive whose name contains the platform `<os>-<arch>` as Rust names them (`macos-aarch64`, `macos-x86_64`, `windows-x86_64`, `linux-x86_64`, `linux-aarch64`; `update::platform()`), `.zip` or `.tar.gz`, holding `opensow-launcher` and `opensow-game` (`.exe` on Windows) at the top or in one folder, e.g. `opensow-0.2.0-macos-aarch64.zip`;
 - next to each archive `<archive>.sha256` with its SHA-256 in hex (`shasum -a 256` / `sha256sum` output). Without it the launcher does not install; a mismatch installs nothing.
