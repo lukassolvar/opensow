@@ -4,6 +4,8 @@
 // Writes into OUT_DIR:
 // - `icon64.rgba`: 64x64 RGBA for the window icon (`include_bytes!` in the program; Windows title bar and taskbar,
 //   X11; macOS ignores window icons and shows the bundle's `.icns`);
+// - `icon64.png`, `icon512.png`: what the launcher installs into the Linux icon theme with its `.desktop` file
+//   (desktop.rs);
 // - on Windows targets `OpenSOW.ico` (PNG entries 16..256) linked into the `.exe` as resource 1, so Explorer, the
 //   taskbar and shortcuts show it.
 
@@ -98,7 +100,10 @@ fn build_icon(icon_png_path: &Path) {
     let bytes = std::fs::read(icon_png_path).expect("read icon.png");
     let (n, rgba) = icon_decode(&bytes);
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
-    std::fs::write(out.join("icon64.rgba"), icon_scaled(&rgba, n, 64)).expect("write icon64.rgba");
+    let icon64 = icon_scaled(&rgba, n, 64);
+    std::fs::write(out.join("icon64.rgba"), &icon64).expect("write icon64.rgba");
+    std::fs::write(out.join("icon64.png"), icon_png(&icon64, 64)).expect("write icon64.png");
+    std::fs::write(out.join("icon512.png"), icon_png(&icon_scaled(&rgba, n, 512), 512)).expect("write icon512.png");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let ico = out.join("OpenSOW.ico");
         std::fs::write(&ico, icon_ico(n, &rgba, &[16, 20, 24, 32, 40, 48, 64, 128, 256])).expect("write OpenSOW.ico");

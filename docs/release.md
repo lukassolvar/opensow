@@ -38,9 +38,13 @@ new for OpenSOW, not one of the game's sprites. Each system gets it its own way:
   `OpenSOW.ico` (PNG entries 16 to 256) from `icon.png` and link it into the `.exe` as resource 1 (`embed-resource`: `rc.exe`
   on Windows, `llvm-rc` when cross-compiling), so Explorer, the taskbar and shortcuts show it; both windows also set it as
   their window icon.
-- Linux: both windows set it as their window icon (X11; title bars, task switchers), and the archive carries it as
-  `opensow.png` for a `.desktop` file. Wayland desktops take icons only from installed `.desktop` files, which the archive
-  does not install.
+- Linux: both windows set it as their window icon (X11) and the app id / X11 class `opensow`. Wayland desktops take an
+  application's icon and name only from an installed `.desktop` file whose name matches the app id, so the launcher of a
+  release file (not a `dev` build, which would point it at the target folder) installs one at every start (not in the exe;
+  `desktop.rs`): `$XDG_DATA_HOME/applications/opensow.desktop` (default `~/.local/share`), whose `Exec` is the launcher's
+  own path, and the icon at 64 and 512 px in `icons/hicolor/*/apps/opensow.png`. A file is written only when it differs,
+  so moving the folder updates the entry on the next start; deleting the folder leaves the entry behind. The game's window
+  has the same app id, so it shows under the same entry and icon. The archive also carries the icon as `opensow.png`.
 
 The `dist` profile (`Cargo.toml`) is `release` with thin LTO and stripped symbols.
 

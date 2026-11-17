@@ -320,27 +320,23 @@ fn in_star(x: f32, y: f32, r: f32, rot: f32) -> bool {
     inside
 }
 
-/// The launcher's icon: a tank on a transparent background, 256x256 RGBA (`art/tank.png`).
-const ICON_PNG: &[u8] = include_bytes!("../art/tank.png");
+/// The application icon, 64x64 straight RGBA (build.rs makes it from `art/icon.png`, docs/release.md "Icons"): drawn in
+/// the sidebar header and on the home page, and the window icon.
+pub const ICON_RGBA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon64.rgba"));
+const ICON_SIDE: usize = 64;
 
-/// The icon decoded once: (side, premultiplied RGBA as f32).
+/// The icon as (side, premultiplied RGBA as f32), converted once.
 fn icon() -> &'static (usize, Vec<[f32; 4]>) {
     static ICON: std::sync::OnceLock<(usize, Vec<[f32; 4]>)> = std::sync::OnceLock::new();
     ICON.get_or_init(|| {
-        let decoded = png::Decoder::new(ICON_PNG).read_info().ok().and_then(|mut r| {
-            let mut buf = vec![0; r.output_buffer_size()];
-            let info = r.next_frame(&mut buf).ok()?;
-            (info.color_type == png::ColorType::Rgba && info.width == info.height).then_some((info.width as usize, buf))
-        });
-        let Some((n, buf)) = decoded else { return (1, vec![[0.0; 4]]) };
-        let px = buf
+        let px = ICON_RGBA
             .chunks_exact(4)
             .map(|c| {
                 let a = c[3] as f32 / 255.0;
                 [c[0] as f32 * a, c[1] as f32 * a, c[2] as f32 * a, a]
             })
             .collect();
-        (n, px)
+        (ICON_SIDE, px)
     })
 }
 
@@ -1747,7 +1743,8 @@ mod tests {
         let px = icon_rgba(64);
         let alpha = |x: usize, y: usize| px[(y * 64 + x) * 4 + 3];
         assert_eq!((alpha(0, 0), alpha(63, 0), alpha(0, 63), alpha(63, 63)), (0, 0, 0, 0), "transparent corners");
-        assert_eq!(alpha(32, 32), 255, "the tank in the middle");
+        assert_eq!(alpha(32, 32), 255, "opaque in the middle");
+        assert_eq!(ICON_RGBA.len(), ICON_SIDE * ICON_SIDE * 4);
     }
 
     #[test]

@@ -8,6 +8,7 @@
 // Windows: release builds (without the `dev` feature) open no console window behind the program (docs/release.md).
 #![cfg_attr(all(windows, not(feature = "dev")), windows_subsystem = "windows")]
 
+mod desktop;
 mod settings;
 mod text;
 mod ui;
@@ -225,8 +226,8 @@ impl ApplicationHandler<UserEvent> for Launcher {
             .with_title(self.app.tx().window_title())
             .with_inner_size(winit::dpi::LogicalSize::new(1000.0, 620.0))
             .with_min_inner_size(winit::dpi::LogicalSize::new(640.0, 420.0));
-        let icon = winit::window::Icon::from_rgba(WINDOW_ICON.to_vec(), 64, 64).ok();
-        let attrs = attrs.with_window_icon(icon);
+        let icon = winit::window::Icon::from_rgba(ui::ICON_RGBA.to_vec(), 64, 64).ok();
+        let attrs = with_app_id(attrs.with_window_icon(icon), desktop::APP_ID);
         let window = Rc::new(el.create_window(attrs).expect("window"));
         let ctx = softbuffer::Context::new(window.clone()).expect("context");
         self.surface = Some(softbuffer::Surface::new(&ctx, window.clone()).expect("surface"));
@@ -343,9 +344,17 @@ fn demo_update(state: &str) -> UpdateState {
 /// headless `--screenshot` and `--icon-png`. `--check-update` stays (it helps with update reports).
 const DEV: bool = cfg!(feature = "dev");
 
-/// The application icon at 64x64 RGBA for the window (made by build.rs from `art/icon.png`; macOS ignores window
-/// icons and shows the bundle's).
-const WINDOW_ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon64.rgba"));
+/// The Wayland app id and X11 class, so the desktop matches the window to `opensow.desktop` and its icon (desktop.rs).
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly"))]
+fn with_app_id(attrs: winit::window::WindowAttributes, id: &str) -> winit::window::WindowAttributes {
+    let attrs = winit::platform::wayland::WindowAttributesExtWayland::with_name(attrs, id, id);
+    winit::platform::x11::WindowAttributesExtX11::with_name(attrs, id, id)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly")))]
+fn with_app_id(attrs: winit::window::WindowAttributes, _id: &str) -> winit::window::WindowAttributes {
+    attrs
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -423,6 +432,10 @@ fn main() {
     }
     if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())) {
         update::remove_leftovers(&dir);
+    }
+    // release files only: a development build would point the desktop entry at the target folder
+    if !DEV {
+        desktop::install();
     }
     let el = EventLoop::<UserEvent>::with_user_event().build().expect("event loop");
     let mut l = Launcher { app: App::new(settings, game, data_dir), window: None, surface: None, proxy: el.create_proxy() };

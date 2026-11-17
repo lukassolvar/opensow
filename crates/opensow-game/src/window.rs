@@ -107,6 +107,19 @@ impl App {
 /// ignores window icons and shows the bundle's).
 const WINDOW_ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon64.rgba"));
 
+/// The Wayland app id and X11 class `opensow`, the launcher's: the desktop shows the game under the launcher's
+/// `opensow.desktop` entry and icon (opensow-launcher `desktop.rs`).
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly"))]
+fn with_app_id(attrs: winit::window::WindowAttributes) -> winit::window::WindowAttributes {
+    let attrs = winit::platform::wayland::WindowAttributesExtWayland::with_name(attrs, "opensow", "opensow");
+    winit::platform::x11::WindowAttributesExtX11::with_name(attrs, "opensow", "opensow")
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly")))]
+fn with_app_id(attrs: winit::window::WindowAttributes) -> winit::window::WindowAttributes {
+    attrs
+}
+
 impl ApplicationHandler for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -115,7 +128,7 @@ impl ApplicationHandler for App {
         let c = &self.game.options.cfg;
         self.window_res = (c.width, c.height);
         let icon = winit::window::Icon::from_rgba(WINDOW_ICON.to_vec(), 64, 64).ok();
-        let mut attrs = Window::default_attributes().with_title("OpenSOW").with_window_icon(icon);
+        let mut attrs = with_app_id(Window::default_attributes().with_title("OpenSOW").with_window_icon(icon));
         if !self.game.options.native() {
             let (rw, rh) = self.size();
             attrs = attrs.with_inner_size(LogicalSize::new(rw as f64, rh as f64));
