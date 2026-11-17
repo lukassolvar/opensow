@@ -190,6 +190,10 @@ impl Launcher {
                 }
                 return;
             }
+            Action::Repo => {
+                update::open_url(&update::repo_url());
+                return;
+            }
             Action::Updates => {
                 self.app.begin_fade(ui::FadeKind::Page);
                 self.app.page = Page::Settings;

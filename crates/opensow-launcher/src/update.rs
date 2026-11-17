@@ -182,6 +182,11 @@ pub fn fetch_translations(r: &mut Release) {
     }
 }
 
+/// The repository's page (the sidebar's GitHub link).
+pub fn repo_url() -> String {
+    format!("https://github.com/{}", repo())
+}
+
 /// The releases page of the repository.
 pub fn releases_url() -> String {
     format!("https://github.com/{}/releases", repo())

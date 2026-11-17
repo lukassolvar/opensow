@@ -74,6 +74,8 @@ pub enum Action {
     ReleaseNotes,
     /// The sidebar header while an update waits: Settings, Launcher tab.
     Updates,
+    /// Open the project's GitHub page.
+    Repo,
     /// Start the new launcher and close this one.
     Restart,
     /// The "check when the launcher starts" switch.
@@ -136,6 +138,8 @@ pub enum Style {
     Header,
     /// Small text link.
     Link,
+    /// The sidebar's link to the project's GitHub page.
+    SideLink,
 }
 
 pub struct Button {
@@ -720,6 +724,12 @@ impl App {
         Rect { x: 10.0, y, w: SIDE - 20.0, h: 54.0 }
     }
 
+    /// The sidebar's GitHub link, above Settings.
+    fn repo_rect() -> Rect {
+        let s = Self::nav_rect(3);
+        Rect { x: s.x, y: s.y - 40.0, w: s.w, h: 32.0 }
+    }
+
     /// The play button's place (bottom right of the page).
     fn play_rect(&self) -> Rect {
         Rect { x: self.view.pw - 36.0 - 220.0, y: PAGE_H - 36.0 - 60.0, w: 220.0, h: 60.0 }
@@ -826,6 +836,7 @@ impl App {
         if self.new_release().is_some() {
             push(Rect { x: 8.0, y: 10.0, w: SIDE - 16.0, h: 60.0 }, Action::Updates, "", Style::Header, false, true);
         }
+        push(Self::repo_rect(), Action::Repo, "GitHub", Style::SideLink, false, true);
         let pw = self.view.pw;
         match self.page {
             Page::Home => {
@@ -1106,7 +1117,7 @@ impl App {
         let mut c = Canvas { buf, w, h, scale: v.scale, ox: v.ox, oy: v.oy };
         let tx = self.tx();
         // the sidebar's highlights go under its labels, every other button over the page
-        let (nav, rest): (Vec<Button>, Vec<Button>) = self.buttons().into_iter().partition(|b| matches!(b.style, Style::Nav | Style::Header));
+        let (nav, rest): (Vec<Button>, Vec<Button>) = self.buttons().into_iter().partition(|b| matches!(b.style, Style::Nav | Style::Header | Style::SideLink));
         // the selected entry's highlight slides from the old one
         if let Some(i) = [Page::Home, Page::Game(Slot::Original), Page::Game(Slot::Warmonger), Page::Settings].iter().position(|p| *p == self.page) {
             let r = Self::nav_rect(i);
@@ -1548,6 +1559,23 @@ impl App {
                 if k > 0.0 {
                     c.rrect_a(r.x, r.y, r.w, r.h, 8.0, SIDE_HOVER, ka);
                 }
+            }
+            Style::SideLink => {
+                if k > 0.0 {
+                    c.rrect_a(r.x, r.y, r.w, r.h, 8.0, SIDE_HOVER, ka);
+                }
+                // a code sign `</>`, the label and an arrow pointing out of the launcher; they lean right on hover
+                let col = mix(DIM, TEXT, ka);
+                let (cx, cy) = (r.x + 26.0 + 2.0 * k, r.y + r.h / 2.0);
+                c.stroke(&[(cx - 4.5, cy - 5.0), (cx - 9.5, cy), (cx - 4.5, cy + 5.0)], 1.8, col);
+                c.stroke(&[(cx + 4.5, cy - 5.0), (cx + 9.5, cy), (cx + 4.5, cy + 5.0)], 1.8, col);
+                c.stroke(&[(cx + 1.8, cy - 6.0), (cx - 1.8, cy + 6.0)], 1.6, col);
+                let lx = r.x + 50.0 + 3.0 * k;
+                self.text(c, &b.label, lx, r.y + (r.h - 13.5) / 2.0 - 1.0, 13.5, col, false);
+                let ax = lx + self.width(&b.label, 13.5, false) + 7.0 + 2.0 * k;
+                let ay = cy - 2.0 * k;
+                c.stroke(&[(ax, ay + 3.5), (ax + 6.0, ay - 2.5)], 1.5, col);
+                c.stroke(&[(ax + 1.5, ay - 2.5), (ax + 6.0, ay - 2.5), (ax + 6.0, ay + 2.0)], 1.5, col);
             }
             Style::Link => {
                 let s = self.fit(&b.label, 12.5, r.w);
