@@ -20,6 +20,11 @@ impl Tx {
         })
     }
 
+    /// 0 English, 1 Slovak, 2 Czech, 3 Chinese (simplified), 4 Chinese (traditional).
+    pub fn index(self) -> usize {
+        self.0
+    }
+
     pub fn english() -> Tx {
         Tx(0)
     }
@@ -77,14 +82,61 @@ impl Tx {
         self.pick(["optional", "voliteľné", "volitelné", "可选", "可選"])
     }
 
-    pub fn tagline(self) -> &'static str {
-        self.pick([
-            "State of War, rebuilt for today",
-            "State of War v novom prevedení",
-            "State of War v novém provedení",
-            "重制版 State of War",
-            "重製版 State of War",
-        ])
+    /// The home page's notes card, up to date: "What's new in 0.2.0".
+    pub fn whats_new(self, v: &str) -> String {
+        match self.0 {
+            1 => format!("Novinky vo verzii {v}"),
+            2 => format!("Novinky ve verzi {v}"),
+            3 => format!("{v} 版本新内容"),
+            4 => format!("{v} 版本新內容"),
+            _ => format!("What's new in {v}"),
+        }
+    }
+
+    /// The notes card when a newer release is found.
+    pub fn update_ready(self, v: &str) -> String {
+        match self.0 {
+            1 => format!("K dispozícii je aktualizácia {v}"),
+            2 => format!("Je k dispozici aktualizace {v}"),
+            3 => format!("有可用更新 {v}"),
+            4 => format!("有可用更新 {v}"),
+            _ => format!("Update {v} available"),
+        }
+    }
+
+    /// The notes card's install button.
+    pub fn install_short(self, v: &str) -> String {
+        match self.0 {
+            1 => format!("Nainštalovať {v}"),
+            2 => format!("Nainstalovat {v}"),
+            3 => format!("安装 {v}"),
+            4 => format!("安裝 {v}"),
+            _ => format!("Install {v}"),
+        }
+    }
+
+    /// Notes lines that did not fit the card.
+    pub fn more(self, n: usize) -> String {
+        match self.0 {
+            1 => format!("+{n} ďalších"),
+            2 => format!("+{n} dalších"),
+            3 => format!("还有 {n} 项"),
+            4 => format!("還有 {n} 項"),
+            _ => format!("+{n} more"),
+        }
+    }
+
+    pub fn all_notes(self) -> &'static str {
+        self.pick(["All release notes ›", "Všetky poznámky k vydaniam ›", "Všechny poznámky k vydáním ›", "全部发行说明 ›", "全部發行說明 ›"])
+    }
+
+    /// The tags in front of a note: a new feature or a fix.
+    pub fn note_tag(self, fixed: bool) -> &'static str {
+        if fixed {
+            self.pick(["FIX", "OPRAVA", "OPRAVA", "修复", "修復"])
+        } else {
+            self.pick(["NEW", "NOVÉ", "NOVÉ", "新", "新"])
+        }
     }
 
     pub fn your_games(self) -> &'static str {
@@ -103,15 +155,6 @@ impl Tx {
 
     pub fn find_games(self) -> &'static str {
         self.pick(["Find games automatically", "Nájsť hry automaticky", "Najít hry automaticky", "自动查找游戏", "自動尋找遊戲"])
-    }
-
-    /// The line under a game's title.
-    pub fn subtitle(self, warmonger: bool) -> &'static str {
-        if warmonger {
-            self.pick(["The second campaign · optional", "Druhá kampaň · voliteľná", "Druhá kampaň · volitelná", "第二个战役 · 可选", "第二個戰役 · 可選"])
-        } else {
-            self.pick(["The original campaign · 2001", "Pôvodná kampaň · 2001", "Původní kampaň · 2001", "原版战役 · 2001", "原版戰役 · 2001"])
-        }
     }
 
     pub fn locate(self) -> &'static str {
@@ -561,12 +604,12 @@ impl Tx {
             self.not_located(),
             self.files_missing(),
             self.optional(),
-            self.tagline(),
+            self.all_notes(),
+            self.note_tag(false),
+            self.note_tag(true),
             self.your_games(),
             self.locate_first(),
             self.find_games(),
-            self.subtitle(false),
-            self.subtitle(true),
             self.locate(),
             self.change_folder(),
             self.files_found(),
@@ -601,6 +644,10 @@ impl Tx {
             self.install("1.0.0"),
             self.downloading("1.0.0", Some(5)),
             self.installed("1.0.0"),
+            self.whats_new("1.0.0"),
+            self.update_ready("1.0.0"),
+            self.install_short("1.0.0"),
+            self.more(3),
         ]);
         for f in [Fail::NoReleases, Fail::Network("e".into()), Fail::NoArchive("p".into()), Fail::NoChecksum, Fail::Checksum, Fail::Install("e".into())] {
             v.push(self.update_fail(&f));

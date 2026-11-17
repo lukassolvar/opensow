@@ -1,5 +1,6 @@
 # A tag `vX.Y.Z` equal to the crates' version builds every platform's release file (build.yml) and opens a DRAFT release
-# with them (docs/release.md). The notes come from `docs/releases/<tag>.md` when it exists, else GitHub generates them.
+# with them (docs/release.md). The notes come from `docs/releases/<tag>.md` when it exists, else GitHub generates them;
+# its translations `docs/releases/<tag>.<lang>.md` are attached as files for the launcher.
 # Publish the draft by hand as a normal release, not a pre-release: the launcher and the README's "latest release" link
 # ignore pre-releases.
 name: Release
@@ -48,5 +49,8 @@ jobs:
           ls -l dist
           notes="docs/releases/$GITHUB_REF_NAME.md"
           if [ -f "$notes" ]; then set -- --notes-file "$notes"; else set -- --generate-notes; fi
-          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+          # the translated notes (`<tag>.sk.md`, ...) go along as files; the launcher shows them in its language
+          shopt -s nullglob
+          translated=(docs/releases/"$GITHUB_REF_NAME".*.md)
+          gh release create "$GITHUB_REF_NAME" dist/* "${translated[@]}" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
             --title "OpenSOW ${GITHUB_REF_NAME#v}" "$@"

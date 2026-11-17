@@ -58,6 +58,9 @@ struct ApiRelease {
     prerelease: bool,
     #[serde(default)]
     assets: Vec<Asset>,
+    /// The release notes (Markdown).
+    #[serde(default)]
+    body: Option<String>,
 }
 
 /// The latest release as the launcher needs it.
@@ -73,12 +76,25 @@ pub struct Release {
     pub archive: Option<Asset>,
     /// The archive's `.sha256`.
     pub checksum: Option<Asset>,
+    /// The short lines of its notes (`parse_notes`) in each launcher language (`NOTE_LANGS`): English from the release's text,
+    /// the others from its `<tag>.<lang>.md` files once fetched (`fetch_translations`); empty where there is none.
+    pub notes: [Vec<Note>; 5],
+    /// The release's translated notes files: (language index, file).
+    pub translations: Vec<(usize, Asset)>,
 }
 
 impl Release {
     pub fn version_text(&self) -> String {
         let (a, b, c) = self.version;
         format!("{a}.{b}.{c}")
+    }
+
+    /// The notes in language `i` (`NOTE_LANGS`), English where they are not translated.
+    pub fn notes_in(&self, i: usize) -> &[Note] {
+        match self.notes.get(i) {
+            Some(n) if !n.is_empty() => n,
+            _ => &self.notes[0],
+        }
     }
 
     /// Is it newer than this launcher?
@@ -121,7 +137,101 @@ pub fn parse_release(json: &str, platform: &str) -> Result<Release, Fail> {
         .cloned();
     let checksum = archive.as_ref().and_then(|a| r.assets.iter().find(|c| c.name == format!("{}.sha256", a.name)).cloned());
     let name = r.name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| r.tag_name.clone());
-    Ok(Release { tag: r.tag_name, version, name, url: r.html_url, archive, checksum })
+    let mut notes: [Vec<Note>; 5] = Default::default();
+    notes[0] = parse_notes(r.body.as_deref().unwrap_or(""));
+    let translations = (1..NOTE_LANGS.len()).filter_map(|i| r.assets.iter().find(|a| a.name == notes_file(&r.tag_name, i)).map(|a| (i, a.clone()))).collect();
+    Ok(Release { tag: r.tag_name, version, name, url: r.html_url, archive, checksum, notes, translations })
+}
+
+/// One line of the home page's "What's new" card: the bold lead of a bullet in a release's notes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Note {
+    /// Under a "Fixed" heading (else a new feature).
+    pub fixed: bool,
+    pub title: String,
+}
+
+/// The notes files' language part, in `Tx::index` order (English has none): `v0.2.0.md`, `v0.2.0.sk.md`, `v0.2.0.cs.md`,
+/// `v0.2.0.zh-Hans.md`, `v0.2.0.zh-Hant.md`. The same list is in build.rs.
+pub const NOTE_LANGS: [&str; 5] = ["", "sk", "cs", "zh-Hans", "zh-Hant"];
+
+/// A release's notes file in language `i`: `docs/releases/<name>`, and a file of that name on the release.
+pub fn notes_file(tag: &str, i: usize) -> String {
+    match NOTE_LANGS[i] {
+        "" => format!("{tag}.md"),
+        l => format!("{tag}.{l}.md"),
+    }
+}
+
+/// The notes of this launcher's own version in each language: `docs/releases/vX.Y.Z[.lang].md`, built in by build.rs (empty
+/// without the file).
+pub const OWN_NOTES: [&str; 5] = [
+    include_str!(concat!(env!("OUT_DIR"), "/notes.md")),
+    include_str!(concat!(env!("OUT_DIR"), "/notes.sk.md")),
+    include_str!(concat!(env!("OUT_DIR"), "/notes.cs.md")),
+    include_str!(concat!(env!("OUT_DIR"), "/notes.zh-Hans.md")),
+    include_str!(concat!(env!("OUT_DIR"), "/notes.zh-Hant.md")),
+];
+
+/// Downloads the release's translated notes (a few small files; only for a newer release). One that fails stays English.
+pub fn fetch_translations(r: &mut Release) {
+    for (i, a) in r.translations.clone() {
+        if let Ok(md) = fetch_text(&a.browser_download_url) {
+            r.notes[i] = parse_notes(&md);
+        }
+    }
+}
+
+/// The repository's page (the sidebar's GitHub link).
+pub fn repo_url() -> String {
+    format!("https://github.com/{}", repo())
+}
+
+/// The releases page of the repository.
+pub fn releases_url() -> String {
+    format!("https://github.com/{}/releases", repo())
+}
+
+/// The short lines of release notes in the form `docs/releases/*.md` uses: bullets under `## New` (or `## What's in it`,
+/// `## Added`, `## Changed`, `## Improved`; translated: `## Novinky`, `## Nové`, `## 新功能`, `## 新內容`) and `## Fixed` (`## Opravy`,
+/// `## Opravené`, `## 修复`, `## 修復`), each line the bullet's bold lead (`- **Controls menu.** ...`) without
+/// its closing full stop or colon (also `。` / `：`); a bullet without a bold lead gives its first sentence. Other sections (Download, Known
+/// limitations, GitHub's "What's Changed", and `## Launcher` / `## Spúšťač` / `## Spouštěč` / `## 启动器` / `## 啟動器`, where
+/// launcher-only changes go: the card is about the game) are left out.
+pub fn parse_notes(md: &str) -> Vec<Note> {
+    let mut out = vec![];
+    let mut section: Option<bool> = None;
+    for line in md.lines() {
+        let t = line.trim();
+        if let Some(h) = t.strip_prefix("## ") {
+            let h = h.trim().to_lowercase();
+            section = if h.starts_with("fix") || h.starts_with("oprav") || h.starts_with("修复") || h.starts_with("修復") {
+                Some(true)
+            } else if ["new", "what's new", "what\u{2019}s new", "what's in it", "added", "changed", "improved", "features", "novinky", "nové"]
+                .contains(&h.as_str())
+                || h.starts_with('新')
+            {
+                Some(false)
+            } else {
+                None
+            };
+            continue;
+        }
+        if t.starts_with('#') {
+            section = None;
+            continue;
+        }
+        let (Some(fixed), Some(item)) = (section, t.strip_prefix("- ").or_else(|| t.strip_prefix("* "))) else { continue };
+        let title = match item.strip_prefix("**").and_then(|r| r.split_once("**")) {
+            Some((bold, _)) => bold.to_string(),
+            None => item.split(". ").next().unwrap_or(item).replace(['*', '`'], ""),
+        };
+        let title = title.trim().trim_end_matches(['.', ':', '。', '：']).trim().to_string();
+        if !title.is_empty() {
+            out.push(Note { fixed, title });
+        }
+    }
+    out
 }
 
 /// `curl` with the options every call uses: fail on HTTP errors, follow redirects (release files are served from another host),
@@ -440,6 +550,50 @@ mod tests {
         assert!(parse_release(API, "linux-x86_64").unwrap().archive.is_none());
         assert_eq!(parse_release(&API.replace("\"prerelease\":false", "\"prerelease\":true"), "macos-aarch64"), Err(Fail::NoReleases));
         assert!(matches!(parse_release("<html>", "x"), Err(Fail::Network(_))));
+    }
+
+    #[test]
+    fn notes_give_the_bold_lead_of_each_new_and_fixed_bullet() {
+        let md = "Intro line.\n\n## New\n\n- **Controls menu.** Three pages of hotkeys.\n* Plain bullet. With more text\n\n## Fixed\n\n\
+                  - **Slovak and Czech texts:** typos.\n  - **Mission hints** are drawn with a shadow.\n\n## Download\n\n- **Not a note.**\n\n\
+                  ## What's Changed\n* CI on every pull request by @someone\n## Launcher\n- **GitHub link.** x\n## Spúšťač\n- **Odkaz.** x\n## 启动器\n- **链接。**\n";
+        let n = parse_notes(md);
+        let got: Vec<(bool, &str)> = n.iter().map(|n| (n.fixed, n.title.as_str())).collect();
+        assert_eq!(got, [(false, "Controls menu"), (false, "Plain bullet"), (true, "Slovak and Czech texts"), (true, "Mission hints")]);
+        assert!(parse_notes("").is_empty());
+        assert_eq!(parse_notes("## What's in it\n- **Both campaigns in one game.** x")[0].title, "Both campaigns in one game");
+        // the API's body becomes the release's notes
+        let r = parse_release(&API.replace("\"draft\"", "\"body\":\"## Fixed\\r\\n- **Faster.** x\",\"draft\""), "macos-aarch64").unwrap();
+        assert_eq!(r.notes[0], [Note { fixed: true, title: "Faster".into() }]);
+        assert!(r.translations.is_empty());
+        // translated notes files on the release; the card falls back to English for the others
+        let api = API.replace("\"assets\":[", "\"assets\":[{\"name\":\"v9.1.0.sk.md\",\"browser_download_url\":\"https://x/sk\"},{\"name\":\"v9.0.0.cs.md\",\"browser_download_url\":\"https://x/old\"},");
+        let mut r = parse_release(&api, "macos-aarch64").unwrap();
+        assert_eq!(r.translations.iter().map(|(i, a)| (*i, a.browser_download_url.as_str())).collect::<Vec<_>>(), [(1, "https://x/sk")]);
+        r.notes[0] = parse_notes("## New\n- **Faster.**");
+        r.notes[1] = parse_notes("## Novinky\n- **Rýchlejšie.** x\n## Opravy\n- **Hudba.** y");
+        assert_eq!(r.notes_in(1)[1], Note { fixed: true, title: "Hudba".into() });
+        assert_eq!(r.notes_in(2)[0].title, "Faster");
+        assert_eq!(parse_notes("## 修复\n- **更快。** x\n## 新功能\n- **地图编辑器。**").iter().map(|n| n.fixed).collect::<Vec<_>>(), [true, false]);
+    }
+
+    #[test]
+    fn every_written_release_has_notes_for_the_card() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/releases");
+        let mut seen = 0;
+        for e in std::fs::read_dir(&dir).unwrap().flatten() {
+            let n = parse_notes(&std::fs::read_to_string(e.path()).unwrap());
+            assert!(!n.is_empty(), "{}: {n:?}", e.path().display());
+            assert!(n.iter().all(|n| n.title.chars().count() < 60 && !n.title.contains('*')), "{}: {n:?}", e.path().display());
+            seen += 1;
+        }
+        assert!(seen >= 2);
+        // this version's notes are built in when written
+        for (i, own) in OWN_NOTES.iter().enumerate() {
+            if dir.join(notes_file(&format!("v{VERSION}"), i)).exists() {
+                assert!(!parse_notes(own).is_empty(), "{}", NOTE_LANGS[i]);
+            }
+        }
     }
 
     #[test]

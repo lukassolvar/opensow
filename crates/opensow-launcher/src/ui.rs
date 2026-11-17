@@ -4,12 +4,13 @@
 
 use crate::settings::{Field, GameSettings, NATIVE};
 use crate::text::{Message, Tx};
-use crate::update::{Fail, Release};
+use crate::update::{Fail, Note, Release};
 use ab_glyph::{Font as _, FontVec, PxScale, ScaleFont};
 use opensow_formats::lang::Language;
 use opensow_formats::launcher::Settings;
 use opensow_formats::{default_steam_dirs, sysfont, GameDir};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Logical page height; the width follows the window (`App::resize`).
@@ -69,8 +70,12 @@ pub enum Action {
     CheckUpdate,
     /// Download and install the release found.
     InstallUpdate,
-    /// Open the release's page in the browser.
+    /// Open the new release's page in the browser, or all releases when there is none.
     ReleaseNotes,
+    /// The sidebar header while an update waits: Settings, Launcher tab.
+    Updates,
+    /// Open the project's GitHub page.
+    Repo,
     /// Start the new launcher and close this one.
     Restart,
     /// The "check when the launcher starts" switch.
@@ -129,6 +134,12 @@ pub enum Style {
     Arrow(bool),
     /// A game row on the home page.
     Row,
+    /// The sidebar header (icon, name, version) while an update waits.
+    Header,
+    /// Small text link.
+    Link,
+    /// The sidebar's link to the project's GitHub page.
+    SideLink,
 }
 
 pub struct Button {
@@ -209,6 +220,70 @@ struct Backdrop {
     px: Vec<u32>,
 }
 
+/// A value easing to its target ([`App::tween`]).
+#[derive(Debug, Clone, Copy)]
+struct Tween {
+    from: f32,
+    to: f32,
+    start: f32,
+    dur: f32,
+}
+
+impl Tween {
+    fn done(&self, t: f32) -> bool {
+        t - self.start >= self.dur
+    }
+
+    /// Ease-out cubic: fast start, soft landing.
+    fn value(&self, t: f32) -> f32 {
+        if self.dur <= 0.0 {
+            return self.to;
+        }
+        let k = ((t - self.start) / self.dur).clamp(0.0, 1.0);
+        self.from + (self.to - self.from) * (1.0 - (1.0 - k).powi(3))
+    }
+}
+
+/// How a change of the whole page animates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FadeKind {
+    /// The window's first appearance: from the bare picture, the sidebar first, then the page top to bottom, rising into place.
+    Intro,
+    /// Another page or tab: the old one fades out while the new content rises into place top to bottom; the sidebar keeps its
+    /// own animation.
+    Page,
+    /// The same page in other words (language, the update card): a plain cross-fade.
+    Swap,
+}
+
+/// A cross-fade from an earlier frame (`None`: from the bare backdrop).
+struct Fade {
+    start: f32,
+    kind: FadeKind,
+    from: Option<Vec<u32>>,
+}
+
+impl FadeKind {
+    /// (wait before it starts, length of each row's fade, extra wait from the page's top to its bottom, rise in page units)
+    fn timing(self) -> (f32, f32, f32, f32) {
+        match self {
+            // the window takes a moment to open
+            FadeKind::Intro => (0.2, 0.45, 0.25, 14.0),
+            FadeKind::Page => (0.0, 0.3, 0.12, 10.0),
+            FadeKind::Swap => (0.0, 0.22, 0.0, 0.0),
+        }
+    }
+
+    fn total(self) -> f32 {
+        let (wait, len, stagger, _) = self.timing();
+        wait + len + stagger + if self == FadeKind::Intro { 0.08 } else { 0.0 }
+    }
+}
+
+/// Animation lengths in seconds.
+const HOVER_S: f32 = 0.16;
+const SLIDE_S: f32 = 0.3;
+
 /// What fills the page's right side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scene {
@@ -249,6 +324,19 @@ pub struct App {
     bold: Option<FontVec>,
     pub cursor: (f32, f32),
     pub update: UpdateState,
+    /// Seconds since the window opened, for the update badge's pulse.
+    pub time: f32,
+    /// Eased values by name (hover glows, the sliding highlights, switches, ...).
+    anims: RefCell<HashMap<String, Tween>>,
+    fade: RefCell<Option<Fade>>,
+    /// The settings gear: (angle, time of the last frame, how fast it turns 0..1 while hovered).
+    spin: RefCell<(f32, f32, f32)>,
+    /// The message on screen and when it appeared (it slides in).
+    shown_msg: RefCell<(Message, f32)>,
+    /// The window's size in pixels (the last `resize`).
+    size: (usize, usize),
+    /// This version's release notes in each language, `Tx::index` order (`update::OWN_NOTES`).
+    own_notes: [Vec<Note>; 5],
     status: [Status; 2],
     view: View,
     art: Vec<Option<Picture>>,
@@ -300,6 +388,8 @@ const TEXT: u32 = 0xeef0f4;
 const DIM: u32 = 0x9aa1ae;
 const DISABLED: u32 = 0x3a3f48;
 const SHADOW: u32 = 0x06070a;
+/// The update badge's pulse period in seconds.
+const PULSE: f32 = 2.4;
 
 /// Is `(x, y)` (relative to the centre, y down) inside a five-pointed star of outer radius `r`, turned by `rot` radians?
 fn in_star(x: f32, y: f32, r: f32, rot: f32) -> bool {
@@ -488,6 +578,13 @@ impl App {
             bold,
             cursor: (-1.0, -1.0),
             update: UpdateState::Idle,
+            time: 0.0,
+            anims: RefCell::new(HashMap::new()),
+            fade: RefCell::new(None),
+            spin: RefCell::new((0.0, 0.0, 0.0)),
+            shown_msg: RefCell::new((Message::None, -10.0)),
+            size: (1000, 620),
+            own_notes: crate::update::OWN_NOTES.map(crate::update::parse_notes),
             status: [Status::Unset; 2],
             view: View::fit(1000, 620),
             art,
@@ -531,6 +628,52 @@ impl App {
     /// The window was resized to `w` x `h` pixels.
     pub fn resize(&mut self, w: usize, h: usize) {
         self.view = View::fit(w, h);
+        self.size = (w, h);
+    }
+
+    // ---- motion ----
+    // Every animation is short and runs on `time`; the window redraws only while one runs ([`App::frame_interval`]). A value
+    // seen for the first time starts at its target, so headless screenshots show the resting state.
+
+    /// The value named `key` easing to `target` over `dur` seconds.
+    fn tween(&self, key: &str, target: f32, dur: f32) -> f32 {
+        let t = self.time;
+        let mut m = self.anims.borrow_mut();
+        let e = m.entry(key.to_string()).or_insert(Tween { from: target, to: target, start: t - dur, dur });
+        if (e.to - target).abs() > 1e-4 {
+            *e = Tween { from: e.value(t), to: target, start: t, dur };
+        }
+        e.value(t)
+    }
+
+    /// Animate from what is on screen now to whatever the next frame shows (page, tab, language or update card changes).
+    pub fn begin_fade(&mut self, kind: FadeKind) {
+        let (w, h) = self.size;
+        let mut px = vec![0u32; w * h];
+        self.draw(&mut px, w, h);
+        *self.fade.borrow_mut() = Some(Fade { start: self.time, kind, from: Some(px) });
+    }
+
+    /// The window's first frames: the page appears over its picture.
+    pub fn intro(&mut self) {
+        *self.fade.borrow_mut() = Some(Fade { start: self.time, kind: FadeKind::Intro, from: None });
+    }
+
+    /// How soon the next frame is due: 1/60 s while something moves, 1/30 s while only the update badge pulses, none when all
+    /// is still.
+    pub fn frame_interval(&self) -> Option<f32> {
+        let t = self.time;
+        let moving = self.anims.borrow().values().any(|a| !a.done(t))
+            || self.fade.borrow().as_ref().is_some_and(|f| t - f.start < f.kind.total())
+            || t - self.shown_msg.borrow().1 < SLIDE_S
+            || self.spin.borrow().2 > 0.001;
+        if moving {
+            Some(1.0 / 60.0)
+        } else if self.animating() {
+            Some(1.0 / 30.0)
+        } else {
+            None
+        }
     }
 
     #[cfg(test)]
@@ -581,6 +724,12 @@ impl App {
         Rect { x: 10.0, y, w: SIDE - 20.0, h: 54.0 }
     }
 
+    /// The sidebar's GitHub link, above Settings.
+    fn repo_rect() -> Rect {
+        let s = Self::nav_rect(3);
+        Rect { x: s.x, y: s.y - 40.0, w: s.w, h: 32.0 }
+    }
+
     /// The play button's place (bottom right of the page).
     fn play_rect(&self) -> Rect {
         Rect { x: self.view.pw - 36.0 - 220.0, y: PAGE_H - 36.0 - 60.0, w: 220.0, h: 60.0 }
@@ -588,7 +737,40 @@ impl App {
 
     /// Home page: the "Your games" card and its rows.
     fn games_card(&self) -> Rect {
-        Rect { x: SIDE + 40.0, y: 292.0, w: (self.view.pw - SIDE - 80.0).min(430.0), h: 158.0 }
+        Rect { x: SIDE + 40.0, y: 200.0, w: (self.view.pw - SIDE - 80.0).min(430.0), h: 158.0 }
+    }
+
+    /// The release the home page's notes card shows: a newer one found, else none (this version's own notes).
+    fn new_release(&self) -> Option<&Release> {
+        match &self.update {
+            UpdateState::Available(r) | UpdateState::Downloading(r, _) | UpdateState::Installed(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    /// The notes in the page's language, English where they are not translated.
+    fn card_notes(&self) -> &[Note] {
+        let i = self.tx().index();
+        match self.new_release() {
+            Some(r) => r.notes_in(i),
+            None if self.own_notes[i].is_empty() => &self.own_notes[0],
+            None => &self.own_notes[i],
+        }
+    }
+
+    /// Home page: the "What's new" card under "Your games", as wide as it but clear of Play; none without notes or update.
+    fn notes_card(&self) -> Option<Rect> {
+        if self.card_notes().is_empty() && self.new_release().is_none() {
+            return None;
+        }
+        let (g, p) = (self.games_card(), self.play_rect());
+        let y = g.y + g.h + 16.0;
+        Some(Rect { x: g.x, y, w: g.w.min(p.x - 20.0 - g.x), h: PAGE_H - 36.0 - y })
+    }
+
+    /// Is the update badge pulsing (the window then redraws about 30 times a second)?
+    pub fn animating(&self) -> bool {
+        matches!(self.update, UpdateState::Available(_) | UpdateState::Downloading(..))
     }
 
     fn game_row(&self, slot: Slot) -> Rect {
@@ -651,6 +833,10 @@ impl App {
         for (i, (p, label)) in nav.into_iter().enumerate() {
             push(Self::nav_rect(i), Action::Nav(p), label, Style::Nav, self.page == p, true);
         }
+        if self.new_release().is_some() {
+            push(Rect { x: 8.0, y: 10.0, w: SIDE - 16.0, h: 60.0 }, Action::Updates, "", Style::Header, false, true);
+        }
+        push(Self::repo_rect(), Action::Repo, "GitHub", Style::SideLink, false, true);
         let pw = self.view.pw;
         match self.page {
             Page::Home => {
@@ -663,6 +849,26 @@ impl App {
                 }
                 let ok = self.playable(Slot::Original);
                 push(self.play_rect(), Action::Play, tx.play(), Style::Primary(ACCENT), false, ok);
+                if let Some(n) = self.notes_card() {
+                    let fy = n.y + n.h - 42.0;
+                    let link = match self.new_release() {
+                        Some(_) => format!("{} ›", tx.release_notes()),
+                        None => tx.all_notes().into(),
+                    };
+                    let lw = (self.width(&link, 12.5, false) + 8.0).min(n.w * 0.48);
+                    push(Rect { x: n.x + n.w - 14.0 - lw, y: fy, w: lw, h: 30.0 }, Action::ReleaseNotes, &link, Style::Link, false, true);
+                    let main = match &self.update {
+                        UpdateState::Available(r) if r.archive.is_some() && r.checksum.is_some() => {
+                            Some((Action::InstallUpdate, tx.install_short(&r.version_text())))
+                        }
+                        UpdateState::Installed(_) => Some((Action::Restart, tx.restart().to_string())),
+                        _ => None,
+                    };
+                    if let Some((action, label)) = main {
+                        let w = (self.width(&label, 12.5, true) + 28.0).min(n.w - 28.0 - lw - 10.0);
+                        push(Rect { x: n.x + 14.0, y: fy, w, h: 30.0 }, action, &label, Style::Primary(ACCENT), false, true);
+                    }
+                }
             }
             Page::Game(slot) => {
                 let found = self.status(slot) == Status::Found;
@@ -803,11 +1009,7 @@ impl App {
             UpdateState::Available(r) if r.archive.is_none() => (tx.update_fail(&Fail::NoArchive(crate::update::platform())), ACCENT),
             UpdateState::Available(r) if r.checksum.is_none() => (tx.update_fail(&Fail::NoChecksum), ACCENT),
             UpdateState::Available(r) => (tx.available(&r.version_text(), &r.name), ACCENT),
-            UpdateState::Downloading(r, got) => {
-                let size = r.archive.as_ref().map_or(0, |a| a.size);
-                let pct = (size > 0).then(|| ((*got * 100) / size).min(100) as u32);
-                (tx.downloading(&r.version_text(), pct), TEXT)
-            }
+            UpdateState::Downloading(r, got) => (tx.downloading(&r.version_text(), download_pct(r, *got)), TEXT),
             UpdateState::Installed(r) => (tx.installed(&r.version_text()), GREEN),
             UpdateState::Failed(f) => (tx.update_fail(f), RED),
         };
@@ -821,7 +1023,8 @@ impl App {
             let size = r.archive.as_ref().map_or(0, |a| a.size).max(1);
             let w = (room).min(360.0);
             c.rrect(x0, y + 136.0, w, 6.0, 3.0, 0x2a303b);
-            c.rrect(x0, y + 136.0, w * (*got as f32 / size as f32).min(1.0), 6.0, 3.0, ACCENT);
+            let p = self.tween("download", (*got as f32 / size as f32).min(1.0), 0.3);
+            c.rrect(x0, y + 136.0, w * p, 6.0, 3.0, ACCENT);
         }
     }
 
@@ -914,7 +1117,14 @@ impl App {
         let mut c = Canvas { buf, w, h, scale: v.scale, ox: v.ox, oy: v.oy };
         let tx = self.tx();
         // the sidebar's highlights go under its labels, every other button over the page
-        let (nav, rest): (Vec<Button>, Vec<Button>) = self.buttons().into_iter().partition(|b| b.style == Style::Nav);
+        let (nav, rest): (Vec<Button>, Vec<Button>) = self.buttons().into_iter().partition(|b| matches!(b.style, Style::Nav | Style::Header | Style::SideLink));
+        // the selected entry's highlight slides from the old one
+        if let Some(i) = [Page::Home, Page::Game(Slot::Original), Page::Game(Slot::Warmonger), Page::Settings].iter().position(|p| *p == self.page) {
+            let r = Self::nav_rect(i);
+            let y = self.tween("nav", r.y, SLIDE_S);
+            c.rrect(r.x, y, r.w, r.h, 8.0, SIDE_ACTIVE);
+            c.rrect(r.x - 10.0, y + 10.0, 4.0, r.h - 20.0, 2.0, accent(self.page));
+        }
         for b in &nav {
             self.draw_button(&mut c, b);
         }
@@ -927,7 +1137,71 @@ impl App {
         for b in &rest {
             self.draw_button(&mut c, b);
         }
+        // the settings tab's underline slides to the chosen tab
+        if let Some(b) = rest.iter().find(|b| b.style == Style::Tab && b.selected) {
+            let (x, w) = (self.tween("tab-x", b.rect.x, SLIDE_S), self.tween("tab-w", b.rect.w, SLIDE_S));
+            c.rrect(x + 6.0, b.rect.y + b.rect.h - 3.0, w - 12.0, 3.0, 1.5, ACCENT);
+        }
         self.draw_message(&mut c, tx);
+        self.blend_fade(buf, w, h);
+    }
+
+    /// Blends the frame from the earlier one: each row of the new page fades in a little after the one above, and what the page
+    /// draws over its picture (texts, cards, buttons) rises into place; the picture itself stays put.
+    fn blend_fade(&self, buf: &mut [u32], w: usize, h: usize) {
+        let mut fade = self.fade.borrow_mut();
+        let Some(f) = fade.as_ref() else { return };
+        let t = self.time - f.start;
+        let cache = self.cache.borrow();
+        let bg = cache.as_ref().filter(|b| b.w == w && b.h == h).map(|b| b.px.as_slice());
+        let (Some(bg), true) = (bg, t < f.kind.total()) else {
+            *fade = None;
+            return;
+        };
+        let from = f.from.as_deref().filter(|p| p.len() >= w * h).unwrap_or(bg);
+        let (wait, len, stagger, rise) = f.kind.timing();
+        let v = self.view;
+        let side_px = ((v.ox + SIDE * v.scale).max(0.0) as usize).min(w);
+        // the new frame, read from below while rows rise (only needed while some row still moves)
+        let new = if rise > 0.0 { buf[..w * h].to_vec() } else { vec![] };
+        let ease = |k: f32| 1.0 - (1.0 - k.clamp(0.0, 1.0)).powi(3);
+        for py in 0..h {
+            let ly = ((py as f32 - v.oy) / v.scale / PAGE_H).clamp(0.0, 1.0);
+            // (first pixel, last pixel, progress) of the sidebar and of the page in this row
+            let side_k = match f.kind {
+                FadeKind::Intro => ease((t - wait) / len),
+                FadeKind::Page => 1.0,
+                FadeKind::Swap => ease(t / len),
+            };
+            let page_k = ease((t - wait - if f.kind == FadeKind::Intro { 0.08 } else { 0.0 } - stagger * ly) / len);
+            for (x0, x1, k) in [(0, side_px, side_k), (side_px, w, page_k)] {
+                let a = (k * 255.0) as u32;
+                // the overlay comes from a little lower and rises as it fades in
+                let off = ((1.0 - k) * rise * v.scale) as usize;
+                let sy = (py + if x0 == 0 { 0 } else { off }).min(h - 1);
+                let row = py * w;
+                // finished rows stay as drawn, rows not started yet show the old frame
+                if a >= 255 && sy == py {
+                    continue;
+                }
+                if a == 0 {
+                    buf[row + x0..row + x1].copy_from_slice(&from[row + x0..row + x1]);
+                    continue;
+                }
+                for px in x0..x1 {
+                    let i = py * w + px;
+                    let target = if sy == py {
+                        buf[i]
+                    } else {
+                        let j = sy * w + px;
+                        // the page's own drawing taken from below, over this row's picture
+                        let ch = |s: u32| ((bg[i] >> s & 255) as i32 + (new[j] >> s & 255) as i32 - (bg[j] >> s & 255) as i32).clamp(0, 255) as u32;
+                        ch(16) << 16 | ch(8) << 8 | ch(0)
+                    };
+                    buf[i] = mix(from[i], target, a);
+                }
+            }
+        }
     }
 
     /// The sidebar colour and the page's picture, graded and darkened where text sits; cached per page and window size.
@@ -980,22 +1254,65 @@ impl App {
 
     fn draw_sidebar(&self, c: &mut Canvas, tx: Tx) {
         c.icon(14.0, 18.0, 44.0);
+        if self.animating() {
+            // an amber dot with an up arrow on the icon's corner; a ring pulses out of it and it gives a small hop
+            let (dx, dy) = (53.0, 21.0 + self.hop());
+            // it pops in with a small overshoot when the update is found
+            let s = back_out(self.tween("badge", 1.0, 0.4));
+            self.pulse_ring(c, dx, dy, 8.5);
+            c.rrect(dx - 10.5 * s, dy - 10.5 * s, 21.0 * s, 21.0 * s, 10.5 * s, SIDEBAR);
+            c.rrect(dx - 8.5 * s, dy - 8.5 * s, 17.0 * s, 17.0 * s, 8.5 * s, ACCENT);
+            if s > 0.5 {
+                c.stroke(&[(dx, dy + 4.0 * s), (dx, dy - 4.0 * s)], 1.8, 0x1a1405);
+                c.stroke(&[(dx - 3.5 * s, dy - 0.5 * s), (dx, dy - 4.0 * s), (dx + 3.5 * s, dy - 0.5 * s)], 1.8, 0x1a1405);
+            }
+        } else {
+            self.tween("badge", 0.0, 0.0);
+        }
         self.text(c, "OpenSOW", 64.0, 19.0, 21.0, TEXT, true);
-        self.text(c, tx.launcher(), 65.0, 44.0, 12.5, DIM, false);
+        // the version, and the one waiting
+        let v = format!("v{}", crate::update::VERSION);
+        self.text(c, &v, 65.0, 44.0, 12.5, DIM, false);
+        if let Some(r) = self.new_release() {
+            let col = if matches!(self.update, UpdateState::Installed(_)) { GREEN } else { ACCENT };
+            self.text(c, &format!(" → {}", r.version_text()), 65.0 + self.width(&v, 12.5, false), 44.0, 12.5, col, false);
+        }
         for (i, page) in [Page::Home, Page::Game(Slot::Original), Page::Game(Slot::Warmonger), Page::Settings].into_iter().enumerate() {
             let r = Self::nav_rect(i);
             let (icx, icy) = (r.x + 26.0, r.y + r.h / 2.0);
+            let k = self.hovered(Action::Nav(page), r, true);
+            let col = mix(DIM, if self.page == page { ACCENT } else { TEXT }, if self.page == page { 255 } else { (k * 255.0) as u32 });
             match page {
-                Page::Home => c.fill_fn(icx - 12.0, icy - 12.0, 24.0, 24.0, house, if self.page == page { ACCENT } else { DIM }),
-                Page::Settings => c.fill_fn(icx - 12.0, icy - 12.0, 24.0, 24.0, gear, if self.page == page { ACCENT } else { DIM }),
-                Page::Game(slot) => c.badge(icx, icy, 12.0, self.status(slot)),
+                // the house hops up a little
+                Page::Home => c.fill_fn(icx - 12.0, icy - 12.0 - 2.5 * k, 24.0, 24.0, house, col),
+                // the gear spins while hovered (speeding up and slowing down) and turns a quarter when Settings opens
+                Page::Settings => {
+                    let mut sp = self.spin.borrow_mut();
+                    let dt = (self.time - sp.1).clamp(0.0, 0.1);
+                    sp.0 += dt * 3.5 * k;
+                    sp.1 = self.time;
+                    sp.2 = k;
+                    let turn = self.tween("gear open", if self.page == page { 1.0 } else { 0.0 }, 0.6) * std::f32::consts::FRAC_PI_2;
+                    c.fill_rot(icx - 12.0, icy - 12.0, 24.0, 24.0, gear, sp.0 + turn, col);
+                }
+                // the badge grows a little
+                Page::Game(slot) => c.badge(icx, icy, 12.0 * (1.0 + 0.12 * k), self.status(slot)),
             }
+            // the label leans right
+            let r = Rect { x: r.x + 3.0 * k, ..r };
             let (label, sub) = match page {
                 Page::Home => (tx.home().to_string(), None),
                 Page::Settings => (tx.settings().to_string(), self.update_badge(tx)),
                 Page::Game(slot) => (slot.name().to_string(), Some(self.state_line(tx, slot))),
             };
             match sub {
+                // the full name takes two lines
+                Some((s, col)) if page == Page::Game(Slot::Warmonger) => {
+                    self.text(c, "State of War:", r.x + 50.0, r.y + 2.0, 14.0, TEXT, true);
+                    self.text(c, "Warmonger", r.x + 50.0, r.y + 18.0, 14.0, TEXT, true);
+                    let s = self.fit(&s, 11.5, r.w - 56.0);
+                    self.text(c, &s, r.x + 50.0, r.y + 36.0, 11.5, col, false);
+                }
                 Some((s, col)) => {
                     self.text(c, &label, r.x + 50.0, r.y + 8.0, 15.5, TEXT, true);
                     let s = self.fit(&s, 11.5, r.w - 56.0);
@@ -1019,27 +1336,102 @@ impl App {
 
     fn draw_home(&self, c: &mut Canvas, tx: Tx) {
         let x = SIDE + 40.0;
-        c.icon(x - 6.0, 96.0, 90.0);
-        self.text(c, "OpenSOW", x + 92.0, 104.0, 50.0, TEXT, true);
-        self.text(c, tx.tagline(), x + 95.0, 160.0, 18.0, 0xc9ced8, false);
+        self.text(c, "OpenSOW", x - 2.0, 98.0, 50.0, TEXT, true);
         let card = self.games_card();
         c.rrect_a(card.x, card.y, card.w, card.h, 12.0, 0x10131a, 200);
         self.text(c, tx.your_games(), card.x + 18.0, card.y + 14.0, 14.0, DIM, true);
         for slot in [Slot::Original, Slot::Warmonger] {
             let r = self.game_row(slot);
-            c.badge(r.x + 24.0, r.y + r.h / 2.0, 13.0, self.status(slot));
+            let k = self.hovered(Action::Nav(Page::Game(slot)), r, true);
+            c.badge(r.x + 24.0, r.y + r.h / 2.0, 13.0 * (1.0 + 0.1 * k), self.status(slot));
             let title = if slot == Slot::Warmonger { "State of War: Warmonger" } else { "State of War" };
             self.text(c, title, r.x + 50.0, r.y + 7.0, 16.0, TEXT, true);
             let (s, col) = self.state_line(tx, slot);
             let s = self.fit(&s, 12.5, r.w - 80.0);
             self.text(c, &s, r.x + 50.0, r.y + 29.0, 12.5, col, false);
-            c.stroke(&[(r.x + r.w - 22.0, r.y + 19.0), (r.x + r.w - 15.0, r.y + 26.0), (r.x + r.w - 22.0, r.y + 33.0)], 2.0, DIM);
+            // the arrow slides towards the page it opens
+            let ax = r.x + r.w - 22.0 + 5.0 * k;
+            c.stroke(&[(ax, r.y + 19.0), (ax + 7.0, r.y + 26.0), (ax, r.y + 33.0)], 2.0, mix(DIM, TEXT, (k * 255.0) as u32));
         }
         if !self.playable(Slot::Original) {
             let p = self.play_rect();
             let s = self.fit(tx.locate_first(), 13.5, p.w + 120.0);
             let w = self.width(&s, 13.5, false);
             self.text(c, &s, p.x + p.w - w, p.y - 26.0, 13.5, 0xc9ced8, false);
+        }
+        self.draw_notes(c, tx);
+    }
+
+    /// The home page's "What's new" card: this version's notes, or the new release's with its state while one waits.
+    fn draw_notes(&self, c: &mut Canvas, tx: Tx) {
+        let Some(n) = self.notes_card() else { return };
+        c.rrect_a(n.x, n.y, n.w, n.h, 12.0, 0x10131a, 200);
+        let (head, col) = match &self.update {
+            UpdateState::Available(r) => (tx.update_ready(&r.version_text()), ACCENT),
+            UpdateState::Downloading(r, got) => (tx.downloading(&r.version_text(), download_pct(r, *got)), TEXT),
+            UpdateState::Installed(r) => (tx.installed(&r.version_text()), GREEN),
+            _ => (tx.whats_new(crate::update::VERSION), DIM),
+        };
+        let mut hx = n.x + 18.0;
+        if self.animating() {
+            self.pulse_ring(c, hx + 4.0, n.y + 22.0, 4.0);
+            c.rrect(hx, n.y + 18.0, 8.0, 8.0, 4.0, ACCENT);
+            hx += 16.0;
+        }
+        let room = n.x + n.w - 18.0 - hx;
+        let size = self.font_fit(&head, 14.0, room).min(14.0);
+        self.text(c, &self.fit(&head, size, room), hx, n.y + 14.0, size, col, true);
+        let notes = self.card_notes();
+        let fy = n.y + n.h - 42.0;
+        let fit = ((fy - 6.0 - (n.y + 44.0)) / 22.0).floor().max(1.0) as usize;
+        let tag_w = [false, true].map(|f| self.width(tx.note_tag(f), 9.5, true)).into_iter().fold(0.0, f32::max) + 12.0;
+        for (i, note) in notes.iter().take(fit).enumerate() {
+            let y = n.y + 44.0 + 22.0 * i as f32;
+            let (bg, fg) = if note.fixed { (GREEN, GREEN) } else { (BLUE, BLUE) };
+            c.rrect_a(n.x + 18.0, y + 1.0, tag_w, 16.0, 4.0, bg, 40);
+            let tag = tx.note_tag(note.fixed);
+            let w = self.width(tag, 9.5, true);
+            self.text(c, tag, n.x + 18.0 + (tag_w - w) / 2.0, y + 3.5, 9.5, fg, true);
+            let tx0 = n.x + 18.0 + tag_w + 10.0;
+            self.text(c, &self.fit(&note.title, 13.0, n.x + n.w - 18.0 - tx0), tx0, y + 1.0, 13.0, TEXT, false);
+        }
+        if notes.is_empty() {
+            // a release without notes in the expected form: its title
+            if let Some(r) = self.new_release() {
+                self.text(c, &self.fit(&r.name, 13.0, n.w - 36.0), n.x + 18.0, n.y + 45.0, 13.0, TEXT, false);
+            }
+        }
+        // "+N more" when no button sits in the footer's left corner
+        let more = notes.len().saturating_sub(fit);
+        let has_button = self.buttons().iter().any(|b| matches!(b.action, Action::InstallUpdate | Action::Restart));
+        if more > 0 && !has_button {
+            self.text(c, &tx.more(more), n.x + 18.0, fy + 8.0, 12.5, DIM, false);
+        }
+    }
+
+    /// How much the button at `r` is hovered, easing in and out (0..1).
+    fn hovered(&self, action: Action, r: Rect, enabled: bool) -> f32 {
+        let hover = enabled && r.contains(self.cursor.0, self.cursor.1);
+        self.tween(&format!("hover {action:?} {} {}", r.x as i32, r.y as i32), if hover { 1.0 } else { 0.0 }, HOVER_S)
+    }
+
+    /// The pulse around the update badge: a ring that grows from `r` and fades, once every [`PULSE`] seconds.
+    fn pulse_ring(&self, c: &mut Canvas, cx: f32, cy: f32, r: f32) {
+        let p = (self.time / PULSE).fract();
+        if p < 0.7 {
+            let k = p / 0.7;
+            c.ring(cx, cy, r * (1.0 + 1.3 * k), 2.0, ACCENT, ((1.0 - k) * 230.0) as u32);
+        }
+    }
+
+    /// The badge's small hop (page units, up is negative), after each ring has started.
+    fn hop(&self) -> f32 {
+        let p = (self.time / PULSE).fract();
+        if (0.6..0.76).contains(&p) {
+            let t = (p - 0.6) / 0.16;
+            -3.0 * (t * std::f32::consts::TAU).sin().abs() * (1.0 - t)
+        } else {
+            0.0
         }
     }
 
@@ -1049,8 +1441,7 @@ impl App {
         let col = accent(self.page);
         let title = if slot == Slot::Warmonger { "State of War: Warmonger" } else { "State of War" };
         let size = self.bold.as_ref().map_or(48.0, |f| fit_size(f, title, 48.0, maxw));
-        self.text(c, title, x, PAGE_H - 262.0 + (48.0 - size) * 0.7, size, col, true);
-        self.text(c, tx.subtitle(slot == Slot::Warmonger), x + 2.0, PAGE_H - 200.0, 17.0, 0xd5d9e0, false);
+        self.text(c, title, x, PAGE_H - 236.0 + (48.0 - size) * 0.7, size, col, true);
         let st = self.status(slot);
         let (line, lcol) = match st {
             Status::Found => (tx.files_found(), GREEN),
@@ -1150,65 +1541,84 @@ impl App {
     fn draw_button(&self, c: &mut Canvas, b: &Button) {
         let r = b.rect;
         let hover = b.enabled && r.contains(self.cursor.0, self.cursor.1);
+        let k = self.hovered(b.action, r, b.enabled);
+        let ka = (k * 255.0) as u32;
         match &b.style {
             Style::Nav => {
-                if b.selected || hover {
-                    c.rrect(r.x, r.y, r.w, r.h, 8.0, if b.selected { SIDE_ACTIVE } else { SIDE_HOVER });
-                }
-                if b.selected {
-                    c.rrect(r.x - 10.0, r.y + 10.0, 4.0, r.h - 20.0, 2.0, accent(self.page));
+                // the selected entry's highlight is drawn by `draw` (it slides)
+                if !b.selected && k > 0.0 {
+                    c.rrect_a(r.x, r.y, r.w, r.h, 8.0, SIDE_HOVER, ka);
                 }
             }
             Style::Row => {
-                if hover {
-                    c.rrect_a(r.x, r.y, r.w, r.h, 8.0, 0xffffff, 18);
+                if k > 0.0 {
+                    c.rrect_a(r.x, r.y, r.w, r.h, 8.0, 0xffffff, (18.0 * k) as u32);
                 }
             }
+            Style::Header => {
+                if k > 0.0 {
+                    c.rrect_a(r.x, r.y, r.w, r.h, 8.0, SIDE_HOVER, ka);
+                }
+            }
+            Style::SideLink => {
+                if k > 0.0 {
+                    c.rrect_a(r.x, r.y, r.w, r.h, 8.0, SIDE_HOVER, ka);
+                }
+                // the GitHub mark, the label and an arrow pointing out of the launcher; the mark turns a little and they lean
+                // right on hover
+                let col = mix(DIM, TEXT, ka);
+                let (cx, cy) = (r.x + 26.0, r.y + r.h / 2.0);
+                c.fill_poly(cx - 10.0, cy - 10.0 - 1.5 * k, 20.0, &GITHUB_MARK, -0.12 * k, col);
+                let lx = r.x + 50.0 + 3.0 * k;
+                self.text(c, &b.label, lx, r.y + (r.h - 13.5) / 2.0 - 1.0, 13.5, col, false);
+                let ax = lx + self.width(&b.label, 13.5, false) + 7.0 + 2.0 * k;
+                let ay = cy - 2.0 * k;
+                c.stroke(&[(ax, ay + 3.5), (ax + 6.0, ay - 2.5)], 1.5, col);
+                c.stroke(&[(ax + 1.5, ay - 2.5), (ax + 6.0, ay - 2.5), (ax + 6.0, ay + 2.0)], 1.5, col);
+            }
+            Style::Link => {
+                let s = self.fit(&b.label, 12.5, r.w);
+                let tw = self.width(&s, 12.5, false);
+                self.text(c, &s, r.x + r.w - tw + 3.0 * k, r.y + (r.h - 12.5) / 2.0 - 1.0, 12.5, mix(TEXT, ACCENT, ka), false);
+            }
             Style::Primary(col) => {
-                let bg = if !b.enabled {
-                    DISABLED
-                } else if hover {
-                    mix(*col, 0xffffff, 40)
-                } else {
-                    *col
-                };
-                c.rrect_a(r.x + 2.0, r.y + 4.0, r.w, r.h, 10.0, 0x000000, 110);
+                let bg = if !b.enabled { DISABLED } else { mix(*col, 0xffffff, (40.0 * k) as u32) };
+                // the button rises a little on hover, its shadow deepening
+                let lift = if b.enabled { 1.5 * k } else { 0.0 };
+                let r = Rect { y: r.y - lift, ..r };
+                c.rrect_a(r.x + 2.0, r.y + 4.0 + 2.0 * lift, r.w, r.h, 10.0, 0x000000, (110.0 + 40.0 * k) as u32);
                 c.rrect(r.x, r.y, r.w, r.h, 10.0, bg);
+                // a band of light sweeps across once when the pointer arrives
+                let key = format!("shine {:?}", b.action);
+                let sweep = if hover { self.tween(&key, 1.0, 0.7) } else { self.tween(&key, 0.0, 0.0) };
+                if sweep > 0.0 && sweep < 1.0 {
+                    // back from the tween's ease-out to even time, then a gentle ease in and out
+                    let lin = 1.0 - (1.0 - sweep).cbrt();
+                    c.shine(r, 10.0, smooth(0.0, 1.0, lin));
+                }
                 let fg = if b.enabled { 0x101215 } else { 0x7b818c };
                 let size = self.font_fit(&b.label, (r.h * 0.37).min(22.0), r.w - 24.0);
                 let tw = self.width(&b.label, size, true);
                 self.text(c, &b.label, r.x + (r.w - tw) / 2.0, r.y + (r.h - size) / 2.0 - 1.0, size, fg, true);
             }
             Style::Secondary => {
-                c.rrect_a(r.x, r.y, r.w, r.h, 8.0, if hover { BTN_HOVER } else { 0x0c0f14 }, if hover { 235 } else { 190 });
+                let r = Rect { y: r.y - 1.0 * k, ..r };
+                c.rrect_a(r.x, r.y, r.w, r.h, 8.0, mix(0x0c0f14, BTN_HOVER, ka), (190.0 + 45.0 * k) as u32);
                 let size = self.font_fit(&b.label, 15.0, r.w - 16.0);
                 let tw = self.width(&b.label, size, false);
                 self.text(c, &b.label, r.x + (r.w - tw) / 2.0, r.y + (r.h - size) / 2.0 - 1.0, size, if b.enabled { TEXT } else { 0x5b6272 }, false);
             }
             Style::Tab => {
-                let col = if b.selected {
-                    TEXT
-                } else if hover {
-                    0xc9ced8
-                } else {
-                    DIM
-                };
+                let col = if b.selected { TEXT } else { mix(DIM, 0xc9ced8, ka) };
                 let tw = self.width(&b.label, 16.0, b.selected);
+                // the underline is drawn by `draw` (it slides)
                 self.text(c, &b.label, r.x + (r.w - tw) / 2.0, r.y + 6.0, 16.0, col, b.selected);
-                if b.selected {
-                    c.rrect(r.x + 6.0, r.y + r.h - 3.0, r.w - 12.0, 3.0, 1.5, ACCENT);
-                }
             }
             Style::Chip => {
-                let bg = if b.selected {
-                    ACCENT
-                } else if hover {
-                    BTN_HOVER
-                } else {
-                    BTN
-                };
+                let sel = self.tween(&format!("chip {:?}", b.action), if b.selected { 1.0 } else { 0.0 }, HOVER_S);
+                let bg = mix(mix(BTN, BTN_HOVER, ka), ACCENT, (sel * 255.0) as u32);
                 c.rrect(r.x, r.y, r.w, r.h, 8.0, bg);
-                let fg = if b.selected { 0x16110a } else { TEXT };
+                let fg = mix(TEXT, 0x16110a, (sel * 255.0) as u32);
                 let flag = matches!(b.action, Action::Lang(Some(_)));
                 let room = r.w - if flag { 12.0 + FLAG_W + 8.0 } else { 16.0 };
                 let size = self.font_fit(&b.label, 14.5, room);
@@ -1221,23 +1631,21 @@ impl App {
                 self.text(c, &b.label, lx, r.y + (r.h - size) / 2.0 - 1.0, size, fg, false);
             }
             Style::Switch(on) => {
-                let track = if *on { ACCENT } else { 0x3a414d };
-                c.rrect(r.x, r.y, r.w, r.h, r.h / 2.0, if hover { mix(track, 0xffffff, 30) } else { track });
-                let k = r.h - 6.0;
-                let kx = if *on { r.x + r.w - 3.0 - k } else { r.x + 3.0 };
-                c.rrect(kx, r.y + 3.0, k, k, k / 2.0, 0xf6f7f9);
+                // the knob slides and the track's colour follows it
+                let p = self.tween(&format!("switch {:?}", b.action), if *on { 1.0 } else { 0.0 }, HOVER_S + 0.04);
+                let track = mix(0x3a414d, ACCENT, (p * 255.0) as u32);
+                c.rrect(r.x, r.y, r.w, r.h, r.h / 2.0, mix(track, 0xffffff, (30.0 * k) as u32));
+                let d = r.h - 6.0;
+                let kx = r.x + 3.0 + (r.w - 6.0 - d) * p;
+                c.rrect(kx, r.y + 3.0, d, d, d / 2.0, 0xf6f7f9);
             }
             Style::Arrow(left) => {
-                let col = if !b.enabled {
-                    0x3d434e
-                } else if hover {
-                    TEXT
-                } else {
-                    0xb9bfca
-                };
-                c.rrect(r.x, r.y, r.w, r.h, 6.0, if hover { BTN_HOVER } else { BTN });
+                let col = if !b.enabled { 0x3d434e } else { mix(0xb9bfca, TEXT, ka) };
+                c.rrect(r.x, r.y, r.w, r.h, 6.0, mix(BTN, BTN_HOVER, ka));
                 let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
                 let d = if *left { 3.0 } else { -3.0 };
+                // the chevron nudges the way it steps
+                let cx = cx - d / 3.0 * 1.5 * k;
                 c.stroke(&[(cx + d, cy - 6.0), (cx - d, cy), (cx + d, cy + 6.0)], 2.0, col);
             }
         }
@@ -1248,6 +1656,16 @@ impl App {
         if self.message == Message::None {
             return;
         }
+        // a new message slides up and fades in
+        let appeared = {
+            let mut shown = self.shown_msg.borrow_mut();
+            if shown.0 != self.message {
+                *shown = (self.message.clone(), self.time);
+            }
+            shown.1
+        };
+        let k = ((self.time - appeared) / SLIDE_S).clamp(0.0, 1.0);
+        let k = 1.0 - (1.0 - k).powi(3);
         let x = SIDE + 24.0;
         let room = self.view.pw - x - 24.0 - if matches!(self.page, Page::Settings) { 0.0 } else { 260.0 };
         // up to two lines; a path too long even for that is cut at its start
@@ -1256,10 +1674,10 @@ impl App {
             lines = vec![self.fit_left(&tx.message(&self.message), 13.0, room - 24.0)];
         }
         let w = lines.iter().map(|l| self.width(l, 13.0, false)).fold(0.0, f32::max);
-        let y = PAGE_H - 50.0 - 18.0 * (lines.len() as f32 - 1.0);
-        c.rrect_a(x, y, w + 24.0, 32.0 + 18.0 * (lines.len() as f32 - 1.0), 8.0, 0x000000, 190);
+        let y = PAGE_H - 50.0 - 18.0 * (lines.len() as f32 - 1.0) + 10.0 * (1.0 - k);
+        c.rrect_a(x, y, w + 24.0, 32.0 + 18.0 * (lines.len() as f32 - 1.0), 8.0, 0x000000, (190.0 * k) as u32);
         for (i, l) in lines.iter().enumerate() {
-            self.text(c, l, x + 12.0, y + 8.0 + 18.0 * i as f32, 13.0, TEXT, false);
+            self.text(c, l, x + 12.0, y + 8.0 + 18.0 * i as f32, 13.0, mix(0x000000, TEXT, (k * 255.0) as u32), false);
         }
     }
 
@@ -1297,6 +1715,19 @@ impl App {
     fn wrap(&self, text: &str, size: f32, max: f32) -> Vec<String> {
         self.font.as_ref().map_or(vec![text.into()], |f| wrap(f, text, size, max))
     }
+}
+
+/// 0..1 to a scale that overshoots a little before settling (the badge's pop).
+fn back_out(k: f32) -> f32 {
+    let c = 1.7;
+    let t = k - 1.0;
+    1.0 + (c + 1.0) * t * t * t + c * t * t
+}
+
+/// How much of the release's archive is downloaded, in percent (none when its size is unknown).
+fn download_pct(r: &Release, got: u64) -> Option<u32> {
+    let size = r.archive.as_ref().map_or(0, |a| a.size);
+    (size > 0).then(|| ((got * 100) / size).min(100) as u32)
 }
 
 fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
@@ -1341,6 +1772,278 @@ fn house(u: f32, v: f32) -> bool {
     let door = u > 0.42 && u < 0.58 && v > 0.62;
     roof || (body && !door)
 }
+
+/// The GitHub mark (Octicons `mark-github`, MIT licence), its outline flattened to 265 points in 0..1; filled even-odd (the cat is
+/// the hole). Flattened from the 16x16 SVG path with a small script (curves in 10 steps, the arc in 24).
+// points, not constants (one is near Euler's gamma)
+#[allow(clippy::approx_constant)]
+const GITHUB_MARK: [(f32, f32); 265] = [
+    (0.5000, 0.0000),
+    (0.4189, 0.0065),
+    (0.3419, 0.0255),
+    (0.2702, 0.0558),
+    (0.2047, 0.0964),
+    (0.1464, 0.1464),
+    (0.0964, 0.2047),
+    (0.0558, 0.2702),
+    (0.0255, 0.3419),
+    (0.0065, 0.4189),
+    (0.0000, 0.5000),
+    (0.0042, 0.5653),
+    (0.0165, 0.6279),
+    (0.0363, 0.6875),
+    (0.0631, 0.7435),
+    (0.0964, 0.7953),
+    (0.1357, 0.8425),
+    (0.1804, 0.8845),
+    (0.2300, 0.9208),
+    (0.2840, 0.9510),
+    (0.3419, 0.9744),
+    (0.3489, 0.9751),
+    (0.3551, 0.9748),
+    (0.3603, 0.9737),
+    (0.3648, 0.9717),
+    (0.3684, 0.9691),
+    (0.3713, 0.9659),
+    (0.3735, 0.9624),
+    (0.3751, 0.9586),
+    (0.3760, 0.9546),
+    (0.3762, 0.9506),
+    (0.3762, 0.9463),
+    (0.3762, 0.9404),
+    (0.3761, 0.9332),
+    (0.3760, 0.9248),
+    (0.3759, 0.9153),
+    (0.3758, 0.9049),
+    (0.3758, 0.8938),
+    (0.3757, 0.8821),
+    (0.3756, 0.8700),
+    (0.3756, 0.8575),
+    (0.3407, 0.8622),
+    (0.3109, 0.8630),
+    (0.2858, 0.8603),
+    (0.2651, 0.8549),
+    (0.2482, 0.8473),
+    (0.2348, 0.8382),
+    (0.2245, 0.8282),
+    (0.2168, 0.8179),
+    (0.2112, 0.8079),
+    (0.2075, 0.7987),
+    (0.2053, 0.7936),
+    (0.2021, 0.7870),
+    (0.1980, 0.7794),
+    (0.1931, 0.7711),
+    (0.1877, 0.7625),
+    (0.1819, 0.7540),
+    (0.1756, 0.7459),
+    (0.1692, 0.7386),
+    (0.1627, 0.7326),
+    (0.1562, 0.7281),
+    (0.1508, 0.7249),
+    (0.1454, 0.7211),
+    (0.1405, 0.7170),
+    (0.1364, 0.7126),
+    (0.1337, 0.7083),
+    (0.1327, 0.7042),
+    (0.1340, 0.7007),
+    (0.1379, 0.6978),
+    (0.1450, 0.6958),
+    (0.1556, 0.6950),
+    (0.1671, 0.6959),
+    (0.1778, 0.6987),
+    (0.1878, 0.7030),
+    (0.1970, 0.7084),
+    (0.2053, 0.7148),
+    (0.2127, 0.7215),
+    (0.2192, 0.7284),
+    (0.2247, 0.7351),
+    (0.2291, 0.7412),
+    (0.2325, 0.7462),
+    (0.2467, 0.7661),
+    (0.2622, 0.7808),
+    (0.2784, 0.7910),
+    (0.2949, 0.7972),
+    (0.3114, 0.8002),
+    (0.3274, 0.8004),
+    (0.3425, 0.7987),
+    (0.3563, 0.7955),
+    (0.3683, 0.7916),
+    (0.3781, 0.7875),
+    (0.3797, 0.7781),
+    (0.3817, 0.7693),
+    (0.3842, 0.7611),
+    (0.3871, 0.7535),
+    (0.3903, 0.7466),
+    (0.3938, 0.7402),
+    (0.3976, 0.7344),
+    (0.4016, 0.7293),
+    (0.4057, 0.7247),
+    (0.4100, 0.7206),
+    (0.3766, 0.7158),
+    (0.3436, 0.7085),
+    (0.3118, 0.6979),
+    (0.2819, 0.6834),
+    (0.2545, 0.6642),
+    (0.2305, 0.6397),
+    (0.2106, 0.6091),
+    (0.1955, 0.5717),
+    (0.1859, 0.5268),
+    (0.1825, 0.4737),
+    (0.1831, 0.4577),
+    (0.1848, 0.4423),
+    (0.1875, 0.4274),
+    (0.1914, 0.4130),
+    (0.1962, 0.3993),
+    (0.2019, 0.3861),
+    (0.2086, 0.3736),
+    (0.2162, 0.3616),
+    (0.2246, 0.3502),
+    (0.2338, 0.3394),
+    (0.2319, 0.3345),
+    (0.2297, 0.3274),
+    (0.2274, 0.3182),
+    (0.2254, 0.3071),
+    (0.2241, 0.2942),
+    (0.2237, 0.2796),
+    (0.2246, 0.2635),
+    (0.2272, 0.2459),
+    (0.2318, 0.2270),
+    (0.2388, 0.2069),
+    (0.2400, 0.2066),
+    (0.2439, 0.2060),
+    (0.2504, 0.2058),
+    (0.2596, 0.2064),
+    (0.2716, 0.2084),
+    (0.2865, 0.2123),
+    (0.3044, 0.2187),
+    (0.3252, 0.2281),
+    (0.3492, 0.2410),
+    (0.3763, 0.2581),
+    (0.3883, 0.2549),
+    (0.4005, 0.2521),
+    (0.4129, 0.2495),
+    (0.4253, 0.2473),
+    (0.4378, 0.2455),
+    (0.4504, 0.2440),
+    (0.4631, 0.2428),
+    (0.4758, 0.2419),
+    (0.4885, 0.2414),
+    (0.5012, 0.2412),
+    (0.5140, 0.2414),
+    (0.5267, 0.2419),
+    (0.5394, 0.2428),
+    (0.5521, 0.2439),
+    (0.5647, 0.2455),
+    (0.5772, 0.2473),
+    (0.5896, 0.2495),
+    (0.6020, 0.2520),
+    (0.6142, 0.2549),
+    (0.6262, 0.2581),
+    (0.6533, 0.2409),
+    (0.6773, 0.2278),
+    (0.6981, 0.2184),
+    (0.7160, 0.2120),
+    (0.7309, 0.2081),
+    (0.7429, 0.2062),
+    (0.7521, 0.2057),
+    (0.7586, 0.2060),
+    (0.7625, 0.2066),
+    (0.7637, 0.2069),
+    (0.7707, 0.2270),
+    (0.7753, 0.2459),
+    (0.7779, 0.2635),
+    (0.7788, 0.2796),
+    (0.7784, 0.2942),
+    (0.7771, 0.3071),
+    (0.7751, 0.3182),
+    (0.7728, 0.3274),
+    (0.7706, 0.3345),
+    (0.7687, 0.3394),
+    (0.7779, 0.3502),
+    (0.7863, 0.3615),
+    (0.7939, 0.3734),
+    (0.8006, 0.3860),
+    (0.8063, 0.3991),
+    (0.8111, 0.4128),
+    (0.8150, 0.4271),
+    (0.8177, 0.4420),
+    (0.8194, 0.4576),
+    (0.8200, 0.4738),
+    (0.8166, 0.5270),
+    (0.8070, 0.5719),
+    (0.7918, 0.6093),
+    (0.7717, 0.6399),
+    (0.7477, 0.6645),
+    (0.7202, 0.6836),
+    (0.6902, 0.6981),
+    (0.6583, 0.7086),
+    (0.6253, 0.7159),
+    (0.5919, 0.7206),
+    (0.5972, 0.7257),
+    (0.6023, 0.7317),
+    (0.6072, 0.7386),
+    (0.6116, 0.7464),
+    (0.6155, 0.7552),
+    (0.6190, 0.7648),
+    (0.6218, 0.7754),
+    (0.6239, 0.7870),
+    (0.6252, 0.7996),
+    (0.6256, 0.8131),
+    (0.6256, 0.8328),
+    (0.6256, 0.8515),
+    (0.6255, 0.8691),
+    (0.6254, 0.8856),
+    (0.6253, 0.9006),
+    (0.6252, 0.9142),
+    (0.6251, 0.9261),
+    (0.6251, 0.9363),
+    (0.6250, 0.9445),
+    (0.6250, 0.9506),
+    (0.6253, 0.9546),
+    (0.6262, 0.9586),
+    (0.6277, 0.9625),
+    (0.6299, 0.9661),
+    (0.6328, 0.9693),
+    (0.6365, 0.9720),
+    (0.6409, 0.9739),
+    (0.6462, 0.9751),
+    (0.6523, 0.9753),
+    (0.6594, 0.9744),
+    (0.6838, 0.9654),
+    (0.7077, 0.9552),
+    (0.7310, 0.9438),
+    (0.7537, 0.9312),
+    (0.7757, 0.9174),
+    (0.7970, 0.9025),
+    (0.8175, 0.8865),
+    (0.8371, 0.8695),
+    (0.8558, 0.8515),
+    (0.8736, 0.8325),
+    (0.8903, 0.8127),
+    (0.9060, 0.7920),
+    (0.9206, 0.7705),
+    (0.9341, 0.7483),
+    (0.9463, 0.7254),
+    (0.9574, 0.7019),
+    (0.9673, 0.6779),
+    (0.9759, 0.6534),
+    (0.9832, 0.6284),
+    (0.9892, 0.6032),
+    (0.9939, 0.5776),
+    (0.9973, 0.5519),
+    (0.9993, 0.5260),
+    (1.0000, 0.5000),
+    (0.9935, 0.4189),
+    (0.9745, 0.3419),
+    (0.9442, 0.2702),
+    (0.9036, 0.2047),
+    (0.8536, 0.1464),
+    (0.7953, 0.0964),
+    (0.7298, 0.0558),
+    (0.6581, 0.0255),
+    (0.5811, 0.0065),
+    (0.5000, 0.0000),
+];
 
 /// The gear of the Settings entry, `(u, v)` in 0..1.
 fn gear(u: f32, v: f32) -> bool {
@@ -1472,6 +2175,106 @@ impl Canvas<'_> {
                 if n > 0 {
                     let i = py * self.w + px;
                     self.buf[i] = mix(self.buf[i], color, n * 255 / 4);
+                }
+            }
+        }
+    }
+
+    /// [`Canvas::fill_fn`] turned by `angle` radians around the box's centre.
+    #[allow(clippy::too_many_arguments)]
+    fn fill_rot(&mut self, x: f32, y: f32, w: f32, h: f32, inside: fn(f32, f32) -> bool, angle: f32, color: u32) {
+        let (x0, y0, s) = (self.ox + x * self.scale, self.oy + y * self.scale, self.scale);
+        let (sin, cos) = angle.sin_cos();
+        let (px0, py0, px1, py1) = self.span(x, y, w, h);
+        for py in py0..py1 {
+            for px in px0..px1 {
+                let n = [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)]
+                    .iter()
+                    .filter(|(sx, sy)| {
+                        let (u, v) = ((px as f32 + sx - x0) / (w * s) - 0.5, (py as f32 + sy - y0) / (h * s) - 0.5);
+                        inside(0.5 + u * cos + v * sin, 0.5 - u * sin + v * cos)
+                    })
+                    .count() as u32;
+                if n > 0 {
+                    let i = py * self.w + px;
+                    self.buf[i] = mix(self.buf[i], color, n * 255 / 4);
+                }
+            }
+        }
+    }
+
+    /// A polygon given in 0..1 of a `size` square at (x, y), turned by `angle` around its centre; filled even-odd with 4 samples
+    /// per pixel.
+    #[allow(clippy::too_many_arguments)]
+    fn fill_poly(&mut self, x: f32, y: f32, size: f32, pts: &[(f32, f32)], angle: f32, color: u32) {
+        let (x0, y0, s) = (self.ox + x * self.scale, self.oy + y * self.scale, size * self.scale);
+        let (sin, cos) = angle.sin_cos();
+        let inside = |u: f32, v: f32| {
+            let (u, v) = (0.5 + (u - 0.5) * cos + (v - 0.5) * sin, 0.5 - (u - 0.5) * sin + (v - 0.5) * cos);
+            let mut odd = false;
+            let mut prev = pts[pts.len() - 1];
+            for &p in pts {
+                if (p.1 > v) != (prev.1 > v) && u < p.0 + (v - p.1) * (prev.0 - p.0) / (prev.1 - p.1) {
+                    odd = !odd;
+                }
+                prev = p;
+            }
+            odd
+        };
+        let (px0, py0, px1, py1) = self.span(x, y, size, size);
+        for py in py0..py1 {
+            for px in px0..px1 {
+                let n = [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)]
+                    .iter()
+                    .filter(|(sx, sy)| inside((px as f32 + sx - x0) / s, (py as f32 + sy - y0) / s))
+                    .count() as u32;
+                if n > 0 {
+                    let i = py * self.w + px;
+                    self.buf[i] = mix(self.buf[i], color, n * 255 / 4);
+                }
+            }
+        }
+    }
+
+    /// A slanted band of light across the rounded box `r`, at `pos` 0..1 of its way from left to right.
+    fn shine(&mut self, r: Rect, radius: f32, pos: f32) {
+        let s = self.scale;
+        let (x0, y0, x1, y1) = (self.ox + r.x * s, self.oy + r.y * s, self.ox + (r.x + r.w) * s, self.oy + (r.y + r.h) * s);
+        let rad = (radius * s).min((x1 - x0) / 2.0).min((y1 - y0) / 2.0);
+        let band = 30.0 * s;
+        let centre = x0 - band * 2.0 + (x1 - x0 + band * 4.0) * pos;
+        let (px0, py0, px1, py1) = self.span(r.x, r.y, r.w, r.h);
+        for py in py0..py1 {
+            for px in px0..px1 {
+                let (cx, cy) = (px as f32 + 0.5, py as f32 + 0.5);
+                let qx = (cx - (x0 + x1) / 2.0).abs() - ((x1 - x0) / 2.0 - rad);
+                let qy = (cy - (y0 + y1) / 2.0).abs() - ((y1 - y0) / 2.0 - rad);
+                let d = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt() + qx.max(qy).min(0.0) - rad;
+                let cover = (0.5 - d).clamp(0.0, 1.0);
+                // slanted: the band leans right going up
+                let dist = (cx + (cy - y0) * 0.45 - centre).abs() / band;
+                let a = cover * (1.0 - dist).max(0.0).powi(2) * 0.6;
+                if a > 0.0 {
+                    let i = py * self.w + px;
+                    self.buf[i] = mix(self.buf[i], 0xffffff, (a * 255.0) as u32);
+                }
+            }
+        }
+    }
+
+    /// A circle outline of `radius` and `width` (page units) at opacity `alpha`.
+    #[allow(clippy::too_many_arguments)]
+    fn ring(&mut self, cx: f32, cy: f32, radius: f32, width: f32, color: u32, alpha: u32) {
+        let (pcx, pcy, pr, hw) = (self.ox + cx * self.scale, self.oy + cy * self.scale, radius * self.scale, width * self.scale / 2.0);
+        let e = radius + width;
+        let (px0, py0, px1, py1) = self.span(cx - e, cy - e, 2.0 * e, 2.0 * e);
+        for py in py0..py1 {
+            for px in px0..px1 {
+                let d = ((px as f32 + 0.5 - pcx).powi(2) + (py as f32 + 0.5 - pcy).powi(2)).sqrt();
+                let a = (hw + 0.5 - (d - pr).abs()).clamp(0.0, 1.0);
+                if a > 0.0 {
+                    let i = py * self.w + px;
+                    self.buf[i] = mix(self.buf[i], color, (a * alpha as f32) as u32);
                 }
             }
         }
@@ -1696,6 +2499,8 @@ mod tests {
             url: String::new(),
             archive: Some(asset("a.zip")),
             checksum: Some(asset("a.zip.sha256")),
+            notes: Default::default(),
+            translations: vec![],
         };
         let no_sum = Release { checksum: None, ..r.clone() };
         let states = [
@@ -1726,6 +2531,119 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_notes_card_and_update_badge_fit_the_home_page() {
+        let mut a = app();
+        a.page = Page::Home;
+        let asset = |n: &str| crate::update::Asset { name: n.into(), browser_download_url: String::new(), size: 10 };
+        let notes = (0..9).map(|i| Note { fixed: i > 1, title: format!("A rather long note title number {i} that will not fit") }).collect();
+        let r = Release {
+            tag: "v9.10.11".into(),
+            version: (9, 10, 11),
+            name: "N".into(),
+            url: String::new(),
+            archive: Some(asset("a.zip")),
+            checksum: Some(asset("a.zip.sha256")),
+            notes: [notes, vec![], vec![], vec![], vec![]],
+            translations: vec![],
+        };
+        let states = [UpdateState::Idle, UpdateState::Available(r.clone()), UpdateState::Downloading(r.clone(), 5), UpdateState::Installed(r.clone())];
+        for lang in std::iter::once(None).chain(Language::SUPPORTED.into_iter().map(Some)) {
+            a.settings.language = lang;
+            for (w, h) in [(640, 480), (1000, 620), (1920, 1080), (2560, 1080)] {
+                a.resize(w, h);
+                for st in &states {
+                    a.update = st.clone();
+                    let b = a.buttons();
+                    for (i, x) in b.iter().enumerate() {
+                        assert!(x.rect.x + x.rect.w <= a.view().pw && x.rect.y + x.rect.h <= PAGE_H, "{st:?} {:?}", x.action);
+                        assert!(b[i + 1..].iter().all(|y| !x.rect.overlaps(&y.rect)), "{lang:?} {w}x{h} {st:?}: {:?} overlaps", x.action);
+                    }
+                    // no card only before this version's notes are written (docs/releases)
+                    let Some(n) = a.notes_card() else {
+                        assert!(a.own_notes[0].is_empty() && *st == UpdateState::Idle);
+                        continue;
+                    };
+                    assert!(!n.overlaps(&a.games_card()) && !n.overlaps(&a.play_rect()) && n.w > 200.0, "{w}x{h}");
+                    // the card's buttons sit inside it
+                    for x in b.iter().filter(|x| matches!(x.action, Action::ReleaseNotes | Action::InstallUpdate | Action::Restart)) {
+                        let r = x.rect;
+                        assert!(r.x >= n.x && r.y >= n.y && r.x + r.w <= n.x + n.w && r.y + r.h <= n.y + n.h, "{st:?} {:?}", x.action);
+                    }
+                    let has = |act: Action| b.iter().any(|x| x.action == act);
+                    assert_eq!(has(Action::Updates), *st != UpdateState::Idle, "the header opens the updates while a release waits");
+                    assert_eq!(has(Action::InstallUpdate), matches!(st, UpdateState::Available(_)));
+                    assert_eq!(a.animating(), matches!(st, UpdateState::Available(_) | UpdateState::Downloading(..)));
+                }
+            }
+        }
+        // the pulse: a ring early in each period, a hop after it, still in between
+        a.time = 0.6 * PULSE + 0.04 * PULSE;
+        assert!(a.hop() < -0.5);
+        a.time = 0.9 * PULSE;
+        assert_eq!(a.hop(), 0.0);
+    }
+
+    #[test]
+    fn animations_run_only_while_something_moves() {
+        let mut a = app();
+        let (w, h) = (800, 500);
+        a.resize(w, h);
+        let mut buf = vec![0u32; w * h];
+        a.draw(&mut buf, w, h);
+        assert_eq!(a.frame_interval(), None, "at rest the launcher sleeps");
+        // a page change fades and the sidebar highlight slides
+        a.time = 1.0;
+        a.begin_fade(FadeKind::Page);
+        a.page = Page::Settings;
+        a.draw(&mut buf, w, h);
+        assert_eq!(a.frame_interval(), Some(1.0 / 60.0));
+        let y0 = a.anims.borrow()["nav"].value(a.time);
+        a.time = 1.1;
+        a.draw(&mut buf, w, h);
+        let y1 = a.anims.borrow()["nav"].value(a.time);
+        assert!(y0 < y1 && y1 < App::nav_rect(3).y, "{y0} {y1}");
+        a.time = 2.0;
+        a.draw(&mut buf, w, h);
+        let rest = buf.clone();
+        assert!(a.fade.borrow().is_none() && a.frame_interval().is_none());
+        // the finished frame equals one drawn without any animation
+        let mut b = app();
+        b.resize(w, h);
+        b.page = Page::Settings;
+        let mut fresh = vec![0u32; w * h];
+        b.draw(&mut fresh, w, h);
+        assert!(rest == fresh, "after the animations the page looks as if drawn at once");
+        // hover eases in
+        let r = App::nav_rect(0);
+        a.cursor = (r.x + 5.0, r.y + 5.0);
+        a.time = 3.0;
+        a.draw(&mut buf, w, h);
+        a.time = 3.0 + HOVER_S / 2.0;
+        a.draw(&mut buf, w, h);
+        let k = a.anims.borrow().iter().find(|(k, _)| k.starts_with("hover Nav(Home)")).map(|(_, t)| t.value(a.time)).unwrap();
+        assert!(k > 0.3 && k < 1.0, "{k}");
+        // the update badge pops in from nothing
+        a.update = UpdateState::Available(Release {
+            tag: "v9.0.0".into(),
+            version: (9, 0, 0),
+            name: "N".into(),
+            url: String::new(),
+            archive: None,
+            checksum: None,
+            notes: Default::default(),
+            translations: vec![],
+        });
+        a.time = 4.0;
+        a.draw(&mut buf, w, h);
+        assert!(a.anims.borrow()["badge"].value(a.time) < 0.05);
+        a.time = 4.5;
+        a.draw(&mut buf, w, h);
+        assert_eq!(a.anims.borrow()["badge"].value(a.time), 1.0);
+        assert_eq!(a.frame_interval(), Some(1.0 / 30.0), "only the pulse keeps going");
+        assert!((back_out(0.0)).abs() < 1e-6 && (back_out(1.0) - 1.0).abs() < 1e-6 && back_out(0.7) > 1.0);
     }
 
     #[test]
