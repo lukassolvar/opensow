@@ -193,6 +193,10 @@ impl World {
                     if let Some(h) = handle {
                         self.shoot_at(bt, strength as i32, owner_player, from, to, h);
                     }
+                    // the top fires through the volley spawner too (`0x479e35` -> `0x47cf40`), whose muzzle switch plays 12 for kind 110
+                    if let Some((id, jitter)) = opensow_formats::sfx::muzzle(110) {
+                        self.sound(id, from.0, from.1, jitter);
+                    }
                 }
             }
             return;
