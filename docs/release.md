@@ -76,8 +76,9 @@ requests read them, so they never evict `main`'s. Warnings fail the lint and tes
 
 Cost: a public repository runs all of it on the standard runners for free. A private one on the Free plan has 2000
 minutes a month; Windows minutes count twice, macOS ten times, and each job is rounded up to whole minutes. Measured with
-warm caches: lint 1, Ubuntu tests 3, macOS tests 2 x 10, Windows tests 4 x 2, so a push costs about 32 minutes; a run
-started by hand adds the four release files (not measured yet; the macOS universal build compiles twice and dominates).
+warm caches: lint 2, Ubuntu tests 3, macOS tests 2 x 10, Windows tests 5-6 x 2, so a push costs about 35-40 minutes; a run
+started by hand adds the release files, about 47 more (macOS universal 3 x 10, Windows 5 x 2, Linux 3 + 4), about 85 in
+all.
 
 ## Local checks
 - macOS: `cargo build --profile dist --no-default-features -p opensow-launcher -p opensow-game` then
