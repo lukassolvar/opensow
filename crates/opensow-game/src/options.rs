@@ -44,11 +44,24 @@ pub struct Extra {
     pub turret_range: bool,
     /// The mouse wheel zooms the mission map (not in the original, which has one fixed scale; docs/game.md).
     pub zoom: bool,
+    /// Orders (move, attack, the Advancer's repair / destroy / upgrade) go on the right button's click; the left click where an
+    /// order would go does the original right click; selecting stays on the left (not in the original; docs/controls.md).
+    pub swap_buttons: bool,
 }
 
 impl Default for Extra {
     fn default() -> Self {
-        Extra { enhance: true, soft_shadows: true, contact_shadows: true, glow: true, turret_shadows: true, sound: true, turret_range: true, zoom: true }
+        Extra {
+            enhance: true,
+            soft_shadows: true,
+            contact_shadows: true,
+            glow: true,
+            turret_shadows: true,
+            sound: true,
+            turret_range: true,
+            zoom: true,
+            swap_buttons: false,
+        }
     }
 }
 
@@ -71,6 +84,7 @@ impl Extra {
                     "enhance_sound" => e.sound = on,
                     "turret_range" => e.turret_range = on,
                     "map_zoom" => e.zoom = on,
+                    "swap_buttons" => e.swap_buttons = on,
                     _ => {}
                 }
             }
@@ -81,7 +95,7 @@ impl Extra {
     /// The extra settings as the text of their file.
     pub fn write(&self) -> String {
         format!(
-            "enhance_textures={}\nsoft_shadows={}\ncontact_shadows={}\nexplosion_glow={}\nturret_shadows={}\nenhance_sound={}\nturret_range={}\nmap_zoom={}\n",
+            "enhance_textures={}\nsoft_shadows={}\ncontact_shadows={}\nexplosion_glow={}\nturret_shadows={}\nenhance_sound={}\nturret_range={}\nmap_zoom={}\nswap_buttons={}\n",
             self.enhance as u8,
             self.soft_shadows as u8,
             self.contact_shadows as u8,
@@ -89,7 +103,8 @@ impl Extra {
             self.turret_shadows as u8,
             self.sound as u8,
             self.turret_range as u8,
-            self.zoom as u8
+            self.zoom as u8,
+            self.swap_buttons as u8
         )
     }
 }
@@ -294,7 +309,7 @@ pub const CONTROLS_PAGES: usize = keybinds::PAGE_ROWS.len();
 
 /// Rows of page 2: (label, one-line explanation), English ([`Tr::option_rows`] has the other languages). Row `k`'s label sits at
 /// [`own_rect`]; its value (On / Off) between two green arrows starting at [`OWN_ARROWS_X`], like the exe's arrow rows.
-pub const OWN_ROWS: [(&str, &str); 8] = [
+pub const OWN_ROWS: [(&str, &str); 9] = [
     ("Enhanced textures", "Smooths sprites and the ground when you zoom in"),
     ("Soft shadows", "Blurs the edges of shadows"),
     ("Contact shadows", "Dark halo where buildings and units meet the ground"),
@@ -303,6 +318,7 @@ pub const OWN_ROWS: [(&str, &str); 8] = [
     ("Enhanced sound", "Cleaner, smoother effects, speech and music"),
     ("Turret range", "Shows how far a turret reaches while you place it"),
     ("Map zoom", "Zoom with the mouse wheel (original: fixed scale)"),
+    ("Swap mouse buttons", "Move and attack orders on the right button"),
 ];
 /// Left edge of the left arrow of every page-2 row (design space).
 const OWN_ARROWS_X: i32 = 236;
@@ -311,7 +327,7 @@ const OWN_VALUE_W: i32 = 60;
 
 /// Click area of row `k`'s label on page 2 (design space).
 fn own_rect(k: usize) -> ui::Rect {
-    ui::Rect { x: 62, y: 118 + 36 * k as i32, w: OWN_ARROWS_X - 62 - 6, h: 20 }
+    ui::Rect { x: 62, y: 116 + 34 * k as i32, w: OWN_ARROWS_X - 62 - 6, h: 20 }
 }
 
 /// Click area of the page arrow forward (a right arrow at the right edge) or back (a left one at the left edge).
@@ -702,6 +718,7 @@ impl OptionsMenu {
                     5 => o.extra.sound ^= true,
                     6 => o.extra.turret_range ^= true,
                     7 => o.extra.zoom ^= true,
+                    8 => o.extra.swap_buttons ^= true,
                     _ => {}
                 }
             }
@@ -806,7 +823,7 @@ impl OptionsMenu {
         self.text(canvas, self.tr.enhancements(), 21, 62, true);
         let lh = ui::text_height(&self.fonts, 1.0);
         let e = &self.opts.extra;
-        let values = [e.enhance, e.soft_shadows, e.contact_shadows, e.glow, e.turret_shadows, e.sound, e.turret_range, e.zoom];
+        let values = [e.enhance, e.soft_shadows, e.contact_shadows, e.glow, e.turret_shadows, e.sound, e.turret_range, e.zoom, e.swap_buttons];
         for (k, (label, hint)) in self.tr.option_rows().iter().enumerate() {
             let r = own_rect(k);
             let hot = matches!(self.hover, Some(Hit::Extra(j) | Hit::ExtraArrow(j, _)) if j == k);
@@ -1306,7 +1323,17 @@ mod tests {
     #[test]
     fn own_settings_file_round_trips() {
         for on in [true, false] {
-            let e = Extra { enhance: on, soft_shadows: !on, contact_shadows: on, glow: !on, turret_shadows: on, sound: !on, turret_range: on, zoom: !on };
+            let e = Extra {
+                enhance: on,
+                soft_shadows: !on,
+                contact_shadows: on,
+                glow: !on,
+                turret_shadows: on,
+                sound: !on,
+                turret_range: on,
+                zoom: !on,
+                swap_buttons: on,
+            };
             assert_eq!(Extra::parse(&e.write()), e);
         }
         assert_eq!(Extra::parse(""), Extra::default(), "a missing file keeps the defaults");
@@ -1317,6 +1344,8 @@ mod tests {
         assert_eq!(Extra::parse("turret_range=0\n"), Extra { turret_range: false, ..Extra::default() });
         assert!(Extra::default().zoom, "map zoom starts on");
         assert_eq!(Extra::parse("map_zoom=0\n"), Extra { zoom: false, ..Extra::default() });
+        assert!(!Extra::default().swap_buttons, "the mouse buttons start unswapped");
+        assert_eq!(Extra::parse("swap_buttons=1\n"), Extra { swap_buttons: true, ..Extra::default() });
     }
 
     #[test]

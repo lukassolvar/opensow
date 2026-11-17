@@ -18,7 +18,14 @@ Update function `0x416880(dx, dy, left, right)` (called every frame with the mov
 - Screen edges scroll with the scroll arrows (docs/cursor.md).
 - Port extra (not in the exe): the mouse wheel zooms the mission map (docs/game.md, "Camera zoom"; Options page 2 "Map zoom" turns it off).
 
-OpenSOW: `Play::left_up` (click by `Play::pointer()`), `right_down/right_drag/right_up`, tests `playing_a_mission`, `hud_clicks_reach_the_panel_not_the_map`.
+## Swapped mouse buttons (not in the exe)
+Options page 2 "Swap mouse buttons" (`Extra::swap_buttons`, `swap_buttons` in `opensow.cfg`, off by default; also on the launcher's Extras tab) moves the orders to the right button, the way later RTS games work. Only the clicks that give an order change: when the pointer at the release is an order pointer (`Play::order_pointer`: Advancer repair / destroy / upgrade, attack, or the go-to with units selected):
+- a right click (no drag) gives that order (`Play::give_order`), the selection stays;
+- a left click does the original right click instead (`Play::cancel_click`): it deselects, or with an Advancer selected on an own building toggles repair mode.
+
+Everything else keeps the original buttons: selecting units and buildings with a left click or a left drag box, the right drag scroll, the HUD, and the placement, air-strike and rally modes (left confirms, right cancels). Menus are not affected. Test `swapped_mouse_buttons_trade_places_in_a_mission`.
+
+OpenSOW: `Play::left_up` (click by `Play::pointer()`, orders in `Play::give_order`), `right_down/right_drag/right_up`, tests `playing_a_mission`, `hud_clicks_reach_the_panel_not_the_map`.
 
 **Differs from the exe:** a click on a building with no unit selected plays the building click sound for enemy and neutral buildings too (`Play::left_up`); only an own building gets selected, as in the exe.
 

@@ -319,6 +319,7 @@ impl Game {
         self.settings.cloud_detail = o.cfg.detail;
         self.settings.turret_range = o.extra.turret_range;
         self.settings.zoom = o.extra.zoom;
+        self.settings.swap_buttons = o.extra.swap_buttons;
     }
 
     /// Above zoom 1 the world is drawn from 2x enhanced copies of the original art (viewer `upscale`, docs/enhance.md): the Options

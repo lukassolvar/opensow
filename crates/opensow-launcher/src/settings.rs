@@ -16,7 +16,7 @@ pub const NATIVE: (u32, u32) = (0, 0);
 pub const RESOLUTIONS: [(u32, u32); 8] = [(640, 480), (800, 600), (1024, 768), (1600, 900), (1920, 1080), (2560, 1440), (3840, 2160), NATIVE];
 
 /// This port's switches in the order of the game's Options page 2 (`options::OWN_ROWS`): file key and default (`Extra::default`).
-pub const EXTRAS: [(&str, bool); 8] = [
+pub const EXTRAS: [(&str, bool); 9] = [
     ("enhance_textures", true),
     ("soft_shadows", true),
     ("contact_shadows", true),
@@ -25,6 +25,7 @@ pub const EXTRAS: [(&str, bool); 8] = [
     ("enhance_sound", true),
     ("turret_range", true),
     ("map_zoom", true),
+    ("swap_buttons", false),
 ];
 
 /// One value the settings page shows.
@@ -55,7 +56,7 @@ pub enum Field {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GameSettings {
     pub file: SettingsFile,
-    pub extras: [bool; 8],
+    pub extras: [bool; 9],
     /// Lines of `opensow.cfg` the launcher does not know, written back unchanged.
     pub other: Vec<String>,
 }
@@ -198,7 +199,7 @@ mod tests {
     fn extras_keep_unknown_lines_and_defaults() {
         let mut s = GameSettings::default();
         s.parse_extras("soft_shadows=0\nfuture_thing=1\nturret_shadows=1\n");
-        assert_eq!(s.extras, [true, false, true, true, true, true, true, true]);
+        assert_eq!(s.extras, [true, false, true, true, true, true, true, true, false]);
         assert_eq!(s.extras_text().lines().last(), Some("future_thing=1"));
         let mut back = GameSettings::default();
         back.parse_extras(&s.extras_text());
