@@ -211,16 +211,19 @@ pub fn glow(buf: &mut [u32], w: usize, h: usize, view: &View, f: &Frame, ax: i32
 /// Most light grids [`glow_grid`] keeps (the zoom eases through many radii; past this the cache starts over).
 const GLOW_GRIDS_MAX: usize = 256;
 
+/// A light grid with its key (see [`glow_grid`]).
+type GlowGrid = (u64, std::sync::Arc<[u32]>);
+
 thread_local! {
     /// The glow's light grids by (radius bits, peak): a flame stream draws hundreds of the same puff a frame.
-    static GLOW_GRIDS: std::cell::RefCell<std::collections::HashMap<(u32, u32), (u64, std::sync::Arc<[u32]>)>> = Default::default();
+    static GLOW_GRIDS: std::cell::RefCell<std::collections::HashMap<(u32, u32), GlowGrid>> = Default::default();
 }
 
 /// Never reused, so a key names one grid's contents for good (the recording shares grids by it).
 static NEXT_GRID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// The square alpha grid of a glow of radius `rs` screen pixels and peak alpha `peak`, centred on its middle cell, with its key.
-fn glow_grid(rs: f32, peak: u32) -> (u64, std::sync::Arc<[u32]>) {
+fn glow_grid(rs: f32, peak: u32) -> GlowGrid {
     GLOW_GRIDS.with_borrow_mut(|cache| {
         if let Some(g) = cache.get(&(rs.to_bits(), peak)) {
             return g.clone();
