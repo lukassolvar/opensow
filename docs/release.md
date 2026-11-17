@@ -74,15 +74,14 @@ macOS runs on `macos-15` (Apple silicon; the release file's Intel half is cross-
 Speed: `Swatinem/rust-cache` keeps the dependencies' builds per job and system; only `main` (and tags) save caches, pull
 requests read them, so they never evict `main`'s. Warnings fail the lint and test jobs (`RUSTFLAGS=-D warnings`).
 
-Cost: the repository is private for now, on the Free plan's 2000 minutes a month; Windows minutes count twice, macOS ten
-times, and each job is rounded up to whole minutes. Measured on the first runs: lint 2, Ubuntu tests 5, Windows tests
-8 x 2, and the macOS tests an estimated 8 x 10, so a push costs about 100 minutes (about 20 pushes a month); a run started
-by hand adds the four release files, about 20 minutes for Linux and Windows plus the macOS universal build (two builds,
-roughly 10 minutes x 10). A public repository runs all of it for free.
+Cost: a public repository runs all of it on the standard runners for free. A private one on the Free plan has 2000
+minutes a month; Windows minutes count twice, macOS ten times, and each job is rounded up to whole minutes. Measured with
+warm caches: lint 1, Ubuntu tests 3, macOS tests 2 x 10, Windows tests 4 x 2, so a push costs about 32 minutes; a run
+started by hand adds the four release files (not measured yet; the macOS universal build compiles twice and dominates).
 
 ## Local checks
 - macOS: `cargo build --profile dist --no-default-features -p opensow-launcher -p opensow-game` then
-  `scripts/package.sh macos-aarch64 dist target/dist` (one processor: Homebrew's Rust has no Intel target; with rustup add
+  `scripts/package.sh macos-aarch64 dist target/dist` (one processor: a toolchain without the Intel target, such as Homebrew's Rust, builds only its own; with rustup add
   `x86_64-apple-darwin` and pass both folders with `macos-universal` for the universal image).
 - Linux and Windows in Docker: `scripts/docker-check.sh [linux-aarch64] [linux-x86_64] [windows-x86_64]`. Linux runs the CI's
   Ubuntu 22.04: tests, then the release build and its archive. Windows cross-compiles for MSVC with `cargo-xwin` (builds and

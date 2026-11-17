@@ -1,0 +1,50 @@
+name: Bug report
+description: Something works differently from the original game, or crashes.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please do not attach files from the game's install (pictures, sounds, levels):
+        OpenSOW cannot accept game data. Savegames and your own maps are fine.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you saw, and what the original game does in the same situation (if you know).
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to repeat it
+      description: Mission or skirmish map, the steps, and how often it happens.
+      placeholder: |
+        1. Start mission 3
+        2. Build a factory next to the river
+        3. ...
+  - type: input
+    id: version
+    attributes:
+      label: OpenSOW version
+      description: Settings → Launcher → Updates in the launcher, or the release file's name.
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: system
+    attributes:
+      label: System
+      options: [macOS (Apple silicon), macOS (Intel), Windows, Linux, Other]
+    validations:
+      required: true
+  - type: input
+    id: edition
+    attributes:
+      label: Game copy
+      description: Where your State of War comes from (Steam, GOG, CD) and whether you have Warmonger.
+  - type: textarea
+    id: extra
+    attributes:
+      label: Screenshots or log output
+      description: Optional. A screenshot, or what the game printed in a terminal.

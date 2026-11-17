@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "OpenSOW launcher: choose the language and the install folder of each game"
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [features]

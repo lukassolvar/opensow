@@ -1,0 +1,16 @@
+name: Feature idea
+description: Something new for OpenSOW (the original game's behaviour stays the default).
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: The idea
+      description: What you would like, and the problem it solves.
+    validations:
+      required: true
+  - type: textarea
+    id: original
+    attributes:
+      label: Relation to the original game
+      description: Does it change how State of War plays? New behaviour is an option; the original's stays the default.

@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Playable OpenSOW prototype: menus and a skirmish on the original levels"
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [features]

@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Command-line asset inspection and extraction for State of War"
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [[bin]]
