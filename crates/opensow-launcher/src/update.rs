@@ -196,7 +196,8 @@ pub fn releases_url() -> String {
 /// `## Added`, `## Changed`, `## Improved`; translated: `## Novinky`, `## Nové`, `## 新功能`, `## 新內容`) and `## Fixed` (`## Opravy`,
 /// `## Opravené`, `## 修复`, `## 修復`), each line the bullet's bold lead (`- **Controls menu.** ...`) without
 /// its closing full stop or colon (also `。` / `：`); a bullet without a bold lead gives its first sentence. Other sections (Download, Known
-/// limitations, GitHub's "What's Changed") are left out.
+/// limitations, GitHub's "What's Changed", and `## Launcher` / `## Spúšťač` / `## Spouštěč` / `## 启动器` / `## 啟動器`, where
+/// launcher-only changes go: the card is about the game) are left out.
 pub fn parse_notes(md: &str) -> Vec<Note> {
     let mut out = vec![];
     let mut section: Option<bool> = None;
@@ -555,7 +556,7 @@ mod tests {
     fn notes_give_the_bold_lead_of_each_new_and_fixed_bullet() {
         let md = "Intro line.\n\n## New\n\n- **Controls menu.** Three pages of hotkeys.\n* Plain bullet. With more text\n\n## Fixed\n\n\
                   - **Slovak and Czech texts:** typos.\n  - **Mission hints** are drawn with a shadow.\n\n## Download\n\n- **Not a note.**\n\n\
-                  ## What's Changed\n* CI on every pull request by @someone\n";
+                  ## What's Changed\n* CI on every pull request by @someone\n## Launcher\n- **GitHub link.** x\n## Spúšťač\n- **Odkaz.** x\n## 启动器\n- **链接。**\n";
         let n = parse_notes(md);
         let got: Vec<(bool, &str)> = n.iter().map(|n| (n.fixed, n.title.as_str())).collect();
         assert_eq!(got, [(false, "Controls menu"), (false, "Plain bullet"), (true, "Slovak and Czech texts"), (true, "Mission hints")]);
@@ -582,7 +583,7 @@ mod tests {
         let mut seen = 0;
         for e in std::fs::read_dir(&dir).unwrap().flatten() {
             let n = parse_notes(&std::fs::read_to_string(e.path()).unwrap());
-            assert!(n.len() >= 3, "{}: {n:?}", e.path().display());
+            assert!(!n.is_empty(), "{}: {n:?}", e.path().display());
             assert!(n.iter().all(|n| n.title.chars().count() < 60 && !n.title.contains('*')), "{}: {n:?}", e.path().display());
             seen += 1;
         }

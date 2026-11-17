@@ -56,7 +56,8 @@ The `dist` profile (`Cargo.toml`) is `release` with thin LTO and stripped symbol
 3. `build.yml` builds and packs every system; `release.yml` then opens a **draft** release with all files. Its notes are
    `docs/releases/vX.Y.Z.md` when that file exists (write it before tagging), else notes GitHub generates from the
    commits. The launcher builds the same file in for its home page's "What's new" card and reads its `## New` /
-   `## Fixed` bullets' bold leads (docs/launcher.md "What's new"); keep that form. Translations sit next to it as
+   `## Fixed` bullets' bold leads (docs/launcher.md "What's new"); keep that form. Only changes to the game go under New /
+   Fixed; launcher-only changes go under `## Launcher`, which the card leaves out. Translations sit next to it as
    `vX.Y.Z.sk.md`, `vX.Y.Z.cs.md`, `vX.Y.Z.zh-Hans.md` and `vX.Y.Z.zh-Hant.md` (headings translated, e.g. `## Novinky` /
    `## Opravy`); they are built into the launcher too and `release.yml` attaches them to the release, so an older launcher
    shows the new release's notes in its language. A missing one shows English.
