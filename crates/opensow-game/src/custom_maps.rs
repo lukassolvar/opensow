@@ -2,7 +2,9 @@
 //! skirmish screen's Custom tab and the map editor, loading and saving (`formats::custommap`), and where a map's ground comes from.
 
 use opensow_formats::custommap::{self, CustomMap, Problem, Terrain};
+use opensow_formats::level::Level;
 use opensow_formats::{Edition, GameDir};
+use opensow_viewer::scene::{Ground, Scene};
 use std::path::{Path, PathBuf};
 
 /// `$OPENSOW_MAPS_DIR`, else `maps` in the port's per-user data folder.
@@ -97,6 +99,70 @@ pub fn terrain_source(game: &GameDir, t: Terrain) -> (GameDir, String) {
     let mut g = game.clone();
     g.edition = if t.warmonger && game.warmonger.is_some() { Edition::Warmonger } else { Edition::Original };
     (g, format!("M{:02}", t.mission))
+}
+
+/// Builds a custom map's scene: the base mission's terrain, or the generated layout built on it (docs/generated-maps.md).
+/// Deterministic, so a savegame's reload gets the same grids.
+pub fn load_scene(game: &GameDir, ground: &custommap::Ground, facing: usize, aim: Option<usize>, level: Option<Level>) -> Result<Scene, String> {
+    let (g, name) = terrain_source(game, ground.terrain);
+    let mut scene = Scene::load_with(&g, &name, facing, aim, level)?;
+    if ground.layout.is_some() {
+        let base = Ground { bg: std::mem::take(&mut scene.bg), fg: std::mem::take(&mut scene.foreground), map: scene.map.clone(), w: scene.bg_w, h: scene.bg_h };
+        scene.set_ground(base_ground(game, ground, base, &mut Sources::default()));
+    }
+    Ok(scene)
+}
+
+/// The map's ground: the base mission's as loaded (`base`), or the generated layout built on it. A feature whose source is
+/// missing (Warmonger not installed) is skipped.
+pub fn base_ground(game: &GameDir, ground: &custommap::Ground, base: Ground, sources: &mut Sources) -> Ground {
+    let Some(layout) = &ground.layout else { return base };
+    let mut g = opensow_viewer::layout::ground(&base, &layout.patches);
+    opensow_viewer::layout::paint_trails(&mut g, &base, &layout.trails);
+    for f in &layout.features {
+        if f.source == ground.terrain {
+            opensow_viewer::layout::paste(&mut g, &base, f);
+        } else if let Some(src) = sources.get(game, f.source) {
+            opensow_viewer::layout::paste(&mut g, src, f);
+        }
+    }
+    g
+}
+
+/// A reduced picture of a custom map's ground, a generated layout included.
+pub fn thumbnail(game: &GameDir, ground: &custommap::Ground, max_w: usize, max_h: usize) -> Option<opensow_viewer::scene::Thumbnail> {
+    let (g, name) = terrain_source(game, ground.terrain);
+    if ground.layout.is_none() {
+        return opensow_viewer::scene::thumbnail(&g, &name, max_w, max_h);
+    }
+    let built = base_ground(game, ground, opensow_viewer::scene::load_ground(&g, &name).ok()?, &mut Sources::default());
+    Some(opensow_viewer::scene::shrink(&built.bg, built.w, built.h, max_w, max_h))
+}
+
+/// The grounds a layout's features are cut from, as loaded from the install (the last few kept: a big one decodes to about 25 MB).
+#[derive(Default)]
+pub struct Sources {
+    loaded: Vec<(Terrain, Ground)>,
+}
+
+impl Sources {
+    const KEEP: usize = 3;
+
+    /// Terrain `t`'s original ground, loaded on first use; `None` when its files are missing.
+    pub fn get(&mut self, game: &GameDir, t: Terrain) -> Option<&Ground> {
+        if let Some(i) = self.loaded.iter().position(|(k, _)| *k == t) {
+            let e = self.loaded.remove(i);
+            self.loaded.push(e);
+        } else {
+            let (g, name) = terrain_source(game, t);
+            let ground = opensow_viewer::scene::load_ground(&g, &name).ok()?;
+            if self.loaded.len() == Self::KEEP {
+                self.loaded.remove(0);
+            }
+            self.loaded.push((t, ground));
+        }
+        self.loaded.last().map(|(_, g)| g)
+    }
 }
 
 /// Every terrain a map can be made on: the 22 missions of the base game, then Warmonger's when it is installed.

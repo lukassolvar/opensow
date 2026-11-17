@@ -8,7 +8,7 @@ Players make their own skirmish maps in the game, keep them in a folder they can
 - **Edit** opens the map in the editor; leaving the editor then returns to the Custom tab.
 
 ## The start page
-Backdrop and bars like the skirmish screen (design 1920x1080 or 1024x768, `mapeditor_ui::Geo`). Left **YOUR MAPS** (the folder's maps, scrollable with the wheel; Open, Delete (asks once more: the button then reads "Sure? Delete"; selecting another map disarms it), Open folder; headless `--save-map` saves the open map); right **NEW MAP**: the terrains as thumbnails of their ground (`scene::thumbnail`, loaded a few per frame), tabs State of War / Warmonger when Warmonger is installed, and a last dashed tile **Generated terrain - coming later** reserved for the map generator. The bottom bar: BACK, the chosen terrain's mission and size, CREATE.
+Backdrop and bars like the skirmish screen (design 1920x1080 or 1024x768, `mapeditor_ui::Geo`). Left **YOUR MAPS** (the folder's maps, scrollable with the wheel; Open, Delete (asks once more: the button then reads "Sure? Delete"; selecting another map disarms it), Open folder; headless `--save-map` saves the open map); right **NEW MAP**: the terrains as thumbnails of their ground (`scene::thumbnail`, loaded a few per frame), tabs State of War / Warmonger when Warmonger is installed. The bottom bar: BACK, the chosen terrain's mission and size, CREATE.
 
 ## The editor page
 The map fills the window left of a sidebar (480 design px wide, 360 compact; `map_width`). Map: the viewer's renderer (`render::render`) with the editor's marks (`Editor::draw_marks`: HQ rings, hover / selection frames, green / red placement ghost). Drag on empty ground pans, the wheel zooms around the pointer, 8 % a notch eased in over a few frames (`ZOOM_STEP`, `ZOOM_EASE`), never further out than the whole map (the start view: `fit_zoom`), the arrows and W A S D scroll smoothly while held, at the Options' KEYS SCROLL speed like the game's map; drag an object to move it. A switch on the map's top-left corner (key B) tints where nothing can be built: impassable ground red, the no-build edges orange (the `.map` grid, the rules of `Editor::can_place`); it shows by itself while a building or turret is armed. Some terrains leave little room: Warmonger's M22 has 62 % of its cells impassable, including open-looking ground (the base game's terrains: 33-63 %).
@@ -51,6 +51,11 @@ records: u16 tag, u32 length, payload
   4 MISSION  u8 win rule (0 no enemy headquarters, 1 nothing of the enemy left, 2 escort)
   5 REINFORCEMENT  i32 credits, i32 research, u8 x5 air forces (header order), u16 count, count x (u16 cell x, u16 cell y, u8 squad 0-17)
   6 ESCORT   u8 goal set, u16 goal x, u16 goal y, u16 count, count x (u16 cell x, u16 cell y) waypoints in order (at most 8)
+  7 LAYOUT   a composed ground (docs/generated-maps.md): u16 count, count x (u16 x, u16 y) ground patch origins in the base
+             mission's picture, row by row (at most 4096); u16 count, count x feature (u8 source edition, u8 source mission,
+             u8 x, u8 y, u8 w, u8 h (source cells), u8 dest x, u8 dest y, ceil(w*h/8) bytes of cell bits, row by row, lowest
+             bit first) (at most 512); u16 count, count x (u16 x, u16 y, u16 source x, u16 source y, u8 radius) trail
+             stamps in pixels (at most 8192; absent in older files)
 ```
 
 The MISSION record is written only when it differs from the default (the headquarters rule), REINFORCEMENT and ESCORT only when they hold something; a reader takes the bytes it knows and ignores further ones.
@@ -83,15 +88,17 @@ A custom map can be a mission instead of a plain skirmish (`custommap::Mission`,
 
 ## Code and tests
 - `opensow-formats`: `level::Level::to_bytes` / `parse_prefix`; `custommap.rs` (file, names, `Sides`, Advancers, `problems`); tests with synthetic bytes, the real-data round trip of every level file, `opensow check` reads the maps folder too and `opensow level FILE` prints a custom map.
+- `opensow-viewer::layout` and `scene::load_ground` / `Scene::set_ground`: composed grounds (docs/generated-maps.md); `custom_maps::load_scene` / `base_ground` / `thumbnail` build them for the game, the editor and the skirmish preview.
 - `opensow-viewer::editor`: `Editor::custom`, per-object `ext` kept in step with the objects and the undo history, `set_header`, `set_ext`, `set_start_hp`, `set_turret_type`, `set_unlock`, `LineChange::Lock`.
 - `opensow-game`: `mapeditor_ui.rs` (both pages; one widget list drawn and hit-tested), `custom_maps.rs` (folder, list, load, save, terrain source), `textinput.rs`, `page.rs` (the look shared with `skirmish_ui.rs`: pictures, GDI text, panels, buttons, chips, steppers, shapes), the Custom tab in `skirmish_ui.rs`, `Play::new_skirmish` with a custom terrain and additions, `tr.rs`. Tests: every control inside the window and hit where it is drawn, no two overlapping, at 640x480 .. 2560x1440 with nothing, a headquarters and a factory selected; a map made, saved, listed and reopened (name, file, unlock points, locks, start health, credits, Advancers); undo and the unsaved-changes guard; names from the language file; the sim test `a_custom_map_sets_unlock_points_headquarters_without_advancers_and_neutral_start_health`.
 - Headless (screens need `--screenshot`; set `OPENSOW_MAPS_DIR` to keep demos out of the real folder):
   - `opensow-game --screen mapeditor [--terrain N] --screenshot out.png --size WxH` (start page)
   - `opensow-game --screen mapeditor --new N [--demo] [--areas] [--name TEXT [--focus]] [--select CX,CY | --tool NAME --at CX,CY] [--content sides|mission] [--timer MIN[,victory|defeat|reinforcements]] [--win all|escort] [--reinforce ...] [--drops ...] [--goal CX,CY --route ... --pods ...] [--delete] [--save] --screenshot out.png`
   - `opensow-game --screen mapeditor --open FILE.sowmap --select CX,CY --screenshot out.png`
+  - `opensow-game --screen mapeditor --plan docs/map-plans/NAME.txt [--save-map] --screenshot out.png` (a composed map, docs/generated-maps.md; flows, branches, rooms and walls under "Flows")
   - `opensow-game --screen skirmish --tab custom [--map N] --screenshot out.png`
   - `opensow-game --skirmish custom/<file stem> --ticks N --screenshot out.png --report` (a match on a custom map; the report's last line prints the clock and the objective)
 
 ## Not done yet
-- The terrain cannot be changed after a map is created (make a new map); the map generator (the reserved tile).
+- The terrain cannot be changed after a map is created (make a new map). New layouts are composed from plans with the headless `--plan` only (docs/generated-maps.md).
 - No range ring around a selected turret; no paste into the name field; the list scroll bars follow the wheel but cannot be dragged.

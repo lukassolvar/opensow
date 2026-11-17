@@ -1,4 +1,4 @@
-//! `opensow-viewer [LEVEL] [--screenshot out.png] [--size WxH] [--zoom Z] [--center CX,CY] [--facing 0..31] [--aim 0..31] [--walk TICKS] [--fire TICK] [--shot x1,y1,x2,y2,type]... [--range CX,CY,MIN,MAX]... [--overlay blocked,grid,objects,markers,sprites,muzzles,minimap]`
+//! `opensow-viewer [LEVEL] [--screenshot out.png] [--size WxH] [--zoom Z] [--center CX,CY] [--facing 0..31] [--aim 0..31] [--walk TICKS] [--fire TICK] [--shot x1,y1,x2,y2,type]... [--range CX,CY,MIN,MAX]... [--overlay blocked,grid,objects,markers,sprites,muzzles,minimap] [--pieces]`
 //!
 //! Keys: arrows/WASD or left-drag pan, wheel or +/- zoom, B blocked cells, G grid,
 //! O objects (squares for things without art), M markers, X sprites, F muzzle points, [ ] turn all units, K play the walk cycle, V loop the fire/recoil sequences, N/P next/previous level, Home fit map, Esc quit.
@@ -70,6 +70,7 @@ fn parse_args() -> Result<Args, String> {
     while let Some(arg) = it.next() {
         let mut value = |what: &str| it.next().ok_or(format!("{arg} needs {what}"));
         match arg.as_str() {
+            "--pieces" => {}
             "--screenshot" => a.screenshot = Some(value("a path")?),
             "--edit" => a.edit = Some(it.next().filter(|v| !v.starts_with("--")).unwrap_or_default()),
             "--tool" => a.tool = Some(value("a palette item")?),
@@ -163,6 +164,21 @@ fn main() {
     });
     if let Some(wanted) = &args.edit {
         return run_editor(game, wanted, &args);
+    }
+    // `--pieces`: what a map plan can place from this level (docs/generated-maps.md), then exit
+    if std::env::args().any(|a| a == "--pieces") {
+        let ground = opensow_viewer::scene::load_ground(&game, &args.level).unwrap_or_else(|e| {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        });
+        let warmonger = args.level.starts_with(['W', 'w']);
+        let t = opensow_formats::custommap::Terrain { warmonger, mission: args.level[1..].parse().unwrap_or(0) };
+        for (seed, (x, y, w, h), edges, n, soil) in opensow_viewer::layout::catalogue(t, &ground) {
+            let e: Vec<&str> = ["top", "bottom", "left", "right"].iter().zip(edges).filter(|e| e.1).map(|e| *e.0).collect();
+            let soil = soil.map_or("-".to_string(), |c| format!("{:.0},{:.0},{:.0}", c[0], c[1], c[2]));
+            println!("{},{} box {x},{y} {w}x{h} cells {n} edges {} ground {soil}", seed.0, seed.1, if e.is_empty() { "-".into() } else { e.join("+") });
+        }
+        return;
     }
     let mut scene = Scene::load(&game, &args.level, args.facing, args.aim).unwrap_or_else(|e| {
         eprintln!("error: {e}");

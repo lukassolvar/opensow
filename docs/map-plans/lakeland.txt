@@ -1,0 +1,18 @@
+; Lakeland: forest with water. A long lake from the north edge and one from the west edge split the map; the main flow
+; leaves blue's base in the north-west, slips between the two lakes, runs south of the long lake and climbs the east
+; side to green.
+name Lakeland
+base M21
+seed 5
+piece M21 36,0 at 36,0
+piece M21 16,48 at 0,44
+start 2,2 14x10
+start 84,3 11x10
+flow 6 14,8 24,20 34,34 46,39 51,48 52,62 60,73 76,74 88,60 86,44 78,30 88,14
+branch 5 24,20 10,26 6,31
+room 2,30 10x10
+branch 5 52,62 36,67 20,70
+room 6,64 12x10
+branch 5 78,30 70,22 67,15
+room 62,6 10x9
+wall 97% M08 M10 M12 M14 M18 M21

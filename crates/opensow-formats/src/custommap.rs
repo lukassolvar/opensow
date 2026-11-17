@@ -11,7 +11,15 @@
 //!   4 MISSION  u8 win rule (0 no enemy headquarters, 1 nothing of the enemy left, 2 a pod of the convoy reaches the goal)
 //!   5 REINFORCEMENT  i32 credits, i32 research, u8 x5 air forces (header order), u16 count, count x (u16 cell x, u16 cell y, u8 squad)
 //!   6 ESCORT   u8 goal set, u16 goal cell x, u16 goal cell y, u16 count, count x (u16 cell x, u16 cell y) waypoints in order
+//!   7 LAYOUT   a composed ground ([`Layout`], docs/generated-maps.md): u16 patch count, count x (u16 x, u16 y) ground patch
+//!              origins in the base mission's picture, row by row; u16 feature count, count x (u8 source edition, u8 source
+//!              mission, u8 x, u8 y, u8 w, u8 h (source cells), u8 dest x, u8 dest y, ceil(w*h/8) bytes of cell bits, row by row,
+//!              lowest bit first); u16 trail count, count x (u16 x, u16 y, u16 source x, u16 source y, u8 radius) trail
+//!              stamps in pixels
 //! ```
+//!
+//! The ground is the base mission's, or the generated layout built on the base mission's ground on every load
+//! (docs/generated-maps.md).
 //!
 //! The mission countdown is original data: level header words 65 / 66 / 67 (enabled, minutes, end mode; [`Timer`]).
 //!
@@ -32,6 +40,11 @@ const TAG_OBJECT: u16 = 3;
 const TAG_MISSION: u16 = 4;
 const TAG_REINFORCEMENT: u16 = 5;
 const TAG_ESCORT: u16 = 6;
+const TAG_LAYOUT: u16 = 7;
+/// Most features a generated layout keeps.
+pub const MAX_FEATURES: usize = 512;
+/// Most ground patches a generated layout keeps (a 128 x 128 map of 88 px steps needs 47 x 47).
+pub const MAX_PATCHES: usize = 4096;
 /// Most waypoints of an escort route.
 pub const MAX_WAYPOINTS: usize = 8;
 /// The convoy's unit: the Rogon pod of the original's missions 3 and 8.
@@ -207,12 +220,134 @@ impl Reinforcement {
 }
 
 /// Where the ground comes from: mission `M<mission>` of the base game or of Warmonger.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Terrain {
     /// True = the ground of the Warmonger mission, false = of the base game's.
     pub warmonger: bool,
     /// The mission number whose ground is used (`M<mission>`).
     pub mission: i32,
+}
+
+/// One piece of a generated layout: the cells `cells` of a rectangle of a mission's ground (a cliff, a lake with its shore, a
+/// forest, a building painted into the picture) and where the rectangle lands (docs/generated-maps.md; not in the exe).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Feature {
+    /// The mission the feature is cut from.
+    pub source: Terrain,
+    /// Top-left source cell of the rectangle.
+    pub x: u8,
+    /// Top-left source cell of the rectangle.
+    pub y: u8,
+    /// Width of the rectangle in cells.
+    pub w: u8,
+    /// Height of the rectangle in cells.
+    pub h: u8,
+    /// Top-left destination cell.
+    pub dx: u8,
+    /// Top-left destination cell.
+    pub dy: u8,
+    /// The feature's own cells in the rectangle, row by row (`w * h`).
+    pub cells: Vec<bool>,
+}
+
+/// A composed ground (docs/generated-maps.md; not in the exe): open ground quilted from patches of the base mission's picture,
+/// then whole features cut from missions. The map keeps the base mission's size.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Hash)]
+pub struct Layout {
+    /// Top-left pixel of each ground patch in the base mission's picture, row by row.
+    pub patches: Vec<(u16, u16)>,
+    /// Pasted over the ground in order.
+    pub features: Vec<Feature>,
+    /// Trail texture laid over the open ground before the features, in order (worn tracks and base plazas).
+    pub trails: Vec<TrailStamp>,
+}
+
+/// A round dab of trail texture (docs/generated-maps.md): the source pixel of the base mission's picture taken to `at`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TrailStamp {
+    /// Centre on the map (pixels).
+    pub at: (u16, u16),
+    /// Centre in the base mission's picture (pixels), inside one of its trails.
+    pub from: (u16, u16),
+    /// Radius (pixels).
+    pub radius: u8,
+}
+
+/// Most trail stamps a layout keeps.
+pub const MAX_TRAILS: usize = 8192;
+
+/// Everything the map's ground is built from: the base mission, or a layout on its ground (docs/generated-maps.md).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ground {
+    /// The base mission's ground.
+    pub terrain: Terrain,
+    /// A composed ground replacing the base mission's own.
+    pub layout: Option<Layout>,
+}
+
+fn read_layout(b: &mut Reader) -> Result<Layout> {
+    let mut l = Layout::default();
+    for _ in 0..b.u16("patches")? {
+        let p = (b.u16("patch x")?, b.u16("patch y")?);
+        if l.patches.len() < MAX_PATCHES {
+            l.patches.push(p);
+        }
+    }
+    for _ in 0..b.u16("features")? {
+        let source = Terrain { warmonger: b.u8("feature edition")? != 0, mission: i32::from(b.u8("feature mission")?) };
+        let mut v = [0u8; 6];
+        for x in &mut v {
+            *x = b.u8("feature cells")?;
+        }
+        let [x, y, w, h, dx, dy] = v;
+        let n = usize::from(w) * usize::from(h);
+        let bits = b.bytes(n.div_ceil(8), "feature bits")?;
+        let cells = (0..n).map(|i| bits[i / 8] >> (i % 8) & 1 != 0).collect();
+        if w > 0 && h > 0 && l.features.len() < MAX_FEATURES {
+            l.features.push(Feature { source, x, y, w, h, dx, dy, cells });
+        }
+    }
+    // trail stamps follow (absent in older files)
+    if b.remaining() >= 2 {
+        for _ in 0..b.u16("trails")? {
+            let at = (b.u16("trail x")?, b.u16("trail y")?);
+            let from = (b.u16("trail source x")?, b.u16("trail source y")?);
+            let radius = b.u8("trail radius")?;
+            if l.trails.len() < MAX_TRAILS {
+                l.trails.push(TrailStamp { at, from, radius });
+            }
+        }
+    }
+    Ok(l)
+}
+
+fn write_layout(l: &Layout) -> Vec<u8> {
+    let patches = &l.patches[..l.patches.len().min(MAX_PATCHES)];
+    let mut p = (patches.len() as u16).to_le_bytes().to_vec();
+    for &(x, y) in patches {
+        p.extend(x.to_le_bytes());
+        p.extend(y.to_le_bytes());
+    }
+    let features = &l.features[..l.features.len().min(MAX_FEATURES)];
+    p.extend((features.len() as u16).to_le_bytes());
+    for f in features {
+        p.extend([u8::from(f.source.warmonger), f.source.mission.clamp(0, 255) as u8, f.x, f.y, f.w, f.h, f.dx, f.dy]);
+        let n = usize::from(f.w) * usize::from(f.h);
+        let mut bits = vec![0u8; n.div_ceil(8)];
+        for (i, _) in f.cells.iter().take(n).enumerate().filter(|(_, &c)| c) {
+            bits[i / 8] |= 1 << (i % 8);
+        }
+        p.extend(bits);
+    }
+    let trails = &l.trails[..l.trails.len().min(MAX_TRAILS)];
+    p.extend((trails.len() as u16).to_le_bytes());
+    for t in trails {
+        for v in [t.at.0, t.at.1, t.from.0, t.from.1] {
+            p.extend(v.to_le_bytes());
+        }
+        p.push(t.radius);
+    }
+    p
 }
 
 /// A custom skirmish map (`*.sowmap`): a plain `.net` level followed by the `OSOW` block with everything the original format has no place for.
@@ -232,6 +367,8 @@ pub struct CustomMap {
     pub reinforcement: Reinforcement,
     /// The convoy's goal and route (used when the win rule is [`WinRule::Escort`]; kept whenever it is not empty).
     pub escort: Escort,
+    /// A composed ground replacing the base mission's own.
+    pub layout: Option<Layout>,
 }
 
 impl CustomMap {
@@ -253,12 +390,18 @@ impl CustomMap {
             mission: Mission::default(),
             reinforcement: Reinforcement::default(),
             escort: Escort::default(),
+            layout: None,
         }
     }
 
     /// Which mission's ground the map uses.
     pub fn terrain(&self) -> Terrain {
         Terrain { warmonger: self.warmonger, mission: self.level.level_id() }
+    }
+
+    /// What the map's ground is built from.
+    pub fn ground(&self) -> Ground {
+        Ground { terrain: self.terrain(), layout: self.layout.clone() }
     }
 
     /// The mission countdown, if the map has one.
@@ -288,6 +431,7 @@ impl CustomMap {
             mission: Mission::default(),
             reinforcement: Reinforcement::default(),
             escort: Escort::default(),
+            layout: None,
             level,
         };
         let mut r = Reader::new(&data[used..]);
@@ -347,6 +491,7 @@ impl CustomMap {
                     }
                     map.escort = e;
                 }
+                TAG_LAYOUT => map.layout = Some(read_layout(&mut b)?),
                 TAG_MISSION => {
                     map.mission.win = match b.u8("win rule")? {
                         1 => WinRule::Everything,
@@ -408,6 +553,9 @@ impl CustomMap {
                 p.extend(cell(c));
             }
             records.push((TAG_ESCORT, p));
+        }
+        if let Some(l) = &self.layout {
+            records.push((TAG_LAYOUT, write_layout(l)));
         }
         let mut d = level.to_bytes();
         d.extend(MAGIC);
@@ -781,6 +929,19 @@ mod tests {
         d.extend(3u32.to_le_bytes());
         d.extend([1, 2, 3]);
         assert_eq!(CustomMap::parse(&d).unwrap().name, "Twin Rivers");
+    }
+
+    #[test]
+    fn a_layout_round_trips_with_its_cell_bits() {
+        let mut m = sample();
+        let cells: Vec<bool> = (0..15).map(|i| i % 3 == 0 || i == 14).collect();
+        let f = Feature { source: Terrain { warmonger: true, mission: 17 }, x: 2, y: 3, w: 5, h: 3, dx: 40, dy: 7, cells };
+        let trails = vec![TrailStamp { at: (300, 400), from: (1000, 64), radius: 22 }];
+        m.layout = Some(Layout { patches: vec![(0, 0), (88, 1200), (2900, 17)], features: vec![f.clone(), Feature { dx: 1, ..f }], trails });
+        let d = m.to_bytes();
+        assert_eq!(d.len(), sample().to_bytes().len() + 6 + 2 + 3 * 4 + 2 + 2 * (8 + 2) + 2 + 9, "one LAYOUT record, 15 cells in 2 bytes");
+        assert_eq!(CustomMap::parse(&d).unwrap().layout, m.layout);
+        assert_eq!(CustomMap::parse(&sample().to_bytes()).unwrap().layout, None);
     }
 
     #[test]

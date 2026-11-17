@@ -56,6 +56,22 @@ pub struct GroundRef<'a> {
     pub k: usize,
 }
 
+/// A ground on its own: the picture (RGB8), the foreground flags and the cell grid (a custom map's generated layout is built on
+/// one, docs/generated-maps.md).
+#[derive(Debug, Clone)]
+pub struct Ground {
+    /// RGB8, `w * h * 3`.
+    pub bg: Vec<u8>,
+    /// One flag per pixel.
+    pub fg: Vec<bool>,
+    /// The cells (`.map`).
+    pub map: Map,
+    /// Width in pixels.
+    pub w: usize,
+    /// Height in pixels.
+    pub h: usize,
+}
+
 /// Holds a scene's 2x enhanced ground once the background thread has made it.
 #[derive(Default)]
 pub struct HiSlot {
@@ -75,28 +91,10 @@ impl Scene {
     /// Like [`Scene::load`] with the level script replaced: the terrain files come from `name` (`M07`), the objects and units from
     /// `script` (a `.net` skirmish map, whose terrain is a mission's, `GameDir::net_terrain`).
     pub fn load_with(game: &GameDir, name: &str, facing: usize, aim: Option<usize>, script: Option<Level>) -> Result<Scene, String> {
-        let find = |ext: &str| game.resolve(&format!("Data\\Levels\\{name}.{ext}")).filter(|p| p.exists());
-        let read = |ext: &str| -> Result<Vec<u8>, String> {
-            let p = find(ext).ok_or_else(|| format!("{name}.{ext} not found"))?;
-            std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))
-        };
-
-        let jpeg = srf::to_jpeg(&read("srf")?).map_err(|e| e.to_string())?;
-        let mut dec = jpeg_decoder::Decoder::new(jpeg.as_slice());
-        let bg = dec.decode().map_err(|e| format!("{name}.srf: {e}"))?;
-        let info = dec.info().ok_or("no JPEG info")?;
-        if info.pixel_format != jpeg_decoder::PixelFormat::RGB24 {
-            return Err(format!("unsupported JPEG pixel format {:?}", info.pixel_format));
-        }
-
-        let map = Map::parse(&read("map")?).map_err(|e| e.to_string())?;
-        let level = script.or_else(|| read("edt").ok().and_then(|d| Level::parse(&d).ok()));
-        let (bg_w, bg_h) = (info.width as usize, info.height as usize);
-        if bg_w != map.width as usize * CELL as usize || bg_h != map.height as usize * CELL as usize {
-            eprintln!("warning: background {bg_w}x{bg_h} does not match map {}x{} cells", map.width, map.height);
-        }
+        let ground = load_ground(game, name)?;
+        let level = script.or_else(|| read_level_file(game, name, "edt").ok().and_then(|d| Level::parse(&d).ok()));
         let placed = build_placed(game, level.as_ref(), facing, aim);
-        let foreground = foreground_mask(&read("tmi").ok(), &read("til").ok(), bg_w, bg_h);
+        let Ground { bg, fg: foreground, map, w: bg_w, h: bg_h } = ground;
         Ok(Scene {
             name: name.to_owned(),
             bg,
@@ -140,6 +138,21 @@ impl Scene {
         }
     }
 
+    /// A copy of the ground (picture, foreground, cells).
+    pub fn ground_copy(&self) -> Ground {
+        Ground { bg: self.bg.clone(), fg: self.foreground.clone(), map: self.map.clone(), w: self.bg_w, h: self.bg_h }
+    }
+
+    /// Replaces the ground (same size). New allocations and a fresh enhanced ground, so the GPU cache and the 2x ground follow.
+    pub fn set_ground(&mut self, g: Ground) {
+        self.bg = g.bg;
+        self.foreground = g.fg;
+        self.map = g.map;
+        self.bg_w = g.w;
+        self.bg_h = g.h;
+        self.hi = HiSlot::default();
+    }
+
     /// Replaces the level script (objects and units; the terrain stays) and re-places the sprites (the map editor after an edit).
     pub fn set_level(&mut self, game: &GameDir, level: Level) {
         self.level = Some(level);
@@ -165,6 +178,30 @@ impl Scene {
         v.sort();
         v
     }
+}
+
+fn read_level_file(game: &GameDir, name: &str, ext: &str) -> Result<Vec<u8>, String> {
+    let p = game.resolve(&format!("Data\\Levels\\{name}.{ext}")).filter(|p| p.exists()).ok_or_else(|| format!("{name}.{ext} not found"))?;
+    std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))
+}
+
+/// Loads mission `name`'s ground only: the picture (`.srf`), the cells (`.map`) and the foreground (`.tmi` + `.til`).
+pub fn load_ground(game: &GameDir, name: &str) -> Result<Ground, String> {
+    let read = |ext: &str| read_level_file(game, name, ext);
+    let jpeg = srf::to_jpeg(&read("srf")?).map_err(|e| e.to_string())?;
+    let mut dec = jpeg_decoder::Decoder::new(jpeg.as_slice());
+    let bg = dec.decode().map_err(|e| format!("{name}.srf: {e}"))?;
+    let info = dec.info().ok_or("no JPEG info")?;
+    if info.pixel_format != jpeg_decoder::PixelFormat::RGB24 {
+        return Err(format!("unsupported JPEG pixel format {:?}", info.pixel_format));
+    }
+    let map = Map::parse(&read("map")?).map_err(|e| e.to_string())?;
+    let (w, h) = (info.width as usize, info.height as usize);
+    if w != map.width as usize * CELL as usize || h != map.height as usize * CELL as usize {
+        eprintln!("warning: background {w}x{h} does not match map {}x{} cells", map.width, map.height);
+    }
+    let fg = foreground_mask(&read("tmi").ok(), &read("til").ok(), w, h);
+    Ok(Ground { bg, fg, map, w, h })
 }
 
 fn build_placed(game: &GameDir, level: Option<&Level>, facing: usize, aim: Option<usize>) -> Vec<Placed> {
@@ -201,6 +238,7 @@ fn foreground_mask(tmi: &Option<Vec<u8>>, til: &Option<Vec<u8>>, bg_w: usize, bg
 }
 
 /// A reduced picture of a map's ground (`.srf`), for menus.
+#[derive(Debug, Clone)]
 pub struct Thumbnail {
     /// `w * h` packed `0x00RRGGBB` pixels.
     pub pixels: Vec<u32>,
@@ -224,7 +262,11 @@ pub fn thumbnail(game: &GameDir, name: &str, max_w: usize, max_h: usize) -> Opti
     if info.pixel_format != jpeg_decoder::PixelFormat::RGB24 {
         return None;
     }
-    let (fw, fh) = (info.width as usize, info.height as usize);
+    Some(shrink(&rgb, info.width as usize, info.height as usize, max_w, max_h))
+}
+
+/// Shrinks an RGB8 picture (box filter) to fit `max_w` x `max_h`, keeping the aspect ratio.
+pub fn shrink(rgb: &[u8], fw: usize, fh: usize, max_w: usize, max_h: usize) -> Thumbnail {
     let k = (max_w as f32 / fw as f32).min(max_h as f32 / fh as f32);
     let (w, h) = (((fw as f32 * k) as usize).max(1), ((fh as f32 * k) as usize).max(1));
     let mut pixels = vec![0u32; w * h];
@@ -245,5 +287,5 @@ pub fn thumbnail(game: &GameDir, name: &str, max_w: usize, max_h: usize) -> Opti
             pixels[y * w + x] = (r / n) << 16 | (g / n) << 8 | (b / n);
         }
     }
-    Some(Thumbnail { pixels, w, h, full_w: fw, full_h: fh })
+    Thumbnail { pixels, w, h, full_w: fw, full_h: fh }
 }

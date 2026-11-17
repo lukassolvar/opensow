@@ -297,16 +297,6 @@ impl Tr {
         self.pick(["New map", "Nová mapa", "Nová mapa", "新地图", "新地圖"])
     }
 
-    pub fn generate_later(self) -> [&'static str; 2] {
-        match self.0 {
-            1 => ["Generovaný terén", "pripravujeme"],
-            2 => ["Generovaný terén", "připravujeme"],
-            3 => ["生成地形", "即将推出"],
-            4 => ["生成地形", "即將推出"],
-            _ => ["Generated terrain", "coming later"],
-        }
-    }
-
     pub fn create(self) -> &'static str {
         self.pick(["CREATE", "VYTVORIŤ", "VYTVOŘIT", "创建", "建立"])
     }

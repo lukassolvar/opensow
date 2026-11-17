@@ -98,6 +98,44 @@ fn a_skirmish_save_on_a_custom_map_loads_back_also_one_without_the_stored_run() 
 }
 
 #[test]
+fn a_skirmish_save_on_a_generated_map_loads_back() {
+    let Some(mut g) = game() else { return };
+    let maps = std::env::temp_dir().join(format!("opensow-skirmish-save-layout-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&maps);
+    let path = mapeditor_ui::tests::generated_map_file(&maps, "Layout test").expect("generated map");
+    let m = custom_maps::load(&path).unwrap();
+    assert!(m.layout.is_some());
+    let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
+    let run = SkirmishRun {
+        map: format!("custom/{stem}"),
+        setup: multiplayer::Setup::of_map(&m.level),
+        human: 0,
+        difficulty: sim::Difficulty::Easy,
+        spectate: None,
+        default_setup: true,
+        custom: Some(path.clone()),
+    };
+    g.start_skirmish(run, m.level.clone());
+    let ground = g.play.as_ref().unwrap().scene.bg.clone();
+    let built = custom_maps::load_scene(&g.assets.game, &m.ground(), 0, None, None).unwrap();
+    assert!(ground == built.bg, "the match plays on the composed ground");
+    for _ in 0..300 {
+        g.play.as_mut().unwrap().world.step();
+    }
+    let before = fingerprint(&g);
+    let dir = std::env::temp_dir().join(format!("opensow-skirmish-save-layout-store-{}", std::process::id()));
+    let store = save_skirmish(&mut g, &dir);
+    let saved = store.level_of(1).unwrap();
+    g.act(Action::ToMain);
+    g.saveui_event(saveui::Event::Load(saved));
+    assert!(g.screen.is_none(), "no error message: {:?}", g.screen.as_ref().map(|s| format!("{s:?}")));
+    assert_eq!(fingerprint(&g), before);
+    assert!(g.play.as_ref().unwrap().scene.bg == ground, "the same ground is rebuilt");
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(maps);
+}
+
+#[test]
 fn the_map_editor_row_opens_the_editor_and_back_returns() {
     let Some(mut g) = game() else { return };
     g.act(Action::MapEditor);

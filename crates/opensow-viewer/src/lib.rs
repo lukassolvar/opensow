@@ -4,6 +4,7 @@ pub mod art;
 pub mod editor;
 pub mod editor_ui;
 pub mod fx;
+pub mod layout;
 pub mod record;
 pub mod render;
 pub mod scene;

@@ -480,6 +480,35 @@ fn screen_switches(game: &mut Game, args: &[String], w: usize, h: usize) {
             game.open_map_editor();
             if let Some(m) = game.map_editor.as_mut() {
                 m.load_thumbs(usize::MAX);
+                // --plan FILE: generates the plan's map (docs/generated-maps.md, docs/map-plans/); --save-map writes it
+                if let Some(file) = get("--plan") {
+                    let t = std::time::Instant::now();
+                    match std::fs::read_to_string(&file).map_err(|e| format!("{file}: {e}")).and_then(|text| opensow_viewer::layout::Plan::parse(&text)) {
+                        Ok(plan) => match m.generate(&plan) {
+                            Ok(g) if has("--spaces") => eprintln!("open spaces (cells to a wall, at): {:?}", g.open_spaces),
+                            Ok(g) => eprintln!(
+                                "{}: {} features, {} trail dabs, {:.0} % blocked, front {} at {:?}, path {} (straight {}), widest open {} at {:?}, {} building spots, {} leaks, rooms sealed {:?}, seed {}, {:.1} s",
+                                plan.name,
+                                g.layout.features.len(),
+                                g.layout.trails.len(),
+                                g.blocked * 100.0,
+                                g.front,
+                                g.cut,
+                                g.path.0,
+                                g.path.1,
+                                g.widest.0,
+                                g.widest.1,
+                                g.building_spots,
+                                g.leaks,
+                                g.sealed,
+                                g.seed,
+                                t.elapsed().as_secs_f32()
+                            ),
+                            Err(e) => eprintln!("cannot generate: {e}"),
+                        },
+                        Err(e) => eprintln!("bad plan: {e}"),
+                    }
+                }
                 if let Some(n) = get("--new").and_then(|n| n.parse::<usize>().ok()) {
                     if let Err(e) = m.create(n) {
                         eprintln!("cannot create a map: {e}");

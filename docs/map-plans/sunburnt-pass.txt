@@ -1,0 +1,23 @@
+; Sunburnt Pass: west against east, on orange desert. The flow dips south, climbs north through the middle and comes back down to green.
+name Sunburnt Pass
+base M07
+seed 11
+start 2,34 12x12
+start 82,34 12x12
+flow 6 14,40 24,52 40,60 50,48 46,30 56,18 70,22 76,36 82,40
+branch 5 24,52 14,64
+room 4,64 12x10
+branch 5 40,60 38,69
+room 33,69 11x8
+branch 5 46,30 30,22 28,20
+room 20,12 10x10
+branch 5 56,18 60,8
+room 54,2 12x8
+branch 5 76,36 77,60
+room 72,60 10x9
+branch 5 70,22 84,12
+room 84,2 10x10
+; longer side flows, each ending in a small pocket
+branch 5 50,48 60,50 63,57 59,66
+room 55,66 7x7
+wall 97% M02 M07 M11 M15 M19 M22

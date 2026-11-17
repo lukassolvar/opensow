@@ -26,6 +26,16 @@ pub(crate) fn demo_map_file(dir: &std::path::Path, name: &str) -> Option<PathBuf
     m.save_in(dir).ok()
 }
 
+/// A generated map (`generated`) saved in `dir`; `None` without the install.
+pub(crate) fn generated_map_file(dir: &std::path::Path, name: &str) -> Option<PathBuf> {
+    let (mut m, _assets, own) = editor_with_map()?;
+    let _ = std::fs::remove_dir_all(own);
+    generated(&mut m, name).ok()?;
+    // a player's headquarters on each start plateau
+    assert!(m.arm_tool("hq") && m.place_at((6, 4), Side::Blue) && m.place_at((8, 57), Side::Green));
+    m.save_in(dir).ok()
+}
+
 /// Both sides' headquarters, neutral buildings (a medium factory among them), turrets and units.
 fn populate(m: &mut MapEditor) {
     assert!(m.demo());
@@ -601,4 +611,32 @@ fn draws_both_pages_at_the_extreme_sizes() {
     m.load_thumbs(3);
     let mut buf = vec![0u32; 640 * 480];
     m.draw(&mut buf, 640, 480);
+}
+
+/// A generated map (docs/generated-maps.md): a small plan on M12's ground with pieces of M12, M14 and M01, opened in `m`.
+pub(crate) fn generated(m: &mut MapEditor, name: &str) -> Result<(), String> {
+    let text = format!(
+        "name {name}\nbase M12\nseed 5\npiece M12 20,38 at 0,30\npiece M12 35,16 at 23,0\npiece M12 47,45 at 40,45\nstart 2,2 14x10\nstart 4,55 12x7\n"
+    );
+    m.generate(&opensow_viewer::layout::Plan::parse(&text)?).map(|_| ())
+}
+
+#[test]
+fn a_generated_map_is_terrain_only_and_the_game_builds_the_editors_ground() {
+    let Some((mut m, _a, dir)) = editor_with_map() else { return };
+    generated(&mut m, "Generated").unwrap();
+    let s = m.s.as_ref().unwrap();
+    let layout = s.layout.clone().expect("a layout");
+    assert_eq!(layout.features.len(), 3);
+    let blocked = s.scene.map.cells.iter().filter(|c| c.blocked).count() as f32 / s.scene.map.cells.len() as f32;
+    assert!(blocked > 0.1, "the pieces' cells are blocked: {blocked}");
+    assert!(s.map().level.objects.is_empty(), "terrain only: the players place the buildings");
+    let (bg, cells) = (s.scene.bg.clone(), s.scene.map.cells.clone());
+    let path = m.save_in(&dir).expect("saved");
+    m.open_file(&path).unwrap();
+    assert!(m.s.as_ref().unwrap().scene.bg == bg, "reopened: the same ground");
+    assert_eq!(m.s.as_ref().unwrap().layout, Some(layout));
+    let played = custom_maps::load_scene(&m.game, &custom_maps::load(&path).unwrap().ground(), 0, None, None).unwrap();
+    assert!(played.bg == bg && played.map.cells == cells, "the game's ground and cells are the editor's");
+    let _ = std::fs::remove_dir_all(dir);
 }

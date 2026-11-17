@@ -435,12 +435,12 @@ impl SkirmishMenu {
         }
         self.map = i;
         self.preview = None;
-        let (level, (game, terrain)) = match self.tab {
+        let (level, thumb) = match self.tab {
             Tab::Original => {
                 let Some(level) = crate::skirmish::load_map(&self.game, &self.maps[i]) else { return };
                 self.setup = Setup::skirmish_default(&level);
-                let source = self.game.net_terrain(&self.maps[i], level.level_id());
-                (level, source)
+                let (game, terrain) = self.game.net_terrain(&self.maps[i], level.level_id());
+                (level, opensow_viewer::scene::thumbnail(&game, &terrain, THUMB, THUMB))
             }
             Tab::Custom => {
                 let Some(map) = self.custom.get(i).and_then(|e| e.map.as_ref().ok()).filter(|_| self.custom[i].blocker().is_none()) else { return };
@@ -448,11 +448,12 @@ impl SkirmishMenu {
                 self.setup = Setup::of_map(&map.level);
                 // the human plays blue on every custom map (no Swap sides on that tab)
                 self.local = 0;
-                (map.level.clone(), crate::custom_maps::terrain_source(&self.game, map.terrain()))
+                // the ground, a generated layout included (docs/generated-maps.md)
+                (map.level.clone(), crate::custom_maps::thumbnail(&self.game, &map.ground(), THUMB, THUMB))
             }
         };
         self.defaults = self.setup.clone();
-        if let Some(thumb) = opensow_viewer::scene::thumbnail(&game, &terrain, THUMB, THUMB) {
+        if let Some(thumb) = thumb {
             self.preview = Some(Preview { map: i, thumb, level });
         }
         // keep the chosen row in the list's view

@@ -176,15 +176,17 @@ impl Play {
         level: opensow_formats::level::Level,
         settings: &Settings,
         difficulty: sim::Difficulty,
-        custom: Option<((opensow_formats::GameDir, String), Vec<opensow_formats::custommap::ObjectExt>)>,
+        custom: Option<(opensow_formats::custommap::Ground, Vec<opensow_formats::custommap::ObjectExt>)>,
     ) -> Result<Play, String> {
-        let (source, ext) = match custom {
-            Some((source, ext)) => (source, ext),
-            None => (assets.game.net_terrain(map, level.level_id()), Vec::new()),
-        };
-        let (game, terrain) = source;
         let start = level.clone();
-        let scene = Scene::load_with(&game, &terrain, 0, None, Some(level))?;
+        let (scene, ext) = match custom {
+            // a custom map: its base mission, or its generated layout (docs/generated-maps.md)
+            Some((ground, ext)) => (crate::custom_maps::load_scene(&assets.game, &ground, 0, None, Some(level))?, ext),
+            None => {
+                let (game, terrain) = assets.game.net_terrain(map, level.level_id());
+                (Scene::load_with(&game, &terrain, 0, None, Some(level))?, Vec::new())
+            }
+        };
         let mut play = Play::with_scene(assets, map, scene, settings, 0)?;
         play.world.difficulty = difficulty;
         play.world.skirmish = true;

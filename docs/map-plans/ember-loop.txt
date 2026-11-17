@@ -1,0 +1,19 @@
+; Ember Loop: the Frost Loop layout on brown ground (M17).
+name Ember Loop
+base M17
+seed 77
+start 3,3 14x10
+start 79,67 14x10
+flow 6 16,8 30,10 36,24 24,36 20,52 34,64 50,58 58,42 72,40 80,52 86,66
+branch 5 36,24 46,18 54,13
+room 50,3 12x9
+branch 5 20,52 10,64
+room 2,62 10x12
+branch 5 50,58 57,71
+room 53,71 10x8
+branch 5 72,40 78,26
+room 74,14 12x10
+; longer side flows, each ending in a small pocket
+branch 5 24,36 10,32 6,28
+room 2,20 9x8
+wall 97% M01 M03 M05 M08 M14 M17

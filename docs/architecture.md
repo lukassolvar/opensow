@@ -51,7 +51,8 @@ mixed case, without regard to case. `kinds` names the kind numbers of units and 
 `render` draws a scene into a frame buffer of `0x00RRGGBB` pixels with plain CPU loops, so it runs
 without a window and in tests. `record` notes every drawing call as a command so that the game can
 replay the same frame on the GPU. `upscale` and `fx` are the optional run-time enhancements.
-`editor` / `editor_ui` are the internal skirmish map editor.
+`editor` / `editor_ui` are the internal skirmish map editor. `layout` builds new map layouts composed from the missions'
+own art (docs/generated-maps.md, docs/map-design.md).
 
 ### `opensow-game`
 
@@ -105,6 +106,6 @@ Wherever OpenSOW deliberately or knowingly behaves differently from the exe, the
 | Units walking, path finding | `docs/walking.md`, `docs/pathfinding.md` |
 | Weapons and bullets | `docs/projectiles.md` |
 | Production, economy, the computer opponent | `docs/production.md`, `docs/ai.md` |
-| Skirmish and custom maps | `docs/skirmish.md`, `docs/map-editor-ingame.md` |
+| Skirmish and custom maps | `docs/skirmish.md`, `docs/map-editor-ingame.md`, `docs/generated-maps.md`, `docs/map-design.md` |
 | Savegames | `docs/savegame.md` |
 | Plan and status | `docs/roadmap.md` |

@@ -303,19 +303,6 @@ impl MapEditor {
                 outline(c, w, h, r, if hot { (255, 255, 255) } else { *col }, 1);
                 page::mark(c, w, h, r, *on);
             }
-            Look::Generate => {
-                ui::fill(c, w, h, r, (0, 0, 0), 120);
-                // a dashed frame: the slot is reserved
-                let dash = 6;
-                for k in (0..r.w).step_by(dash * 2) {
-                    ui::fill(c, w, h, Rect { x: r.x + k, y: r.y, w: (dash as i32).min(r.w - k), h: 1 }, (80, 120, 86), 255);
-                    ui::fill(c, w, h, Rect { x: r.x + k, y: r.y + r.h - 1, w: (dash as i32).min(r.w - k), h: 1 }, (80, 120, 86), 255);
-                }
-                for k in (0..r.h).step_by(dash * 2) {
-                    ui::fill(c, w, h, Rect { x: r.x, y: r.y + k, w: 1, h: (dash as i32).min(r.h - k) }, (80, 120, 86), 255);
-                    ui::fill(c, w, h, Rect { x: r.x + r.w - 1, y: r.y + k, w: 1, h: (dash as i32).min(r.h - k) }, (80, 120, 86), 255);
-                }
-            }
             Look::Scroll(at, view, total) => {
                 ui::fill(c, w, h, r, (60, 120, 70), 140);
                 let total = (*total).max(1);

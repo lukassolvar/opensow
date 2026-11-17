@@ -174,7 +174,6 @@ enum Look {
     Glyph(Glyph, (u8, u8, u8)),
     Toggle(bool, (u8, u8, u8)),
     Row(bool),
-    Generate,
     Scroll(i32, i32, i32),
 }
 
@@ -225,6 +224,8 @@ struct Session {
     /// The blocked / no-build overlay on the map (also shown while a building or turret is armed).
     areas: bool,
     overwrite_armed: Option<PathBuf>,
+    /// The generated layout the ground was built from (docs/generated-maps.md), kept for saving.
+    layout: Option<custommap::Layout>,
 }
 
 impl Session {
@@ -237,6 +238,7 @@ impl Session {
             mission: self.mission,
             reinforcement: self.reinforcement.clone(),
             escort: self.escort.clone(),
+            layout: self.layout.clone(),
         }
     }
 
@@ -677,6 +679,10 @@ impl MapEditor {
         map.ext.resize(map.level.objects.len(), ObjectExt::default());
         let saved = if path.is_some() { map.to_bytes() } else { Vec::new() };
         let mut scene = Scene::load_with(&source, &mission, 0, None, Some(map.level.clone()))?;
+        if map.layout.is_some() {
+            let built = custom_maps::base_ground(&self.game, &map.ground(), scene.ground_copy(), &mut custom_maps::Sources::default());
+            scene.set_ground(built);
+        }
         let ed = Editor::custom(&map.name, map.level.clone(), map.ext.clone(), &scene.map);
         scene.set_level(&source, shown_level(&ed));
         let first = items().iter().position(|&t| t == Thing::Object(100)).unwrap_or(0);
@@ -707,6 +713,7 @@ impl MapEditor {
             leave_armed: false,
             areas: false,
             overwrite_armed: None,
+            layout: map.layout.clone(),
         });
         Ok(())
     }
@@ -794,6 +801,32 @@ impl MapEditor {
         let ok = s.ed.add(at);
         self.refresh();
         ok
+    }
+
+    /// Generates the map of `plan` (docs/generated-maps.md; the headless `--plan`, not offered on the start page) and opens it in
+    /// the editor, not saved: terrain only, the players place the buildings. Returns what the generator measured.
+    pub fn generate(&mut self, plan: &opensow_viewer::layout::Plan) -> Result<opensow_viewer::layout::Generated, String> {
+        let load = |t: Terrain| {
+            let (g, name) = custom_maps::terrain_source(&self.game, t);
+            opensow_viewer::scene::load_ground(&g, &name)
+        };
+        let base = load(plan.base)?;
+        let loaded: Vec<(Terrain, opensow_viewer::scene::Ground)> = plan.missions().into_iter().map(|t| load(t).map(|g| (t, g))).collect::<Result<_, _>>()?;
+        let refs: Vec<(Terrain, &opensow_viewer::scene::Ground)> = loaded.iter().map(|(t, g)| (*t, g)).collect();
+        // a wall's gaps depend on the seed: the next seeds are tried until every pocket keeps one entrance (at most 40)
+        let mut made = opensow_viewer::layout::generate(&base, &refs, plan)?;
+        for k in 1..40u64 {
+            if made.sealed.iter().all(|s| s.unwrap_or(true)) {
+                break;
+            }
+            let next = opensow_viewer::layout::Plan { seed: plan.seed + k, ..plan.clone() };
+            made = opensow_viewer::layout::generate(&base, &refs, &next)?;
+            made.seed = next.seed;
+        }
+        let mut map = CustomMap::new(&plan.name, plan.base);
+        map.layout = Some(made.layout.clone());
+        self.open(map, None)?;
+        Ok(made)
     }
 
     /// Headless demos and tests: both sides' headquarters in opposite corners, neutral buildings between them, a turret and units.

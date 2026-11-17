@@ -255,7 +255,7 @@ impl Game {
         let escort = loaded.as_ref().map(|m| m.escort.clone());
         let human = if mission.is_some() { 0 } else { run.human };
         let (map, level) = (run.map.clone(), skirmish::prepare(&script, &run.setup, human));
-        let custom = loaded.map(|m| (custom_maps::terrain_source(&self.assets.game, m.terrain()), m.ext));
+        let custom = loaded.map(|m| (m.ground(), m.ext));
         match Play::new_skirmish(&mut self.assets, &map, level, &self.settings, run.difficulty, custom) {
             Ok(mut p) => {
                 if let Some(m) = mission {

@@ -76,7 +76,7 @@ impl MapEditor {
         let pic_h = tile_w * 7 / 10;
         let tile_h = pic_h + g.small + 12;
         let shown = self.shown_terrains();
-        for k in 0..=shown.len() {
+        for k in 0..shown.len() {
             let (col, row) = (k as i32 % cols, k as i32 / cols);
             let r = rect(grid.x + g.pad + col * (tile_w + gap), grid.y + hh + 6 + row * (tile_h + gap), tile_w, tile_h);
             if r.y + r.h > grid.y + grid.h - g.pad {
@@ -84,32 +84,14 @@ impl MapEditor {
             }
             let pic = t.r(rect(r.x, r.y, r.w, pic_h));
             let label = t.r(rect(r.x, r.y + pic_h + 4, r.w, g.small + 6));
-            match shown.get(k) {
-                Some(&i) => {
-                    push(t.r(r), Some(Hit::Terrain(i)), Look::Card(self.terrain == i));
-                    push(pic, None, Look::Pic(PicRef::Thumb(i), false));
-                    push(
-                        label,
-                        None,
-                        Look::TextCentred(tr.mission(self.terrains[i].mission), t.px(g.small), if self.terrain == i { (255, 255, 255) } else { TEXT }),
-                    );
-                }
-                // the reserved tile of the future map generator
-                None => {
-                    push(t.r(r), None, Look::Generate);
-                    let [a, b] = tr.generate_later();
-                    push(
-                        Rect { x: pic.x, y: pic.y + pic.h / 2 - t.px(g.small) - 2, w: pic.w, h: t.px(g.small) + 4 },
-                        None,
-                        Look::TextCentred(a.into(), t.px(g.small), MUTED),
-                    );
-                    push(
-                        Rect { x: pic.x, y: pic.y + pic.h / 2 + 2, w: pic.w, h: t.px(g.small) + 4 },
-                        None,
-                        Look::TextCentred(b.into(), t.px(g.small - 2), MUTED),
-                    );
-                }
-            }
+            let i = shown[k];
+            push(t.r(r), Some(Hit::Terrain(i)), Look::Card(self.terrain == i));
+            push(pic, None, Look::Pic(PicRef::Thumb(i), false));
+            push(
+                label,
+                None,
+                Look::TextCentred(tr.mission(self.terrains[i].mission), t.px(g.small), if self.terrain == i { (255, 255, 255) } else { TEXT }),
+            );
         }
         // bottom bar: BACK, the chosen terrain's facts, CREATE
         push(t.r(back), Some(Hit::Back), Look::Button(tr.back().into(), t.px(g.body + 2), false));
