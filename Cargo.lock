@@ -1597,14 +1597,14 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "opensow-formats"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "opensow-game"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "ab_glyph",
  "cpal",
@@ -1624,7 +1624,7 @@ dependencies = [
 
 [[package]]
 name = "opensow-launcher"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "ab_glyph",
  "embed-resource",
@@ -1639,7 +1639,7 @@ dependencies = [
 
 [[package]]
 name = "opensow-tools"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "jpeg-encoder",
  "opensow-formats",
@@ -1648,7 +1648,7 @@ dependencies = [
 
 [[package]]
 name = "opensow-viewer"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "jpeg-decoder",
  "opensow-formats",
