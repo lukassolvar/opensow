@@ -24,14 +24,19 @@ impl World {
         (jx, jy)
     }
 
-    /// Every living unit and structure by the cell it stands on, rebuilt once per tick for the target searches.
+    /// Every living unit and structure by the cells it covers, rebuilt once per tick for the target searches. The exe's scan
+    /// (`0x47b140`) reads the static grid `0x5eac38` cell by cell (`0x47b206`), where a building's handle is stamped on every
+    /// blocked cell of its footprint (`0x40e460`), so a building is in range as soon as any of its cells is (a range-1 walker
+    /// next to a wall shoots it), not only its middle cell.
     pub(super) fn index(&self) -> HashMap<(i32, i32), Vec<Target>> {
         let mut m: HashMap<(i32, i32), Vec<Target>> = HashMap::new();
         for u in self.units.iter().filter(|u| u.hp > 0) {
             m.entry(u.cell()).or_default().push(Target::Unit(u.id));
         }
         for (i, s) in self.structures.iter().enumerate().filter(|(_, s)| s.alive()) {
-            m.entry(s.center_cell()).or_default().push(Target::Structure(i));
+            for c in s.blocked_cells() {
+                m.entry(c).or_default().push(Target::Structure(i));
+            }
         }
         m
     }
@@ -72,7 +77,7 @@ impl World {
         order: Option<Target>,
     ) -> Option<Target> {
         let (mut unit, mut turret, mut building) = (None, None, None);
-        for &(dx, dy) in self.rings.search(min as usize, (max as usize).min(63)) {
+        for &(dx, dy) in self.rings.target_search(min as usize, (max as usize).min(63)) {
             let Some(list) = index.get(&(cell.0 + dx as i32, cell.1 + dy as i32)) else { continue };
             for &t in list {
                 if order == Some(t) && self.hostile(player, t) && !matches!(t, Target::Unit(id) if self.unit(id).is_some_and(|u| u.kind == kinds::ADVANCER)) {

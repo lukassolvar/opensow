@@ -46,6 +46,19 @@ impl World {
         if dist < range {
             return;
         }
+        if let Target::Structure(k) = t {
+            // DELIBERATE DEVIATION: the exe measures the distance to the building's middle cell only, so a short-range unit
+            // standing at the wall is never "within range" and the chase orders it into the building on every idle tick
+            // (0x46f4a0 -> 0x46eb40); the unit then walks on the spot while it shoots. Here the chase stops once the weapon's
+            // scan already reaches one of the building's cells.
+            let reach = self.units[i].aim.as_ref().map(|a| (a.params.min_range as usize, (a.params.max_range as usize).min(63)));
+            if let Some((min, max)) = reach {
+                let cells = self.structures[k].blocked_cells();
+                if self.rings.target_search(min, max).iter().any(|&(dx, dy)| cells.contains(&(at.0 + dx as i32, at.1 + dy as i32))) {
+                    return;
+                }
+            }
+        }
         let (handle, tcell) = match t {
             Target::Unit(_) => (0, tcell),
             Target::Structure(k) => (0x2000000 + k as u32, self.structures[k].center_cell()),

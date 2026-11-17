@@ -109,6 +109,18 @@ impl Rings {
         &self.offsets[self.ends[min]..self.ends[max]]
     }
 
+    /// The cells the weapon target scan `0x47b140` visits for dead zone `min` and range `max`, in scan order. Range 1 does not
+    /// use ring 1 (the four orthogonal cells): `0x47b18d..0x47b1ad` switch to the neighbour table `0x6b3c70` ([`NEIGHBOURS`])
+    /// and read it from word `T[min]` to word 16, so `min = 0` starts at the second entry and **the cell to the west
+    /// `(-1, 0)` is never scanned** (7 cells); `min = 1` reads the last three diagonals.
+    pub fn target_search(&self, min: usize, max: usize) -> &[(i16, i16)] {
+        if max == 1 {
+            &NEIGHBOURS[self.ends[min].min(NEIGHBOURS.len())..]
+        } else {
+            self.search(min, max)
+        }
+    }
+
     /// The exe's range index table (`0x6b3a18`): `ends` in words.
     pub fn index_words(&self) -> Vec<usize> {
         self.ends.iter().map(|e| e * 2).collect()
@@ -127,6 +139,16 @@ mod tests {
         assert_eq!(r.ring(1), &[(0, -1), (1, 0), (0, 1), (-1, 0)]);
         assert_eq!(&r.ring(2)[..3], &[(0, -2), (1, -1), (2, 0)]);
         assert_eq!(r.offsets.len(), r.ends[r.ends.len() - 1]);
+    }
+
+    #[test]
+    fn range_one_scans_seven_neighbours_without_the_west_cell() {
+        let r = Rings::generate();
+        // 0x47b1ad reads the table 0x6b3c70 from word T[min] (T[0] = 2: the second entry) up to word 16
+        assert_eq!(r.target_search(0, 1), &NEIGHBOURS[1..]);
+        assert!(!r.target_search(0, 1).contains(&(-1, 0)));
+        assert_eq!(r.target_search(1, 1), &[(1, -1), (-1, 1), (1, 1)]);
+        assert_eq!(r.target_search(0, 6), r.search(0, 6));
     }
 
     #[test]
