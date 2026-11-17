@@ -53,7 +53,9 @@ The `dist` profile (`Cargo.toml`) is `release` with thin LTO and stripped symbol
    `CARGO_PKG_VERSION`), commit, wait for CI to pass.
 2. `git tag vX.Y.Z && git push origin vX.Y.Z`. `release.yml` stops at once when the tag is not `v` plus the crates' version: a
    release whose launcher reports an older version would offer itself as an update forever.
-3. `build.yml` builds and packs every system; `release.yml` then opens a **draft** release with all files and generated notes.
+3. `build.yml` builds and packs every system; `release.yml` then opens a **draft** release with all files. Its notes are
+   `docs/releases/vX.Y.Z.md` when that file exists (write it before tagging), else notes GitHub generates from the
+   commits.
 4. Edit the notes and publish it as a normal release, **not** a pre-release: the launcher and the README's "latest release"
    link ignore pre-releases and drafts, and a tag like `v0.2.0-beta` is not read as a version. Call a beta a beta in the
    title or notes.
@@ -92,7 +94,6 @@ all.
 ## Not done
 - No Apple Developer ID signature or notarisation: a downloaded `.dmg` is quarantined, so macOS asks once (README "How to
   run"). Updates through the launcher are not quarantined (`curl` sets no flag).
-- No Windows code signature (SmartScreen warns on first start) and no icon in the `.exe` files (the window icon is set at
-  run time).
+- No Windows code signature (SmartScreen warns on first start).
 - No installer on Windows and no AppImage / Flatpak on Linux: the launcher updates itself in place, which needs a writable
   folder.

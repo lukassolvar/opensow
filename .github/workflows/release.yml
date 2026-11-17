@@ -1,6 +1,7 @@
 # A tag `vX.Y.Z` equal to the crates' version builds every platform's release file (build.yml) and opens a DRAFT release
-# with them (docs/release.md). Publish the draft by hand as a normal release, not a pre-release: the launcher and the
-# README's "latest release" link ignore pre-releases.
+# with them (docs/release.md). The notes come from `docs/releases/<tag>.md` when it exists, else GitHub generates them.
+# Publish the draft by hand as a normal release, not a pre-release: the launcher and the README's "latest release" link
+# ignore pre-releases.
 name: Release
 
 on:
@@ -33,6 +34,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: docs/releases
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -42,5 +46,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           ls -l dist
+          notes="docs/releases/$GITHUB_REF_NAME.md"
+          if [ -f "$notes" ]; then set -- --notes-file "$notes"; else set -- --generate-notes; fi
           gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
-            --title "OpenSOW ${GITHUB_REF_NAME#v}" --generate-notes
+            --title "OpenSOW ${GITHUB_REF_NAME#v}" "$@"
