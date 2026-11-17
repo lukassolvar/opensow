@@ -76,6 +76,47 @@ impl App {
         }
     }
 
+    /// Keeps the pointer inside the window while it is fullscreen and focused, so it cannot wander onto a second
+    /// display (the exe's exclusive DirectDraw mode holds it on the one screen). Windows, X11 and Wayland confine it
+    /// themselves; macOS cannot, so there the pointer is moved back whenever it leaves (`hold_pointer`).
+    pub(super) fn confine_cursor(&mut self) {
+        let Some(win) = self.window.clone() else { return };
+        let want = self.focused && win.fullscreen().is_some();
+        if !want {
+            if self.confined.take() == Some(true) {
+                let _ = win.set_cursor_grab(CursorGrabMode::None);
+            }
+            return;
+        }
+        if self.confined.is_none() {
+            self.confined = Some(win.set_cursor_grab(CursorGrabMode::Confined).is_ok());
+        }
+    }
+
+    /// A pointer outside the window while it is held there by hand goes back to the nearest point inside.
+    fn hold_pointer(&mut self, x: f64, y: f64) {
+        let Some(win) = self.window.clone().filter(|_| self.confined == Some(false)) else { return };
+        let (ww, wh) = self.window_size();
+        let (cx, cy) = (x.clamp(0.0, ww as f64 - 1.0), y.clamp(0.0, wh as f64 - 1.0));
+        if (cx, cy) != (x, y) {
+            let _ = win.set_cursor_position(winit::dpi::PhysicalPosition::new(cx, cy));
+        }
+    }
+
+    /// Switches between fullscreen and a window (the fullscreen key or button).
+    fn toggle_fullscreen(&mut self) {
+        if let Some(win) = &self.window {
+            win.set_fullscreen(if win.fullscreen().is_some() { None } else { Some(Fullscreen::Borderless(None)) });
+        }
+        // the grab is set again for the new window shape (the confined rectangle changes with it)
+        if self.confined.take() == Some(true) {
+            if let Some(win) = &self.window {
+                let _ = win.set_cursor_grab(CursorGrabMode::None);
+            }
+        }
+        self.confine_cursor();
+    }
+
     /// The window's pixel size.
     pub(super) fn window_size(&self) -> (usize, usize) {
         self.window.as_ref().map_or((1280, 800), |w| (w.inner_size().width.max(1) as usize, w.inner_size().height.max(1) as usize))
@@ -146,6 +187,7 @@ impl ApplicationHandler for App {
         }
         self.game.scale = window.scale_factor() as f32;
         self.window = Some(window);
+        self.confine_cursor();
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
@@ -242,14 +284,19 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                // macOS reports a drag that leaves the window (a button held): put the pointer back at the edge
+                let (ww, wh) = self.window_size();
+                if position.x >= 0.0 && position.y >= 0.0 && position.x < ww as f64 && position.y < wh as f64 {
+                    self.last_pointer = (position.x, position.y);
+                } else {
+                    self.hold_pointer(position.x, position.y);
+                }
                 let (x, y) = self.to_game(position.x, position.y);
                 self.game.mouse_moved(x, y, w, h)
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if state == ElementState::Pressed && !matches!(button, MouseButton::Left | MouseButton::Right) && self.game.fullscreen_key(button) {
-                    if let Some(win) = &self.window {
-                        win.set_fullscreen(if win.fullscreen().is_some() { None } else { Some(Fullscreen::Borderless(None)) });
-                    }
+                    self.toggle_fullscreen();
                 }
                 let (x, y) = self.game.cursor;
                 self.game.mouse_button(button, state == ElementState::Pressed, x, y, w, h);
@@ -258,7 +305,32 @@ impl ApplicationHandler for App {
                 let st = mods.state();
                 self.game.set_ctrl(st.control_key() || st.super_key());
             }
+            WindowEvent::CursorLeft { .. } => {
+                // macOS: the pointer crossed the window's edge (onto another display): back to where it left
+                let (x, y) = self.last_pointer;
+                if self.confined == Some(false) {
+                    if let Some(win) = &self.window {
+                        let _ = win.set_cursor_position(winit::dpi::PhysicalPosition::new(x, y));
+                    }
+                }
+            }
+            WindowEvent::Resized(_) => {
+                // a new fullscreen or window size: the confined rectangle follows it
+                if self.confined == Some(true) {
+                    if let Some(win) = &self.window {
+                        let _ = win.set_cursor_grab(CursorGrabMode::None);
+                    }
+                    self.confined = None;
+                }
+                self.confine_cursor();
+            }
+            WindowEvent::Focused(true) => {
+                self.focused = true;
+                self.confine_cursor();
+            }
             WindowEvent::Focused(false) => {
+                self.focused = false;
+                self.confine_cursor();
                 self.game.set_ctrl(false);
                 if let Some(m) = self.game.map_editor.as_mut() {
                     m.release_keys();
@@ -289,9 +361,7 @@ impl ApplicationHandler for App {
                     && !event.repeat
                     && matches!(event.physical_key, winit::keyboard::PhysicalKey::Code(c) if self.game.fullscreen_key(c)) =>
             {
-                if let Some(win) = &self.window {
-                    win.set_fullscreen(if win.fullscreen().is_some() { None } else { Some(Fullscreen::Borderless(None)) });
-                }
+                self.toggle_fullscreen();
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 self.game.numpad = event.location == winit::keyboard::KeyLocation::Numpad;

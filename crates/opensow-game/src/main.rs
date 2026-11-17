@@ -76,7 +76,7 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Cursor, CustomCursor, Fullscreen, Window, WindowId};
+use winit::window::{Cursor, CursorGrabMode, CustomCursor, Fullscreen, Window, WindowId};
 
 /// What happens when the movie on screen ends or is skipped.
 #[derive(Debug, Clone, PartialEq)]
@@ -218,6 +218,13 @@ struct App {
     replay: bool,
     /// Open the window fullscreen (borderless on the current screen); `--windowed` turns it off, F11 toggles.
     fullscreen: bool,
+    /// The window has the keyboard focus (the cursor is only held inside it while focused).
+    focused: bool,
+    /// The cursor is held inside the fullscreen window: `Some(true)` by the system (`CursorGrabMode::Confined`),
+    /// `Some(false)` by moving it back when it leaves (macOS, which has no confinement), `None` = free.
+    confined: Option<bool>,
+    /// The last pointer position inside the window (window pixels), where a pointer that left is put back.
+    last_pointer: (f64, f64),
 }
 
 #[derive(Default)]
@@ -311,6 +318,9 @@ fn main() {
         window_res: (0, 0),
         replay: std::env::var_os("OPENSOW_CPU_DRAW").is_none(),
         fullscreen: !has("--windowed"),
+        focused: true,
+        confined: None,
+        last_pointer: (0.0, 0.0),
         perf: std::env::var_os("OPENSOW_PERF").filter(|_| DEV).map(|_| Perf::default()),
     };
     event_loop.run_app(&mut app).expect("run");
