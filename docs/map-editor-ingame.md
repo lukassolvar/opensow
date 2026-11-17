@@ -29,7 +29,7 @@ Keys: B (where nothing can be built), Esc (stop placing, deselect, Back), Delete
 Everything is translated in `tr.rs` (EN, SK, CZ, CS, CT); names of buildings, turrets, units, production levels and air forces, CREDITS / RESEARCH and the Advancer come from the language files (`LangFile` indices: units 173-187, walkers 188-192, Advancer 193, Rogon bomb 194, turrets 195-199, air forces 200-204, buildings 205-213, levels 219-227).
 
 ## Terrain
-A map's ground is one of the 22 campaign missions' terrains of the base game, or of Warmonger when it is installed (`custom_maps::terrains`, `terrain_source`: the `GameDir` edition picks the install). It fixes the size, water, cliffs and no-build cells. Level header word 1 holds the mission, the port's block the edition. The generator's tile is a placeholder: a generated terrain will need its own record in the block.
+A map's ground is one of the 22 campaign missions' terrains of the base game, or of Warmonger when it is installed (`custom_maps::terrains`, `terrain_source`: the `GameDir` edition picks the install). It fixes the size, water, cliffs and no-build cells. Level header word 1 holds the mission, the port's block the edition. A composed ground (docs/generated-maps.md) is kept in its own record, LAYOUT; the start page offers only the missions' terrains.
 
 ## Map name and file name
 - The name keeps what was typed: control characters dropped, spaces collapsed, at most 32 characters (`custommap::clean_name`).

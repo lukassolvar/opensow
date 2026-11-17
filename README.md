@@ -13,7 +13,8 @@ OpenSOW rebuilds the State of War engine so the game runs natively on today's ma
 data from your own copy.
 
 - **Faithful to the original**: game rules, AI and file formats are decoded from the original
-  executable; every known deviation is documented in [docs/](docs/).
+  executable, and savegames are written in the original format; every known deviation is
+  documented in [docs/](docs/).
 - **Runs everywhere**: native builds, any resolution up to 4K, no Wine.
 - **Preserves and extends**: both campaigns in one game, plus skirmish, a map editor and optional
   enhancements.
@@ -91,12 +92,20 @@ processor.
 
 ### Extra options
 
-Optional enhancements: sharper textures when zoomed in, soft shadows, explosion glow, better
+Optional enhancements, each with its own switch: sharper textures when zoomed in, soft shadows,
+contact shadows under buildings and units, explosion glow, a shadow under every turret, better
 sound, turret range while placing, and map zoom.
 
 ![](docs/screenshots/options-enhancements.jpg)
 
 ![](docs/screenshots/enhanced-zoom.jpg)
+
+### Your own controls
+
+Bind every hotkey to two keys or extra mouse buttons (middle, back, forward) in the Controls
+menu, or swap the mouse buttons to give orders with the right click.
+
+![](docs/screenshots/controls.jpg)
 
 Also: resolutions up to 4K, five interface languages, and a launcher that finds your games, holds
 the settings and updates itself.
