@@ -1,6 +1,6 @@
 [package]
 name = "opensow-formats"
-version = "0.1.0"
+version = "0.2.0"
 description = "Parsers for State of War (2001) data files"
 edition.workspace = true
 license.workspace = true
