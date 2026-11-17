@@ -1482,7 +1482,7 @@ impl Play {
                 continue;
             }
             let (cx, cy) = u.cell();
-            for &(dx, dy) in self.rings.search(min as usize, max as usize) {
+            for &(dx, dy) in self.rings.target_search(min as usize, max as usize) {
                 let (x, y) = (cx + dx as i32, cy + dy as i32);
                 let (x0, y0) = self.view.to_screen((x * CELL) as f32, (y * CELL) as f32);
                 let (x1, y1) = self.view.to_screen(((x + 1) * CELL) as f32, ((y + 1) * CELL) as f32);
@@ -1688,7 +1688,7 @@ impl Play {
         // page 2 "Turret range" turns it off.
         if let Some((min, max)) = sim::weapon_range(108 + tier as i32).filter(|_| self.turret_range) {
             let colour = if sim::is_anti_air(108 + tier as i32) { (90, 170, 255) } else { (255, 200, 60) };
-            for &(dx, dy) in self.rings.search(min as usize, (max as usize).min(63)) {
+            for &(dx, dy) in self.rings.target_search(min as usize, (max as usize).min(63)) {
                 let (x, y) = (cell.0 + dx as i32, cell.1 + dy as i32);
                 let (x0, y0) = self.view.to_screen((x * CELL) as f32, (y * CELL) as f32);
                 let (x1, y1) = self.view.to_screen(((x + 1) * CELL) as f32, ((y + 1) * CELL) as f32);

@@ -1167,6 +1167,43 @@ fn units_shoot_what_they_were_ordered_to_attack_when_it_is_in_range() {
 }
 
 #[test]
+fn a_range_one_walker_next_to_a_building_wall_shoots_it() {
+    // walker 45 has range 0-1: the exe's scan (0x47b140) finds the building on any footprint cell of the static grid, so a
+    // walker standing next to the wall sees it although the building's middle cell is farther away
+    let mut w = open_world(30, 30);
+    w.add_structure(Structure {
+        object: 0,
+        kind: ObjectKind::LightFactory,
+        owner: Owner::Enemy,
+        cell: (10, 10),
+        hp: 4000,
+        max_hp: 4000,
+        aim: None,
+        weapon: 0,
+        target: None,
+        slots: Vec::new(),
+        active: 0,
+        kind_id: 101,
+        tally: [0; 3],
+        heal: 0,
+        upgrade: 0,
+        protected: false,
+        attacked: false,
+        sat_cd: 0,
+        advancer: None,
+        rally: None,
+        dying: None,
+    });
+    let wall = w.structures[0].blocked_cells()[0];
+    let me = (wall.0 - 1, wall.1);
+    assert!(!w.structures[0].blocked_cells().contains(&me));
+    let mid = w.structures[0].center_cell();
+    assert!((me.0 - mid.0).abs().max((me.1 - mid.1).abs()) > 1, "the middle cell is out of range");
+    let index = w.index();
+    assert_eq!(w.find_target(&index, 0, me, 0, 1, None), Some(Target::Structure(0)));
+}
+
+#[test]
 fn a_unit_in_range_of_both_prefers_its_order_target_over_the_priority_rule() {
     let mut w = open_world(30, 30);
     w.add_unit(7, 1, 8 * CELL + 16, 10 * CELL + 16);
@@ -3113,4 +3150,53 @@ fn scatter_sends_the_selection_away_from_its_middle() {
     }
     assert!(w2.scatter_selected());
     assert_eq!(w2.unit(ids2[0]).unwrap().dest, c(8, 8));
+}
+
+/// A range-1 walker (kind 45) sent at a building or a turret from any side stands still beside it and keeps it as its target:
+/// the scan reaches the footprint cells (the exe's 7-cell neighbour list for range 1, `0x47b1ad`), and the chase does not keep
+/// ordering it into the building (its legs used to walk on the spot; turret 1 was out of reach on a diagonal).
+#[test]
+fn a_range_one_walker_stands_still_and_shoots_buildings_and_turrets_from_every_side() {
+    for kid in [25, 26, 28, 100, 101, 102, 104, 105, 108] {
+        for (dx, dy) in [(-8, 0), (8, 0), (0, -8), (0, 8), (-7, -7), (7, -7), (-7, 7), (7, 7)] {
+            let mut w = open_world(40, 40);
+            let a = w.add_unit(45, 0, (15 + dx) * CELL + 16, (15 + dy) * CELL + 16);
+            w.add_structure(Structure {
+                object: 0,
+                kind: ObjectKind::LightFactory,
+                owner: Owner::Enemy,
+                cell: (14, 14),
+                hp: 400000,
+                max_hp: 400000,
+                aim: None,
+                weapon: 0,
+                target: None,
+                slots: Vec::new(),
+                active: 0,
+                kind_id: kid,
+                tally: [0; 3],
+                heal: 0,
+                upgrade: 0,
+                protected: false,
+                attacked: false,
+                sat_cd: 0,
+                advancer: None,
+                rally: None,
+                dying: None,
+            });
+            w.cheats.freeze_enemy = true;
+            w.units.iter_mut().find(|u| u.id == a).unwrap().selected = true;
+            w.order_attack_selected(Target::Structure(0));
+            for _ in 0..1800 {
+                w.step();
+            }
+            let phase = w.unit(a).unwrap().chassis.as_ref().unwrap().phase;
+            for t in 0..600 {
+                w.step();
+                let u = w.unit(a).unwrap();
+                assert_eq!(u.target, Some(Target::Structure(0)), "kind {kid} from ({dx},{dy}), tick {t}: the walker shoots it");
+                assert!(!u.moved && u.chassis.as_ref().unwrap().phase == phase, "kind {kid} from ({dx},{dy}), tick {t}: legs still");
+            }
+        }
+    }
 }
