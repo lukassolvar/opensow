@@ -49,13 +49,40 @@ fn pick_folder(title: &str) -> Option<PathBuf> {
     let out = if cfg!(target_os = "macos") {
         Command::new("osascript").args(["-e", &format!("POSIX path of (choose folder with prompt \"{title}\")")]).output()
     } else if cfg!(windows) {
-        Command::new("powershell").args(["-NoProfile", "-Command", &format!("Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = '{title}'; if ($d.ShowDialog() -eq 'OK') {{ $d.SelectedPath }}")]).output()
+        windows_folder_dialog(title).output()
     } else {
         Command::new("zenity").args(["--file-selection", "--directory", &format!("--title={title}")]).output()
     }
     .ok()?;
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    let s = String::from_utf8_lossy(&out.stdout).trim_start_matches('\u{feff}').trim().to_owned();
     (out.status.success() && !s.is_empty()).then(|| PathBuf::from(s))
+}
+
+/// PowerShell's folder dialog on Windows, built so that it works for every user:
+/// - no console window: PowerShell is a console program, so without `CREATE_NO_WINDOW` Windows opens an empty terminal for it;
+/// - the dialog's owner is a hidden top-most form, otherwise the dialog may open behind the launcher and only the terminal shows;
+/// - the path is written as UTF-8: the console's default code page (852, 437, ...) mangles names like `C:\Users\Matúš`;
+/// - the prompt comes in through an environment variable, so no quote in a translation can break the script.
+fn windows_folder_dialog(title: &str) -> std::process::Command {
+    const SCRIPT: &str = "$ErrorActionPreference = 'Stop'; \
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false; \
+        Add-Type -AssemblyName System.Windows.Forms; \
+        [System.Windows.Forms.Application]::EnableVisualStyles(); \
+        $owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false }; \
+        $d = New-Object System.Windows.Forms.FolderBrowserDialog; \
+        $d.Description = $env:OPENSOW_PICK_TITLE; \
+        $d.ShowNewFolderButton = $false; \
+        if ($d.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($d.SelectedPath) }; \
+        $owner.Dispose()";
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args(["-NoProfile", "-NonInteractive", "-STA", "-Command", SCRIPT]).env("OPENSOW_PICK_TITLE", title);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
 }
 
 /// Starts the game in the data folder (where it finds the settings this launcher edits), on the campaign used last.
