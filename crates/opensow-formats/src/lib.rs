@@ -268,11 +268,7 @@ impl GameDir {
     /// Find the game via `OPENSOW_GAME_DIR`, falling back to the default Steam paths (macOS, Linux); the Warmonger install is looked up too.
     pub fn locate() -> Option<GameDir> {
         let saved = launcher::load();
-        let candidates = std::env::var_os(GAME_DIR_ENV)
-            .map(PathBuf::from)
-            .into_iter()
-            .chain(saved.original.clone())
-            .chain(default_steam_dirs());
+        let candidates = std::env::var_os(GAME_DIR_ENV).map(PathBuf::from).into_iter().chain(saved.original.clone()).chain(default_steam_dirs());
         let mut game = candidates.filter(|p| p.join("Data").is_dir()).map(GameDir::new).next()?;
         // the environment wins over the launcher's saved folder
         for w in std::env::var_os(WARMONGER_DIR_ENV).map(PathBuf::from).into_iter().chain(saved.warmonger) {
@@ -503,8 +499,11 @@ mod edition_tests {
         assert!(steam_game_dirs(Some(&home), &roots).is_empty());
         // Windows: a second library listed in libraryfolders.vdf, its manifest names the folder
         touch(&pf, &format!("Steam/steamapps/libraryfolders.vdf"));
-        std::fs::write(pf.join("Steam/steamapps/libraryfolders.vdf"), format!("\"libraryfolders\"\n{{\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n}}\n", lib.display()))
-            .unwrap();
+        std::fs::write(
+            pf.join("Steam/steamapps/libraryfolders.vdf"),
+            format!("\"libraryfolders\"\n{{\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n}}\n", lib.display()),
+        )
+        .unwrap();
         touch(&lib, "steamapps/appmanifest_748040.acf");
         std::fs::write(lib.join("steamapps/appmanifest_748040.acf"), "\"AppState\"\n{\n\t\"installdir\"\t\t\"SOW\"\n}\n").unwrap();
         touch(&lib, "steamapps/common/SOW/State of War/Data/Levels/M01.map");

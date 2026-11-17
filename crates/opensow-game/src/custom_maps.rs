@@ -107,7 +107,8 @@ pub fn load_scene(game: &GameDir, ground: &custommap::Ground, facing: usize, aim
     let (g, name) = terrain_source(game, ground.terrain);
     let mut scene = Scene::load_with(&g, &name, facing, aim, level)?;
     if ground.layout.is_some() {
-        let base = Ground { bg: std::mem::take(&mut scene.bg), fg: std::mem::take(&mut scene.foreground), map: scene.map.clone(), w: scene.bg_w, h: scene.bg_h };
+        let base =
+            Ground { bg: std::mem::take(&mut scene.bg), fg: std::mem::take(&mut scene.foreground), map: scene.map.clone(), w: scene.bg_w, h: scene.bg_h };
         scene.set_ground(base_ground(game, ground, base, &mut Sources::default()));
     }
     Ok(scene)

@@ -874,20 +874,24 @@ impl World {
             .iter()
             .flat_map(|g| g.1.iter())
             .filter(|(_, o)| !(19..=21).contains(&o.get(0x2658).unwrap_or(0)) && o.get(0x2658) != Some(35))
-            .filter_map(|(slot, o)| self.bullet_from_record(o).map(|mut b| {
-                b.slot = *slot as u32;
-                b
-            }))
+            .filter_map(|(slot, o)| {
+                self.bullet_from_record(o).map(|mut b| {
+                    b.slot = *slot as u32;
+                    b
+                })
+            })
             .collect();
         self.beams = st
             .bullets
             .iter()
             .flat_map(|g| g.1.iter())
             .filter(|(_, o)| (19..=21).contains(&o.get(0x2658).unwrap_or(0)))
-            .filter_map(|(slot, o)| self.beam_from_record(o).map(|mut b| {
-                b.slot = *slot as u32;
-                b
-            }))
+            .filter_map(|(slot, o)| {
+                self.beam_from_record(o).map(|mut b| {
+                    b.slot = *slot as u32;
+                    b
+                })
+            })
             .collect();
         let mut aircraft = Vec::new();
         for (side, g) in st.squads.iter().enumerate() {
@@ -1507,7 +1511,17 @@ mod tests {
         w.turret_look.insert(1, 123);
         let path = build_path(Action::Upgrade as u8, 100, 100, 160, 160, 0).unwrap();
         let n = path.points.len();
-        w.beams.push(BeamShot { action: Action::Upgrade, target: 0, side: 0, rate: 40, path, index: 7, trail: 2, frags: vec![(1, -2, 3), (4, 5, 6)], slot: u32::MAX });
+        w.beams.push(BeamShot {
+            action: Action::Upgrade,
+            target: 0,
+            side: 0,
+            rate: 40,
+            path,
+            index: 7,
+            trail: 2,
+            frags: vec![(1, -2, 3), (4, 5, 6)],
+            slot: u32::MAX,
+        });
         let bytes = w.to_state(1, &PassedLevels::initial(), (0, 0)).to_bytes().unwrap();
         dump("synthetic_corpse_beam", &bytes);
         let parsed = State::parse(&bytes, 1).unwrap();

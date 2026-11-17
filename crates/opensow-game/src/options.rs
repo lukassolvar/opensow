@@ -452,9 +452,8 @@ impl OptionsMenu {
             return Some(Hit::Page(to));
         }
         if self.page == 1 {
-            let arrow = (0..OWN_ROWS.len())
-                .flat_map(|k| [false, true].map(|right| (k, right)))
-                .find(|&(k, right)| self.own_arrow_rect(k, right).contains(p.0, p.1));
+            let arrow =
+                (0..OWN_ROWS.len()).flat_map(|k| [false, true].map(|right| (k, right))).find(|&(k, right)| self.own_arrow_rect(k, right).contains(p.0, p.1));
             if let Some((k, right)) = arrow {
                 return Some(Hit::ExtraArrow(k, right));
             }

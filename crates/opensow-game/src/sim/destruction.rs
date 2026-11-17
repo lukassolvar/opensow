@@ -124,8 +124,8 @@ impl World {
                 }
                 s.target = None;
                 s.rally = None; // the exe rebuilds the building (`0x43ab40`): the constructor clears the point
-                // the new object's constructor (`0x439e30` -> `0x40a330`) zeroes the satellite word `[b+0x114]` (`0x40a3ef`; only
-                // an HQ gets 1, and HQs are removed, not captured) and nothing copies it back: a captured building is unprotected
+                                // the new object's constructor (`0x439e30` -> `0x40a330`) zeroes the satellite word `[b+0x114]` (`0x40a3ef`; only
+                                // an HQ gets 1, and HQs are removed, not captured) and nothing copies it back: a captured building is unprotected
                 s.protected = false;
                 s.attacked = false;
                 s.sat_cd = 0;

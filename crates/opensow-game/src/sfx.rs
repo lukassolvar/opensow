@@ -290,9 +290,7 @@ fn route(device: &rodio::mixer::Mixer, rate: rodio::SampleRate, channels: rodio:
     }
     if let Some(path) = dump {
         if let Ok(f) = std::fs::File::create(&path) {
-            eprintln!(
-                "audio: recording the effects mix to {path} (raw 16-bit little-endian, {rate} Hz, {channels} channels)"
-            );
+            eprintln!("audio: recording the effects mix to {path} (raw 16-bit little-endian, {rate} Hz, {channels} channels)");
             source = Box::new(Tap { inner: source, out: std::io::BufWriter::new(f), n: 0 });
         }
     }
@@ -325,7 +323,7 @@ mod tests {
         let (ch, rate) = (NonZero::new(2).unwrap(), NonZero::new(48000).unwrap());
         let (device, mut out) = rodio::mixer::mixer(ch, rate);
         let Some((voices, _master)) = route(&device, rate, ch) else { return }; // enhancement off: no route
-        // the output pulls 0.1 s before any effect is there (the first effect's wav is still being read)
+                                                                                // the output pulls 0.1 s before any effect is there (the first effect's wav is still being read)
         for _ in 0..9600 {
             out.next();
         }

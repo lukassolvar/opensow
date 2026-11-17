@@ -115,12 +115,7 @@ impl World {
         let idle: Vec<usize> = (0..self.units.len())
             .filter(|&i| {
                 let u = &self.units[i];
-                think
-                    && u.hp > 0
-                    && (u.player != 0) == (side != 0)
-                    && u.kind != kinds::ADVANCER
-                    && u.chase.is_none()
-                    && u.path.is_empty()
+                think && u.hp > 0 && (u.player != 0) == (side != 0) && u.kind != kinds::ADVANCER && u.chase.is_none() && u.path.is_empty()
             })
             .collect();
         for i in idle {

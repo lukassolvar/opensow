@@ -87,11 +87,7 @@ impl MapEditor {
             let i = shown[k];
             push(t.r(r), Some(Hit::Terrain(i)), Look::Card(self.terrain == i));
             push(pic, None, Look::Pic(PicRef::Thumb(i), false));
-            push(
-                label,
-                None,
-                Look::TextCentred(tr.mission(self.terrains[i].mission), t.px(g.small), if self.terrain == i { (255, 255, 255) } else { TEXT }),
-            );
+            push(label, None, Look::TextCentred(tr.mission(self.terrains[i].mission), t.px(g.small), if self.terrain == i { (255, 255, 255) } else { TEXT }));
         }
         // bottom bar: BACK, the chosen terrain's facts, CREATE
         push(t.r(back), Some(Hit::Back), Look::Button(tr.back().into(), t.px(g.body + 2), false));

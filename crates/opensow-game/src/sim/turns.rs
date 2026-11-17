@@ -88,8 +88,7 @@ impl World {
                 self.units[i].slot = self.free_unit_slot(self.units[i].player.clamp(0, 2) as usize);
             }
         }
-        let mut movers: Vec<(u32, Mover)> =
-            self.units.iter().filter(|u| u.player.clamp(0, 2) as usize == p).map(|u| (u.slot, Mover::Unit(u.id))).collect();
+        let mut movers: Vec<(u32, Mover)> = self.units.iter().filter(|u| u.player.clamp(0, 2) as usize == p).map(|u| (u.slot, Mover::Unit(u.id))).collect();
         movers.extend(
             self.gun_slot.iter().filter(|(k, _)| self.structures.get(**k).is_some_and(|s| owner_index(s.owner) == p)).map(|(&k, &s)| (s, Mover::Gun(k))),
         );
