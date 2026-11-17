@@ -1,7 +1,8 @@
 //! Updates from GitHub releases (docs/launcher.md, "Updates"). The launcher asks the public API for the latest release of
 //! [`REPO`], compares its tag (`vX.Y.Z`) with its own version, downloads this platform's archive (`opensow-<platform>.zip` or
-//! `.tar.gz`, see [`platform`]) and its `.sha256`, checks the hash and puts the new `opensow-launcher` and `opensow-game` next to
-//! itself. Network and unpacking go through the system's `curl`, `tar` and `unzip` (macOS, Windows 10+ and Linux have them), so
+//! `.tar.gz`, see [`platform`]; on macOS the universal `opensow-<version>-macos-universal.dmg`) and its `.sha256`, checks the hash
+//! and puts the new `opensow-launcher` and `opensow-game` next to itself (on macOS inside an app bundle: the whole new
+//! `OpenSOW.app` replaces the old one). Network and unpacking go through the system's `curl`, `tar` and `unzip` (macOS, Windows 10+ and Linux have them), so
 //! no HTTP library is built in.
 
 use serde::Deserialize;
@@ -110,8 +111,14 @@ pub fn parse_release(json: &str, platform: &str) -> Result<Release, Fail> {
         return Err(Fail::NoReleases);
     }
     let version = parse_version(&r.tag_name).ok_or_else(|| Fail::Network(format!("tag {}", r.tag_name)))?;
-    let is_archive = |n: &str| n.ends_with(".zip") || n.ends_with(".tar.gz") || n.ends_with(".tgz");
-    let archive = r.assets.iter().find(|a| a.name.contains(platform) && is_archive(&a.name)).cloned();
+    let is_archive = |n: &str| n.ends_with(".zip") || n.ends_with(".tar.gz") || n.ends_with(".tgz") || (n.ends_with(".dmg") && platform.starts_with("macos-"));
+    // this system's own archive first; on macOS the universal disk image serves both processors
+    let archive = r
+        .assets
+        .iter()
+        .find(|a| a.name.contains(platform) && is_archive(&a.name))
+        .or_else(|| r.assets.iter().find(|a| platform.starts_with("macos-") && a.name.contains("macos-universal") && is_archive(&a.name)))
+        .cloned();
     let checksum = archive.as_ref().and_then(|a| r.assets.iter().find(|c| c.name == format!("{}.sha256", a.name)).cloned());
     let name = r.name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| r.tag_name.clone());
     Ok(Release { tag: r.tag_name, version, name, url: r.html_url, archive, checksum })
@@ -242,19 +249,70 @@ fn unpack(archive: &Path, into: &Path) -> Result<(), Fail> {
     }
 }
 
-/// The first file named `name` under `dir` (an archive may put the programs in a folder).
+/// The first file or folder named `name` under `dir` (an archive may put the programs in a folder). Symbolic links are not
+/// followed: a disk image's `Applications` link would lead into the installed programs.
 fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
     let entries = std::fs::read_dir(dir).ok()?;
     let mut dirs = vec![];
     for e in entries.flatten() {
         let p = e.path();
-        if p.is_dir() {
-            dirs.push(p);
-        } else if p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(name)) {
+        let Ok(kind) = e.file_type() else { continue };
+        if p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(name)) && !kind.is_symlink() {
             return Some(p);
+        }
+        if kind.is_dir() {
+            dirs.push(p);
         }
     }
     dirs.iter().find_map(|d| find_file(d, name))
+}
+
+/// The app bundle `dir` (a launcher's folder) lies in: `X.app` for `X.app/Contents/MacOS`.
+fn bundle_of(dir: &Path) -> Option<PathBuf> {
+    let contents = dir.parent()?;
+    let app = contents.parent()?;
+    (dir.file_name()? == "MacOS" && contents.file_name()? == "Contents" && app.extension()?.eq_ignore_ascii_case("app")).then(|| app.to_path_buf())
+}
+
+/// Mounts a disk image read-only at `at` (macOS `hdiutil`); [`detach`] unmounts it.
+fn attach(dmg: &Path, at: &Path) -> Result<(), Fail> {
+    std::fs::create_dir_all(at).map_err(|e| Fail::Install(e.to_string()))?;
+    let status = Command::new("hdiutil")
+        .args(["attach", "-nobrowse", "-readonly", "-noautoopen", "-quiet", "-mountpoint"])
+        .arg(at)
+        .arg(dmg)
+        .status()
+        .map_err(|e| Fail::Install(e.to_string()))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(Fail::Install(format!("mounting the disk image failed ({status})")))
+    }
+}
+
+fn detach(at: &Path) {
+    let _ = Command::new("hdiutil").args(["detach", "-quiet", "-force"]).arg(at).status();
+}
+
+/// Replaces the app bundle `old` with a copy of `new` (`ditto` keeps its links, modes and signature): the copy is made beside
+/// it first, so a failed copy leaves the old bundle as it was.
+fn replace_bundle(new: &Path, old: &Path) -> std::io::Result<()> {
+    let staged = old.with_extension("app.new");
+    let backup = old.with_extension("app.old");
+    let _ = std::fs::remove_dir_all(&staged);
+    let _ = std::fs::remove_dir_all(&backup);
+    let status = Command::new("ditto").arg(new).arg(&staged).status()?;
+    if !status.success() {
+        let _ = std::fs::remove_dir_all(&staged);
+        return Err(std::io::Error::other(format!("copying the app failed ({status})")));
+    }
+    std::fs::rename(old, &backup)?;
+    if let Err(e) = std::fs::rename(&staged, old) {
+        let _ = std::fs::rename(&backup, old);
+        return Err(e);
+    }
+    let _ = std::fs::remove_dir_all(&backup);
+    Ok(())
 }
 
 /// Puts `new` in place of `dest`. A running program's file cannot be overwritten on Windows but can be renamed, so the old one
@@ -282,17 +340,54 @@ pub fn install(archive: &Path, sha_file: &str, work: &Path, target: &Path) -> Re
     if !matches_checksum(&data, sha_file) {
         return Err(Fail::Checksum);
     }
+    let is_dmg = archive.extension().is_some_and(|e| e.eq_ignore_ascii_case("dmg"));
+    if is_dmg {
+        let mount = work.join("mount");
+        detach(&mount);
+        attach(archive, &mount)?;
+        let result = install_from_image(&mount, target);
+        detach(&mount);
+        let _ = std::fs::remove_dir(&mount);
+        return result;
+    }
     let unpacked = work.join("unpacked");
     let _ = std::fs::remove_dir_all(&unpacked);
     unpack(archive, &unpacked)?;
-    let found: Vec<(String, PathBuf)> = PROGRAMS.iter().filter_map(|p| find_file(&unpacked, &exe_name(p)).map(|f| (exe_name(p), f))).collect();
+    install_from(&unpacked, target)
+}
+
+/// Installs from a mounted disk image: the launcher inside an app bundle gets the image's whole `OpenSOW.app`, a launcher outside
+/// one (a cargo build) only the programs from the bundle's `Contents/MacOS`.
+fn install_from_image(mount: &Path, target: &Path) -> Result<Vec<String>, Fail> {
+    let app = std::fs::read_dir(mount)
+        .map_err(|e| Fail::Install(e.to_string()))?
+        .flatten()
+        .find(|e| e.file_type().is_ok_and(|k| k.is_dir()) && e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("app")))
+        .map(|e| e.path())
+        .ok_or_else(|| Fail::Install("the disk image has no app".into()))?;
+    let programs = app.join("Contents/MacOS");
+    if !programs.join(PROGRAMS[0]).is_file() {
+        return Err(Fail::Install("the disk image has no opensow-launcher".into()));
+    }
+    match bundle_of(target) {
+        Some(bundle) => {
+            replace_bundle(&app, &bundle).map_err(|e| Fail::Install(format!("{}: {e}", bundle.display())))?;
+            Ok(PROGRAMS.iter().filter(|p| programs.join(p).is_file()).map(|p| p.to_string()).collect())
+        }
+        None => install_from(&programs, target),
+    }
+}
+
+/// Copies the programs found under `unpacked` over the ones in `target`.
+fn install_from(unpacked: &Path, target: &Path) -> Result<Vec<String>, Fail> {
+    let found: Vec<(String, PathBuf)> = PROGRAMS.iter().filter_map(|p| find_file(unpacked, &exe_name(p)).map(|f| (exe_name(p), f))).collect();
     if !found.iter().any(|(n, _)| *n == exe_name(PROGRAMS[0])) {
         return Err(Fail::Install("the archive has no opensow-launcher".into()));
     }
     for (name, file) in &found {
         replace(file, &target.join(name)).map_err(|e| Fail::Install(format!("{name}: {e}")))?;
     }
-    let _ = std::fs::remove_dir_all(&unpacked);
+    let _ = std::fs::remove_dir_all(unpacked);
     Ok(found.into_iter().map(|(n, _)| n).collect())
 }
 
@@ -348,6 +443,23 @@ mod tests {
     }
 
     #[test]
+    fn macs_take_the_universal_disk_image() {
+        let api = r#"{"tag_name":"v9.1.0","name":"","html_url":"u","draft":false,"prerelease":false,
+            "assets":[{"name":"opensow-9.1.0-macos-universal.dmg","browser_download_url":"https://x/m.dmg","size":5},
+                      {"name":"opensow-9.1.0-macos-universal.dmg.sha256","browser_download_url":"https://x/m.dmg.sha256","size":90},
+                      {"name":"opensow-9.1.0-linux-x86_64.tar.gz","browser_download_url":"https://x/l.tgz","size":7}]}"#;
+        for mac in ["macos-aarch64", "macos-x86_64"] {
+            let r = parse_release(api, mac).unwrap();
+            assert_eq!(r.archive.unwrap().name, "opensow-9.1.0-macos-universal.dmg");
+            assert_eq!(r.checksum.unwrap().name, "opensow-9.1.0-macos-universal.dmg.sha256");
+        }
+        assert_eq!(parse_release(api, "linux-x86_64").unwrap().archive.unwrap().size, 7);
+        assert!(parse_release(api, "windows-x86_64").unwrap().archive.is_none(), "a disk image is for Macs only");
+        assert_eq!(bundle_of(Path::new("/Applications/OpenSOW.app/Contents/MacOS")), Some(PathBuf::from("/Applications/OpenSOW.app")));
+        assert_eq!(bundle_of(Path::new("/x/target/release")), None);
+    }
+
+    #[test]
     fn sha256_known_values() {
         assert_eq!(hex(&sha256(b"")), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
         assert_eq!(hex(&sha256(b"abc")), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
@@ -376,6 +488,49 @@ mod tests {
         assert_eq!(install(&archive, &sha, &work, &target).unwrap(), vec!["opensow-launcher", "opensow-game"]);
         assert_eq!(std::fs::read(target.join("opensow-launcher")).unwrap(), b"new launcher");
         assert_eq!(std::fs::read(target.join("opensow-game")).unwrap(), b"new game");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A whole install from a real disk image in a temp folder: the installed app bundle is replaced as a whole (a stale file
+    /// in it is gone), a launcher outside a bundle gets the programs; the image's `Applications` link is never followed.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn install_replaces_the_app_from_a_disk_image() {
+        let root = std::env::temp_dir().join(format!("opensow-dmg-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (stage, work) = (root.join("stage"), root.join("work"));
+        let new = stage.join("OpenSOW.app/Contents/MacOS");
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(new.join("opensow-launcher"), b"new launcher").unwrap();
+        std::fs::write(new.join("opensow-game"), b"new game").unwrap();
+        std::os::unix::fs::symlink("/Applications", stage.join("Applications")).unwrap();
+        let dmg = root.join("opensow-test-macos-universal.dmg");
+        let made = Command::new("hdiutil")
+            .args(["create", "-quiet", "-fs", "HFS+", "-format", "UDZO", "-volname", "OpenSOW", "-srcfolder"])
+            .arg(&stage)
+            .arg(&dmg)
+            .status();
+        if !made.is_ok_and(|s| s.success()) {
+            eprintln!("hdiutil cannot make a disk image here; skipped");
+            return;
+        }
+        let sha = hex(&sha256(&std::fs::read(&dmg).unwrap()));
+        // installed as an app bundle
+        let old = root.join("Apps/OpenSOW.app/Contents/MacOS");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("opensow-launcher"), b"old").unwrap();
+        std::fs::write(old.join("stale"), b"old").unwrap();
+        assert_eq!(install(&dmg, "0000", &work, &old), Err(Fail::Checksum));
+        assert_eq!(install(&dmg, &sha, &work, &old).unwrap(), vec!["opensow-launcher", "opensow-game"]);
+        assert_eq!(std::fs::read(old.join("opensow-launcher")).unwrap(), b"new launcher");
+        assert_eq!(std::fs::read(old.join("opensow-game")).unwrap(), b"new game");
+        assert!(!old.join("stale").exists() && !root.join("Apps/OpenSOW.app.old").exists());
+        // a plain folder (cargo build)
+        let plain = root.join("bin");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(install(&dmg, &sha, &work, &plain).unwrap(), vec!["opensow-launcher", "opensow-game"]);
+        assert_eq!(std::fs::read(plain.join("opensow-game")).unwrap(), b"new game");
+        assert!(!work.join("mount").exists(), "the image is unmounted");
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

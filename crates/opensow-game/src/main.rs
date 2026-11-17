@@ -19,6 +19,9 @@
 //! | `headless` | `--screenshot` runs and `--gpu-check` |
 //! | `tests` | tests that drive a `Game` like the window does |
 
+// Windows: release builds (without the `dev` feature) open no console window behind the program (docs/release.md).
+#![cfg_attr(all(windows, not(feature = "dev")), windows_subsystem = "windows")]
+
 mod assets;
 mod audio;
 mod boot;
@@ -83,6 +86,11 @@ enum Then {
     /// The outro is over: show the closing message.
     Screen(Screen),
 }
+
+/// Developer features (cargo feature `dev`, on by default; release archives are built without it, docs/release.md): the F12
+/// dev tools panel, headless `--screenshot` runs, `--skirmish` straight starts, `OPENSOW_START`, `OPENSOW_PERF` and
+/// `OPENSOW_AUDIO_DUMP`. Without it those switches are ignored and the game starts normally.
+const DEV: bool = cfg!(feature = "dev");
 
 /// Made-up counters for the statistics screen's headless screenshots.
 fn sample_stats() -> [[u32; 8]; 2] {
@@ -230,7 +238,7 @@ fn main() {
             std::process::exit(1);
         }
     }
-    let headless = has("--screenshot");
+    let headless = DEV && has("--screenshot");
     game_dir.edition = match get("--edition").as_deref() {
         Some(e) if e.eq_ignore_ascii_case("warmonger") => opensow_formats::Edition::Warmonger,
         Some(_) => opensow_formats::Edition::Original,
@@ -260,7 +268,7 @@ fn main() {
     // movie folders (both Chinese scripts share one)
     game.language = intro::LANGUAGES.iter().position(|n| Some(*n) == lang.diff_dir().or(Some(""))).unwrap_or(0);
 
-    if let Some(path) = get("--screenshot") {
+    if let Some(path) = get("--screenshot").filter(|_| DEV) {
         headless::screenshot(game, &path, &args);
         return;
     }
@@ -269,7 +277,7 @@ fn main() {
     game.mute = has("--mute");
     game.sfx.enabled = !game.mute;
     // a windowed `--skirmish MAP` goes straight into the game (no intro, no menus)
-    let straight = get("--skirmish");
+    let straight = get("--skirmish").filter(|_| DEV);
     if let Some(map) = &straight {
         headless::start_skirmish_from_args(&mut game, map, &get, &has);
     }
@@ -283,7 +291,7 @@ fn main() {
             None => game.play_movie("mI", Then::Menu),
         }
     }
-    if let Ok(m) = std::env::var("OPENSOW_START") {
+    if let Some(m) = std::env::var("OPENSOW_START").ok().filter(|_| DEV) {
         game.start(&m);
     }
     let event_loop = EventLoop::new().expect("event loop");
@@ -299,7 +307,7 @@ fn main() {
         window_res: (0, 0),
         replay: std::env::var_os("OPENSOW_CPU_DRAW").is_none(),
         fullscreen: !has("--windowed"),
-        perf: std::env::var_os("OPENSOW_PERF").map(|_| Perf::default()),
+        perf: std::env::var_os("OPENSOW_PERF").filter(|_| DEV).map(|_| Perf::default()),
     };
     event_loop.run_app(&mut app).expect("run");
 }

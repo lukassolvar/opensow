@@ -7,6 +7,12 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
 
+# The release files (docs/release.md): `cargo build --profile dist` -> target/[<triple>/]dist.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+strip = true
+
 [workspace.dependencies]
 opensow-formats = { path = "crates/opensow-formats" }
 

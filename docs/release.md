@@ -1,38 +1,72 @@
-# Releases (not in the exe)
+# Releases and CI (not in the exe)
 
-The archives the README links and the launcher's self-update installs (docs/launcher.md "Updates") are built by
-`.github/workflows/release.yml`; `scripts/package.sh` packs one platform and also runs locally.
+Three GitHub Actions workflows in `.github/workflows`; the packing itself is `scripts/package.sh`, which also runs locally.
+
+## What a release brings
+One file per system, plus its `.sha256` (`sha256sum` format) for the launcher's self-update (docs/launcher.md "Updates"):
+
+| System | File | Inside |
+|---|---|---|
+| macOS 11+ (Apple silicon and Intel) | `opensow-X.Y.Z-macos-universal.dmg` | `OpenSOW.app` (universal: `lipo` of both builds) and an `Applications` link; drag the app over, double-click it, the launcher starts |
+| Windows 10+ x86_64 | `opensow-X.Y.Z-windows-x86_64.zip` | folder `OpenSOW`: `opensow-launcher.exe`, `opensow-game.exe`, README, licences |
+| Linux x86_64 / aarch64 (glibc 2.35+, ALSA `libasound.so.2`) | `opensow-X.Y.Z-linux-<arch>.tar.gz` | folder `OpenSOW`: `opensow-launcher`, `opensow-game`, README, licences |
+
+`OpenSOW.app`: `Contents/MacOS` holds both programs (the launcher is the bundle's executable and starts the game beside it),
+`Contents/Resources` the icon (`OpenSOW.icns`, made from the launcher's `art/tank.png` with `sips` / `iconutil`) and the
+licences; identifier `io.github.opensow`, `LSMinimumSystemVersion` 11.0. The bundle carries an ad-hoc signature over the whole
+bundle (no Apple certificate): Apple silicon runs no unsigned code, and the launcher's update replaces the whole bundle
+(docs/launcher.md), so the seal stays valid.
+
+**Release builds have no developer features.** The `dev` cargo feature of `opensow-game` and `opensow-launcher` is on by
+default (cargo builds, tests, the headless switches in AGENTS.md); release files are built with `--no-default-features`:
+- game: no F12 / backquote dev tools panel, no headless `--screenshot` runs (and with them `--play`, `--screen`,
+  `--gpu-check`, `--plan`, ...), no `--skirmish` straight start, no `OPENSOW_START`, `OPENSOW_PERF`, `OPENSOW_AUDIO_DUMP`;
+  those switches are ignored and the game starts normally. The player's switches stay (`--windowed`, `--no-intro`, `--mute`,
+  `--lang`, `--no-fx`, `--no-enhance`, `--no-sound-enhance`, the folder and troubleshooting variables such as
+  `OPENSOW_CPU_DRAW` and `OPENSOW_AUDIO_DEBUG`). The original's cheat phrases are part of the game and stay.
+- launcher: no `--screenshot` / `--icon-png`; `--check-update` stays.
+- Windows: without `dev` both programs use the GUI subsystem, so no console window opens behind them.
+
+The `dist` profile (`Cargo.toml`) is `release` with thin LTO and stripped symbols.
 
 ## Making a release
 1. Set `version` in every `crates/*/Cargo.toml` to the new `X.Y.Z` (the launcher compares the tag with its own
-   `CARGO_PKG_VERSION`), commit.
-2. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`. The workflow fails at once when the tag is not `v` plus the
-   crates' version: a release whose launcher reports an older version would offer itself as an update forever.
-3. Per platform the workflow runs `cargo test` (tests that need the game's files skip), builds `opensow-launcher` and
-   `opensow-game`, and packs them with `README.md` and both licences into one folder:
+   `CARGO_PKG_VERSION`), commit, wait for CI to pass.
+2. `git tag vX.Y.Z && git push origin vX.Y.Z`. `release.yml` stops at once when the tag is not `v` plus the crates' version: a
+   release whose launcher reports an older version would offer itself as an update forever.
+3. `build.yml` builds and packs every system; `release.yml` then opens a **draft** release with all files and generated notes.
+4. Edit the notes and publish it as a normal release, **not** a pre-release: the launcher and the README's "latest release"
+   link ignore pre-releases and drafts, and a tag like `v0.2.0-beta` is not read as a version. Call a beta a beta in the
+   title or notes.
 
-   | Platform | Runner | Archive |
-   |---|---|---|
-   | `macos-aarch64` | macos-14 | `opensow-X.Y.Z-macos-aarch64.zip` |
-   | `macos-x86_64` | macos-14, cross-built (not tested) | `opensow-X.Y.Z-macos-x86_64.zip` |
-   | `windows-x86_64` | windows-2022 | `opensow-X.Y.Z-windows-x86_64.zip` |
-   | `linux-x86_64` | ubuntu-22.04 (older glibc) | `opensow-X.Y.Z-linux-x86_64.tar.gz` |
-   | `linux-aarch64` | ubuntu-22.04-arm | `opensow-X.Y.Z-linux-aarch64.tar.gz` |
+## CI
+`ci.yml` runs on every push to `main` and every pull request (changes to docs and Markdown only are skipped; a newer push
+cancels the older run):
+- `lint` (Ubuntu): `cargo fmt --check`, clippy on all targets, clippy without the `dev` feature;
+- `test` on Ubuntu 22.04, macOS 14 and Windows 2022: `cargo test --release` (tests that need the game's files skip: no game
+  data on the runners);
+- `build`: `build.yml`, the release files of every system, kept 14 days as the run's artifacts (test builds).
 
-   Each archive gets `<archive>.sha256` (`sha256sum` format). macOS builds target macOS 11. Windows release builds use the
-   GUI subsystem, so no console window opens behind the launcher or the game; `cargo` builds keep the console for the
-   headless switches.
-4. A **draft** release with every archive and generated notes appears on GitHub. Edit the notes and publish it as a normal
-   release, **not** a pre-release: the launcher and the README's "latest release" link ignore pre-releases and drafts, and
-   a tag like `v0.2.0-beta` is not read as a version. Call a beta a beta in the title or notes instead.
+Speed: `Swatinem/rust-cache` keeps the dependencies' builds per job and system; only `main` (and tags) save caches, pull
+requests read them, so they never evict `main`'s. Warnings fail the lint and test jobs (`RUSTFLAGS=-D warnings`).
 
-`workflow_dispatch` (Actions tab, "Run workflow") runs the same builds as a dry run and keeps the archives as workflow
-artifacts without a release.
+Cost: public repositories run the standard GitHub runners for free. A private repository on the Free plan has 2000 minutes a
+month, and macOS minutes count ten times, Windows twice: one CI run there costs roughly 150-250 minutes (estimate, mostly the
+two macOS jobs).
 
-Locally: `cargo build --release -p opensow-launcher -p opensow-game && scripts/package.sh macos-aarch64 target/release dist`.
+## Local checks
+- macOS: `cargo build --profile dist --no-default-features -p opensow-launcher -p opensow-game` then
+  `scripts/package.sh macos-aarch64 dist target/dist` (one processor: Homebrew's Rust has no Intel target; with rustup add
+  `x86_64-apple-darwin` and pass both folders with `macos-universal` for the universal image).
+- Linux and Windows in Docker: `scripts/docker-check.sh [linux-aarch64] [linux-x86_64] [windows-x86_64]`. Linux runs the CI's
+  Ubuntu 22.04: tests, then the release build and its archive. Windows cross-compiles for MSVC with `cargo-xwin` (builds and
+  links; nothing runs). Toolchains, registries and target folders live in Docker volumes (`opensow-*`), so later runs are
+  incremental; the files land in `dist/` (ignored by git). On Apple silicon `linux-x86_64` is emulated and slow.
 
 ## Not done
-- The macOS programs are not signed or notarised: a browser download is quarantined, and macOS refuses to open it until
-  the user allows it (README "How to run"). Updates through the launcher are not quarantined (`curl` sets no flag).
-- No `.app` bundle: on macOS the launcher is a plain program.
-- The Windows programs are not signed (SmartScreen warns on first start).
+- No Apple Developer ID signature or notarisation: a downloaded `.dmg` is quarantined, so macOS asks once (README "How to
+  run"). Updates through the launcher are not quarantined (`curl` sets no flag).
+- No Windows code signature (SmartScreen warns on first start) and no icon in the `.exe` files (the window icon is set at
+  run time).
+- No installer on Windows and no AppImage / Flatpak on Linux: the launcher updates itself in place, which needs a writable
+  folder.

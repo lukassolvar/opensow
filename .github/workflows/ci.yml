@@ -1,0 +1,69 @@
+# Checks on every push to main and every pull request (docs/release.md "CI"): formatting and clippy (with and without the
+# `dev` feature), the tests on Linux, macOS and Windows (tests that need the game's files skip), and the release files of
+# every platform (build.yml; downloadable from the run's artifacts).
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["docs/**", "**.md", "LICENSE-*", ".github/FUNDING.yml"]
+  pull_request:
+    paths-ignore: ["docs/**", "**.md", "LICENSE-*", ".github/FUNDING.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# a newer push to the same branch or pull request cancels the older run
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTFLAGS: -D warnings
+
+jobs:
+  lint:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux libraries
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends pkg-config libasound2-dev libpulse-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all --check
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: lint
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo clippy --locked --workspace --all-targets --release
+      - name: clippy without the dev feature (the release build)
+        run: cargo clippy --locked --workspace --release --no-default-features
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends pkg-config libasound2-dev libpulse-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo test --locked --workspace --release
+
+  build:
+    uses: ./.github/workflows/build.yml

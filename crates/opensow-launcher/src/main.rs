@@ -5,6 +5,9 @@
 //! game's settings (docs/launcher.md). Folders and language are saved at once to `launcher.cfg` (formats::launcher), which the game
 //! reads; the game settings go to the per-user data folder, where "Play" starts `opensow-game` (from this program's folder).
 
+// Windows: release builds (without the `dev` feature) open no console window behind the program (docs/release.md).
+#![cfg_attr(all(windows, not(feature = "dev")), windows_subsystem = "windows")]
+
 mod settings;
 mod text;
 mod ui;
@@ -336,6 +339,10 @@ fn demo_update(state: &str) -> UpdateState {
     }
 }
 
+/// Developer features (cargo feature `dev`, on by default; release archives are built without it, docs/release.md): the
+/// headless `--screenshot` and `--icon-png`. `--check-update` stays (it helps with update reports).
+const DEV: bool = cfg!(feature = "dev");
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let get = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
@@ -358,7 +365,7 @@ fn main() {
         }
         return;
     }
-    if let Some(path) = get("--icon-png") {
+    if let Some(path) = get("--icon-png").filter(|_| DEV) {
         // the window icon at SIZE (default 256), on a checker so the transparent corners show
         let n: usize = get("--size").and_then(|s| s.parse().ok()).unwrap_or(256);
         let px = ui::icon_rgba(n);
@@ -373,7 +380,7 @@ fn main() {
         write_png(&path, &buf, n, n);
         return;
     }
-    if let Some(path) = get("--screenshot") {
+    if let Some(path) = get("--screenshot").filter(|_| DEV) {
         // headless: overrides from the command line, nothing is saved
         if let Some(l) = get("--lang") {
             settings.language = Language::from_code(&l);

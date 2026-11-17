@@ -495,10 +495,10 @@ mod edition_tests {
         let _ = std::fs::remove_dir_all(&base);
         let (home, pf, lib) = (base.join("home"), base.join("pf"), base.join("D/SteamLibrary"));
         assert!(vdf_values("\"path\"\t\t\"D:\\\\Games\\\\Steam\"", "path") == [PathBuf::from("D:\\Games\\Steam")], "escaped backslashes");
-        let roots = steam_roots(Some(&home), &[pf.clone()]);
+        let roots = steam_roots(Some(&home), std::slice::from_ref(&pf));
         assert!(steam_game_dirs(Some(&home), &roots).is_empty());
         // Windows: a second library listed in libraryfolders.vdf, its manifest names the folder
-        touch(&pf, &format!("Steam/steamapps/libraryfolders.vdf"));
+        touch(&pf, "Steam/steamapps/libraryfolders.vdf");
         std::fs::write(
             pf.join("Steam/steamapps/libraryfolders.vdf"),
             format!("\"libraryfolders\"\n{{\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n}}\n", lib.display()),

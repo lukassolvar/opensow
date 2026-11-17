@@ -18,8 +18,10 @@ Rust reimplementation of State of War (2001 Windows RTS). Details live in `docs/
 - `cargo run --release -p opensow-game -- --play M01 --ticks N --screenshot out/x.png --report` - headless mission; `--skirmish "03-Gold" [--spectate]` for skirmish (docs/skirmish.md); `--screen <name>` for menus/editors (docs/game.md, docs/map-editor-ingame.md)
 - `cargo run --release -p opensow-launcher -- --screenshot out.png --size WxH` - headless launcher (docs/launcher.md)
 - `opensow` (no args) lists the inspection tools; most decoded routines have a matching subcommand.
+- Release files: `scripts/package.sh` (macOS `.dmg`), `scripts/docker-check.sh` (Linux and Windows in Docker); CI and releases in docs/release.md.
 
 ## Traps
+- Headless switches, the F12 dev tools and other developer features exist only with the `dev` cargo feature (default on); release files are built with `--no-default-features`, so a new developer switch must check `DEV` (docs/release.md).
 - Tick = 16.66 ms (60 ticks/s); every `ticks` value in code and docs is at that rate.
 - Exe jump tables: cases jump into SHARED tail code. Never stop at the first jmp (misses fields) nor read past it blindly (merged kinds 6/7 once); follow unconditional jumps to the known common tail (`Exe::top_case` / `Exe::bullet_case` in tests).
 - GPU drawing replays recorded commands bit-identically to the CPU loops: any new drawing primitive or direct pixel loop needs a `record` hook (or `record::taint()` / `record::cpu`), and any new world blit needs the `render::hires` hook. Check with `--gpu-check` (0 differ expected).

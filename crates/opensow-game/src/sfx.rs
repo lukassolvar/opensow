@@ -88,7 +88,7 @@ impl Sfx {
             self.speech = None;
             self.route = route(&mixer, rate, channels);
             self.route_hifi = crate::hifi::enabled();
-            if std::env::var_os("OPENSOW_AUDIO_DUMP").is_some() && self.log.is_none() {
+            if crate::DEV && std::env::var_os("OPENSOW_AUDIO_DUMP").is_some() && self.log.is_none() {
                 self.log = Some(std::time::Instant::now());
             }
         }
@@ -278,7 +278,7 @@ fn route(device: &rodio::mixer::Mixer, rate: rodio::SampleRate, channels: rodio:
             None
         }
     }
-    let dump = std::env::var("OPENSOW_AUDIO_DUMP").ok();
+    let dump = std::env::var("OPENSOW_AUDIO_DUMP").ok().filter(|_| crate::DEV);
     if !crate::hifi::enabled() && dump.is_none() {
         return None;
     }

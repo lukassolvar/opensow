@@ -105,13 +105,16 @@ the settings and updates itself.
 
 ## How to run
 
-1. Download the archive for your system from the
-   [latest release](https://github.com/lukassolvar/opensow/releases/latest)
-   (`macos-aarch64`, `macos-x86_64`, `windows-x86_64`, `linux-x86_64` or `linux-aarch64`).
-2. Unpack it and start **opensow-launcher**. The programs are not signed yet: on macOS, if it
-   says the launcher cannot be opened, run `xattr -dr com.apple.quarantine` on the unpacked
-   folder once (or allow it under System Settings → Privacy & Security); on Windows, choose
-   **More info → Run anyway** if SmartScreen warns.
+1. Download the file for your system from the
+   [latest release](https://github.com/lukassolvar/opensow/releases/latest):
+   - **macOS** (Apple silicon and Intel): `opensow-…-macos-universal.dmg`. Open it, drag **OpenSOW** to
+     Applications and start it from there.
+   - **Windows**: `opensow-…-windows-x86_64.zip`. Unpack it and start `OpenSOW\opensow-launcher.exe`.
+   - **Linux**: `opensow-…-linux-x86_64.tar.gz` (or `linux-aarch64`). Unpack it and start
+     `OpenSOW/opensow-launcher`.
+2. The programs are not signed with a paid certificate yet. On macOS, if it says OpenSOW cannot be
+   opened, click **Open Anyway** under System Settings → Privacy & Security (once). On Windows,
+   choose **More info → Run anyway** if SmartScreen warns. The launcher updates itself afterwards.
 3. Click **Find games automatically**: it looks in Steam's usual places on macOS, Linux and
    Windows, other Steam libraries included. If it finds nothing, click **Locate game…** and pick
    the `State of War` folder.

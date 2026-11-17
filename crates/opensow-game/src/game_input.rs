@@ -245,11 +245,11 @@ impl Game {
         if down && self.intro.is_none() {
             let typing = self.saveui.is_some() || self.net_menu.is_some() || self.play.as_ref().is_some_and(|p| p.chat.is_some()) || self.wants_text();
             match key {
-                Key::Named(NamedKey::F12) => {
+                Key::Named(NamedKey::F12) if crate::DEV => {
                     self.dev.toggle_visible();
                     return;
                 }
-                Key::Character(c) if c.as_str() == "`" && !typing => {
+                Key::Character(c) if crate::DEV && c.as_str() == "`" && !typing => {
                     self.dev.toggle_visible();
                     return;
                 }

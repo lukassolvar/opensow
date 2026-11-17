@@ -1,0 +1,76 @@
+# Release files for every platform (docs/release.md), built without the `dev` feature with the `dist` profile. Called by
+# ci.yml (every push to main and every pull request: the files are kept as workflow artifacts) and release.yml (tags).
+name: Build
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+
+jobs:
+  package:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # one universal .dmg: both processors built here and joined with lipo
+          - { platform: macos-universal, os: macos-14, targets: "aarch64-apple-darwin,x86_64-apple-darwin" }
+          - { platform: windows-x86_64, os: windows-2022, targets: x86_64-pc-windows-msvc }
+          # Ubuntu 22.04: an older glibc, so the programs run on more distributions
+          - { platform: linux-x86_64, os: ubuntu-22.04, targets: x86_64-unknown-linux-gnu }
+          - { platform: linux-aarch64, os: ubuntu-22.04-arm, targets: aarch64-unknown-linux-gnu }
+    defaults:
+      run:
+        shell: bash
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends pkg-config libasound2-dev libpulse-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dist-${{ matrix.platform }}
+          # only main writes caches; pull requests read them and do not evict main's
+          save-if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') }}
+
+      - name: Build
+        env:
+          TARGETS: ${{ matrix.targets }}
+        run: |
+          for t in ${TARGETS//,/ }; do
+            cargo build --profile dist --locked --no-default-features --target "$t" -p opensow-launcher -p opensow-game
+          done
+
+      - name: Pack
+        env:
+          TARGETS: ${{ matrix.targets }}
+        run: |
+          dirs=()
+          for t in ${TARGETS//,/ }; do dirs+=("target/$t/dist"); done
+          scripts/package.sh ${{ matrix.platform }} dist "${dirs[@]}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+          # already compressed
+          compression-level: 0
+          retention-days: 14

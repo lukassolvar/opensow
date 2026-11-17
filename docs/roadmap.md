@@ -32,9 +32,9 @@ Not decided to be done; ordered roughly by value.
 4. [done] **CHuffcomp**: it is the savegame compressor, the only use found (`save::huff_encode`, docs/savegame.md); the TODO in AGENTS.md is stale.
 5. **Destruction animation**: what the exe draws while a building/turret is dying is not checked (docs/game.md).
 6. **Pathing grid**: one merged grid rebuilt each tick instead of the exe's incremental updates (docs/walking.md); small known deviation.
-7. **Distribution and platforms**: signed / notarised builds and a macOS `.app` (docs/release.md). Done: the release archives for macOS, Windows and Linux (`.github/workflows/release.yml`, docs/release.md), locating the install without Steam (launcher: Locate, drop, Auto-detect), GPU presentation (`gpu.rs` / `replay.rs`).
+7. **Distribution and platforms**: signed / notarised builds, an icon in the Windows programs (docs/release.md). Done: the release files (universal macOS `.dmg` with `OpenSOW.app`, Windows `.zip`, Linux `.tar.gz`) built without the dev features, and CI on Linux, macOS and Windows (`.github/workflows`, docs/release.md), locating the install without Steam (launcher: Locate, drop, Auto-detect), GPU presentation (`gpu.rs` / `replay.rs`).
 8. **Playability polish**: gamepad or touch. Done: resolutions up to 3840x2160 and Native (docs/options.md), skirmish difficulty Easy..Brutal (docs/skirmish.md).
-9. **CI**: many tests skip without an install; a CI job can cover synthetic-byte tests, clippy and fmt only.
+9. [done] **CI**: fmt, clippy and the tests on Linux, macOS and Windows plus the release files on every push (docs/release.md); tests that need the install skip there.
 10. **Extras**: mod support. Done: map editors (internal: docs/map-editor.md; in-game for custom skirmish maps: docs/map-editor-ingame.md), PNG export/import for local art experiments (docs/art-import.md).
 11. **Docs hygiene**: fold the dated "Decoded since" log into the groups, and fix `docs/game.md`, which says "no unit collision" while describing the exe's local avoidance.
 
