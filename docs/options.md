@@ -97,7 +97,7 @@ Every button's hover sound is 30 (`mainmenu-move`; `+0x54 = 0x1e`). Click sounds
 
 **Differs from the exe:** the GDI texts (title, headings, labels, On/Off, resolution) use the medium bitmap font in English and the system's Times New Roman Bold through `gdi.rs` for other languages (docs/text.md), not the exe's own `CreateFontA` faces.
 
-**Differs from the exe:** a green arrow at the page edge leads to the port's page 2 (below); the exe's page has no such arrow.
+**Differs from the exe:** a green arrow at the page edge leads to the port's page 2, and a CONTROLS button opens the key bindings (both below); the exe's page has neither.
 
 ## Page 2: this port's options (not in the exe)
 A green arrow at the right edge of the exe's page (design 596,227) leads to page 2 ("2/2" at the top right); a left arrow at the left edge (12,227) leads back. Page 2 uses the same picture and cogs; the baked-in arrow slots of the picture are filled from their surroundings (`wipe_arrow_slots`) because page 2 has no such arrows. Rows are `OWN_ROWS`: the label, then the value (On/Off from strings 267/268) between the exe's green left/right arrow art (frames 13/14, highlighted 27/28), like the page-1 rows with arrows, and a dimmer one-line hint under it. Either arrow toggles (sound 33), so does clicking the label (sound 34). These options do not exist in the language files: their texts (rows, hints, the heading, and the resolution caption NATIVE) are this port's own in English, Slovak, Czech and both Chinese scripts (`Tr::option_rows`, `Tr::enhancements`, `Tr::native`); the title is string 4 like page 1. `--hover 300+k` / `400+k` lights row k's left / right arrow headless. O.K. / CANCEL work for both pages (CANCEL restores page 2's values too).
@@ -115,3 +115,19 @@ A green arrow at the right edge of the exe's page (design 596,227) leads to page
 | Swap mouse buttons | `Extra::swap_buttons` (off) | orders go on the right click, selecting stays on the left (docs/controls.md, "Swapped mouse buttons"); reaches the play screen through `Settings::swap_buttons` |
 
 These values live in `opensow.cfg` (current directory, next to the exe's `State of War_1.cfg`, whose fixed layout is left alone): one `name=0|1` line per option (`enhance_textures`, `soft_shadows`, `contact_shadows`, `explosion_glow`, `turret_shadows`, `enhance_sound`, `turret_range`, `map_zoom`, `swap_buttons`), unknown lines ignored, missing file = defaults. `--screen options --page 1 [--hover 100]` renders page 2 headless.
+
+## Controls view (not in the exe)
+The exe's page (page 1) has a CONTROLS button (design 456,212, 128x22, under the sound rows where the picture is empty; `Hit::Controls`, sound 34); page 2 has none. It opens the Controls view over the options: three pages of its own ("1/3" at the top right, the same green page arrows), title "Controls". Its O.K. (sound 38) keeps the key changes, its CANCEL and Esc (sound 39) put back the keys it opened with; both lead back to page 1. Nothing is written yet: the options' O.K. saves the keys with everything else, their CANCEL forgets them too.
+
+Every mission key is rebindable here, to a key or to a mouse button other than left and right (docs/hotkeys.md, "Rebindable"); Esc and the left / right mouse buttons are fixed. Code: `keybinds.rs` (`Act`, `Keybinds`), `OptionsMenu::render_controls`, `Hit::Bind` / `Hit::Defaults`. Page 1 (CAMERA) holds scrolling, HQ, last message, centre on selection and the nine bookmarks, page 2 (UNITS) next unit / Advancer, the numpad selections, select all, scatter, rally / repair and turrets 1-5, page 3 (GAME) the air strikes, buy all affordable upgrades, pause, chat, key help, leave mission, game speed, quick save and fullscreen (`keybinds::PAGE_ROWS`).
+
+Each row is the action's name and two key slots (a key per slot, "-" when empty), with a heading, DEFAULTS at the top right and a help line under the heading:
+- **Click a slot** (sound 34): it shows "press a key" and the help line says so; the next key press, or a press of the middle, back, forward or another extra mouse button (named "Mouse 3", "Mouse 4", ...), is bound there (sound 33). A key that was elsewhere moves: its old slot empties and the help line names the action it left ("X no longer does: Scatter"). Esc gives up waiting; a left click anywhere else too. Shift, Ctrl, Alt, the system keys and (in development builds) F12 / `` ` `` are refused (sound 39, a help line saying which keys are fixed) and the slot keeps waiting.
+- **Right click a slot** empties it (sound 34).
+- **DEFAULTS** (sound 34) puts every key back to the exe's (and this port's shortcut) keys.
+
+Keys are physical (winit `KeyCode`) and named by their US-layout labels ("Num 1", "Page Up", ...). The texts are this port's own in the five languages (`Tr::bind_label`, `Tr::controls_heading`, ...).
+
+The keys live in `opensow.cfg` too, one `key_<action>=<code>,<code>` line per action (winit's key names, e.g. `key_pause=KeyP,` or `key_scroll_up=ArrowUp,KeyW`; mouse buttons are `MouseMiddle`, `MouseBack`, `MouseForward` and `MouseOther<n>`; `Keybinds::write`). A missing line keeps that action's defaults, an empty or unknown name leaves the slot empty, Esc or another fixed key is dropped, and a key named twice keeps its first place (`Keybinds::parse`). The launcher keeps these lines (docs/launcher.md).
+
+Headless: `--screen options --controls 0|1|2 [--hover 500+2k+slot | 600] [--capture 2k+slot]` opens the view on that page (`--hover` lights key slot `slot` of action `k` or DEFAULTS, `--hover 700` lights CONTROLS on page 1, `--capture` shows a slot waiting for a key); checked at 640x480, 1280x720 and 1920x1080 in English, Slovak and Chinese.

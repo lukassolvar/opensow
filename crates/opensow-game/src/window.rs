@@ -246,6 +246,11 @@ impl ApplicationHandler for App {
                 self.game.mouse_moved(x, y, w, h)
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                if state == ElementState::Pressed && !matches!(button, MouseButton::Left | MouseButton::Right) && self.game.fullscreen_key(button) {
+                    if let Some(win) = &self.window {
+                        win.set_fullscreen(if win.fullscreen().is_some() { None } else { Some(Fullscreen::Borderless(None)) });
+                    }
+                }
                 let (x, y) = self.game.cursor;
                 self.game.mouse_button(button, state == ElementState::Pressed, x, y, w, h);
             }
@@ -280,7 +285,9 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed && !event.repeat && event.logical_key == Key::Named(NamedKey::F11) =>
+                if event.state == ElementState::Pressed
+                    && !event.repeat
+                    && matches!(event.physical_key, winit::keyboard::PhysicalKey::Code(c) if self.game.fullscreen_key(c)) =>
             {
                 if let Some(win) = &self.window {
                     win.set_fullscreen(if win.fullscreen().is_some() { None } else { Some(Fullscreen::Borderless(None)) });
@@ -301,6 +308,10 @@ impl ApplicationHandler for App {
                         .map(|d| d as u8),
                     _ => None,
                 };
+                self.game.code = match event.physical_key {
+                    PhysicalKey::Code(c) => Some(c),
+                    _ => None,
+                };
                 self.game.key(&event.logical_key, event.state == ElementState::Pressed, w, h);
                 // typed characters for a text field (dead keys and keyboard layouts already composed by the window)
                 if event.state == ElementState::Pressed && self.game.wants_text() {
@@ -313,6 +324,7 @@ impl ApplicationHandler for App {
                 }
                 self.game.numpad = false;
                 self.game.digit = None;
+                self.game.code = None;
             }
             _ => {}
         }

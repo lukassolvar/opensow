@@ -1075,6 +1075,25 @@ fn mission_hotkeys_follow_the_exes_key_handler() {
     assert!(g.play.as_ref().unwrap().paused);
     g.key(&chr("p"), true, w, h);
     assert!(!g.play.as_ref().unwrap().paused);
+    // rebound keys (Options, Controls pages): pause on K, P is free then; the window's physical key wins over the logical one
+    let keys = g.options.keys;
+    g.options.keys.bind(keybinds::Act::Pause, 0, winit::keyboard::KeyCode::KeyK);
+    g.key(&chr("p"), true, w, h);
+    assert!(!g.play.as_ref().unwrap().paused, "P no longer pauses");
+    g.key(&chr("k"), true, w, h);
+    assert!(g.play.as_ref().unwrap().paused, "K pauses");
+    g.code = Some(winit::keyboard::KeyCode::KeyK);
+    g.key(&chr("x"), true, w, h);
+    g.code = None;
+    assert!(!g.play.as_ref().unwrap().paused, "the physical K resumes whatever the layout types");
+    // a bound middle mouse button pauses and resumes too; the left / right buttons stay the original's
+    g.options.keys.bind(keybinds::Act::Pause, 1, MouseButton::Middle);
+    g.mouse_button(MouseButton::Middle, true, w as i32 / 2, h as i32 / 2, w, h);
+    g.mouse_button(MouseButton::Middle, false, w as i32 / 2, h as i32 / 2, w, h);
+    assert!(g.play.as_ref().unwrap().paused, "the middle button pauses");
+    g.mouse_button(MouseButton::Middle, true, w as i32 / 2, h as i32 / 2, w, h);
+    assert!(!g.play.as_ref().unwrap().paused, "and resumes");
+    g.options.keys = keys;
     // Tab selects one live own unit at a time and walks the list; H the Advancers
     g.key(&Key::Named(NamedKey::Tab), true, w, h);
     let sel = |g: &Game| g.play.as_ref().unwrap().world.units.iter().enumerate().filter(|(_, u)| u.selected).map(|(i, _)| i).collect::<Vec<_>>();
