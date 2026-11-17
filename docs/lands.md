@@ -18,6 +18,10 @@ State per land 1..22: **0 locked** (red, "No data available"), **2 available** (
 `0x44d770` after a won campaign mission): level 22 goes to state 2 (the ending); otherwise a land at 2 becomes 1, and then if lands 1..20 are all
 1 land 22 becomes 2, else the first land still 0 in the order **6, 4, 7, 3, 10, 11, 12, 13, 14, 15, 5, 16, 17, 18, 19, 8, 20, 21** becomes 2.
 `0x456720` merges two records (1 beats 2 beats 0). Tested against the exe bytes (`campaign_progress_rules_match_the_exes_pass_function`).
+The statistics screen keeps no campaign flag: for any won non-network mission it reloads `player.cfg` (`0x456770`), calls `Pass([0x49a33c])`
+with the mission number and writes the file (`0x44d7cc..0x44d7eb`), so a mission continued from a savegame passes its land too. OpenSOW marks a
+loaded `M01`..`M22` as a campaign mission (`game_screens::campaign_mission`; test `a_campaign_mission_won_after_loading_a_save_passes_its_land`).
+**Differs from the exe:** a skirmish and a mission started from the developer mission list (`L`) pass nothing; the port passes its in-memory progress instead of re-reading `player.cfg` first.
 Land L is mission `M<L>` (`0x42c320(L)` stores it at ACCEPT, then state 0xb starts the level).
 
 ## Animations (`mA`, `mB`) and music
