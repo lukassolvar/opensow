@@ -414,8 +414,8 @@ fn write_png(path: &str, buf: &[u32], w: usize, h: usize) {
 fn demo_update(state: &str) -> UpdateState {
     let asset = |n: &str| update::Asset { name: n.into(), browser_download_url: String::new(), size: 40_000_000 };
     let r = Release {
-        tag: "v0.3.0".into(),
-        version: (0, 3, 0),
+        tag: "v0.4.0".into(),
+        version: (0, 4, 0),
         name: "Skirmish map editor".into(),
         url: String::new(),
         archive: Some(asset("opensow.zip")),

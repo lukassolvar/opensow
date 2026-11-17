@@ -108,7 +108,7 @@ menu, or swap the mouse buttons to give orders with the right click.
 ![](docs/screenshots/controls.jpg)
 
 Also: resolutions up to 4K, five interface languages, and a launcher that finds your games, holds
-the settings and updates itself.
+the settings, shows what is new and updates itself.
 
 ![](docs/screenshots/launcher.jpg)
 
