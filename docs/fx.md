@@ -11,12 +11,13 @@ nothing. The GPU replay is OpenSOW's too (docs/game.md); the exe draws with its 
 
 - **Soft shadows**: every shadow blit (`blit(.., shadow)`, `blit_shadow_masked`) becomes nine blits, a 3x3 grid of screen offsets
   (step `round(0.8 * zoom)` px, at least 1) with alphas `TAP_ALPHA` (14/15) that add up to the exe's 110 inside (test: within 6 of
-  255), so the shadow keeps its darkness and its edge bleeds out. The masked variant keeps the screen mask (tops' shadows do not
-  fall on buildings). Not softened: the Advancers' shade stencils and the cloud shadows.
+  255), so the shadow keeps its darkness and its edge bleeds out. The masked variant keeps the screen mask (ground units' shadows do not
+  fall on buildings or foreground tiles). Not softened: the Advancers' shade stencils and the cloud shadows.
 - **Contact shadows**: a faint halo hugging each building's silhouette: the building's own sprite drawn before it as a faint shade
   (alpha 3..5) at 21 screen offsets on three rings (1 + 8 + 12) (centre, 0.5 R, R with R = 4 screen px per zoom step), shifted down by 0.2 R, so it is
   darkest next to the building and fades to nothing at R (`fx::contact_taps`, hook in `render_rest`); and a soft dark ellipse
-  (peak 140) under every ground unit (not the hovering Advancers) sized from the chassis frame width. History: the first versions
+  (peak 140) under every ground unit (not the hovering Advancers) sized from the chassis frame width, left out where the screen mask
+  is set like the unit itself (`fx::blob_masked`, recorded as a masked `COVER` command). History: the first versions
   drew a ridge along the footprint rectangle (`blocked_cells` bounding box), which showed as a faint square under every building and,
   with a wider feather, as a big dark smudge under turrets. A footprint is not the sprite; use the sprite's own mask.
 - **Explosion glow**: an additive effect sprite (`Blit::Additive`, 64..24 000 px: explosions, muzzle flashes) also lights the

@@ -520,6 +520,43 @@ fn the_advancers_beam_sparks_are_drawn_under_its_body() {
     }
 }
 
+#[test]
+fn ground_units_behind_a_tower_are_hidden_by_its_foreground_pixels() {
+    // the exe draws ground units through the screen mask (`0x461da0`): M04's tall towers are foreground tiles, so a tank north of a
+    // tower's foot but under its dome on screen is not drawn at all, while the same tank on open ground is
+    let Some(mut g) = game() else { return };
+    let (w, h) = (800, 600);
+    g.start("M04");
+    g.update(0.0, w, h);
+    // the tank's screen neighbourhood with and without it, the view centred on map point (x, y)
+    let mut look = |x: f32, y: f32| -> (Vec<u32>, Vec<u32>) {
+        let mut shots = Vec::new();
+        for with in [false, true] {
+            {
+                let p = g.play.as_mut().unwrap();
+                p.world.units.retain(|u| !(u.player == 0 && u.kind == 1 && (u.x - x).abs() < 1.0 && (u.y - y).abs() < 1.0));
+                if with {
+                    let id = p.world.add_unit_near(1, 0, x as i32, y as i32).expect("room for a tank");
+                    let u = p.world.units.iter_mut().find(|u| u.id == id).unwrap();
+                    (u.x, u.y) = (x, y);
+                }
+                p.view.zoom = 1.0;
+                p.view.x = x - w as f32 / 2.0;
+                p.view.y = y - h as f32 / 2.0;
+            }
+            let mut buf = vec![0u32; w * h];
+            g.draw(&mut buf, w, h);
+            shots.push((h / 2 - 40..h / 2 + 30).flat_map(|r| buf[r * w + w / 2 - 35..r * w + w / 2 + 35].to_vec()).collect());
+        }
+        (shots.remove(0), shots.remove(0))
+    };
+    let (without, with) = look((44 * 32 + 16) as f32, (20 * 32 + 16) as f32);
+    let differ: Vec<usize> = (0..with.len()).filter(|&i| with[i] != without[i]).collect();
+    assert!(differ.is_empty(), "the tank behind the tower shows through its dome at {:?}", differ.iter().map(|i| (i % 70, i / 70)).collect::<Vec<_>>());
+    let (without, with) = look((44 * 32 + 16) as f32, (40 * 32 + 16) as f32);
+    assert_ne!(without, with, "the tank on open ground is not drawn");
+}
+
 /// The scripted events of the real missions (docs/ai.md "Win, lose and mission scripts", docs/air.md "Mission-script launches"):
 /// start carryalls and their squads, the countdown messages and rewards of the survival missions, the timer defeats.
 #[test]

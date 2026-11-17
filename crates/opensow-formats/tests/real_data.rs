@@ -223,6 +223,19 @@ fn language_files_parse_and_hungarian_is_the_damaged_one() {
             assert!(damaged.is_empty(), "{} unexpectedly damaged: {damaged:?}", l.code());
         }
     }
+    // every typo correction matches the shipped text once, and none is left after `with_supplement`
+    for l in [Language::Slovak, Language::Czech] {
+        let shipped = load(l);
+        let fixed = shipped.clone().with_supplement(l);
+        for &(i, wrong, right) in opensow_formats::lang::corrections(l) {
+            let s = shipped.get(i).unwrap();
+            assert_eq!(s.matches(wrong).count(), 1, "{} {i}: {wrong:?} not found once in {s:?}", l.code());
+            // (lower-cased: labels are capitalised after the correction; case-only corrections are checked by the first test)
+            let (f, wl, rl) = (fixed.get(i).unwrap().to_lowercase(), wrong.to_lowercase(), right.to_lowercase());
+            assert!(f.contains(&rl) && (wl == rl || rl.contains(&wl) || !f.contains(&wl)), "{} {i}: {f:?}", l.code());
+        }
+    }
+    assert_eq!(load(Language::Slovak).with_supplement(Language::Slovak).get(145), Some("SATELITNÁ OCHRANA"));
     assert_eq!(load(Language::Czech).get(0), Some("nová hra"));
     assert_eq!(load(Language::ChineseSimplified).get(0), Some("新游戏"));
 }
@@ -2076,9 +2089,23 @@ fn the_frame_draw_order_stamps_the_mask_before_the_smoke_and_the_top_shadows() {
     // the puffs come from the list at 0x49a3ac/0x49a3b0 (data, count of the object at 0x49a3a8), the explosions from 0x49a398/0x49a39c
     assert_eq!(exe.at(0x41fae2, 6), [0x8B, 0x0D, 0xAC, 0xA3, 0x49, 0x00]);
     assert_eq!(exe.at(0x4200f0, 6), [0x8B, 0x0D, 0x98, 0xA3, 0x49, 0x00]);
-    // the top draw 0x46e9c0 uses the masked shade blit 0x462110, the chassis shadow 0x46e980 the unmasked 0x460f60
-    assert_eq!(call_at(0x46ea2d), 0x462110);
+    // the ground units' chassis draw 0x46e9c0 (pass 0x46a3a0 on [unit+8]) uses the masked shade blit 0x462110 for the shadow and the
+    // masked plain blit 0x461da0 for the body (both branches); the tops' draw 0x479a80 (pass 0x46a4a0 on [unit+4]) the same 0x461da0.
+    // Only the Advancer's shadow 0x46e980 (unmasked 0x460f60) and its body 0x46a310 -> 0x46e8f0 (plain 0x45edf0, flag 0) skip the mask.
+    assert_eq!(call_at(0x46a3dd), 0x46e9c0);
+    assert_eq!(call_at(0x46a4dd), 0x479a80);
+    for site in [0x46ea2d, 0x46eaa2] {
+        assert_eq!(call_at(site), 0x462110, "{site:#x}");
+    }
+    for site in [0x46ea6b, 0x46eae1, 0x479af3] {
+        assert_eq!(call_at(site), 0x461da0, "{site:#x}");
+    }
     assert_eq!(call_at(0x46e9af), 0x460f60);
+    assert_eq!(call_at(0x46a35c), 0x46e8f0);
+    assert_eq!(call_at(0x46e930), 0x45edf0);
+    // 0x461da0 reads the screen mask: `add eax, [0x6b3cd4]` and `cmp cl, [0x49a33b]` (draw only below the frame's stamp)
+    assert_eq!(exe.at(0x461e80, 6), [0x03, 0x05, 0xD4, 0x3C, 0x6B, 0x00]);
+    assert_eq!(exe.at(0x461f27, 6), [0x3A, 0x0D, 0x3B, 0xA3, 0x49, 0x00]);
 }
 
 /// A shipped `.map` is the exe's own map-object stream (`0x459960`, level form): `save::MapState` reads it, writes the same

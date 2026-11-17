@@ -46,6 +46,8 @@ pub struct Results {
     panels: Option<Image>,
     numbers: Font,
     labels: std::rc::Rc<(Font, Font)>,
+    /// The system font for the labels of languages other than English (the bitmap font has no accented letters).
+    labels_gdi: Option<crate::gdi::Gdi>,
     strings: Option<LangFile>,
     /// Pairs whose "complete" sound has played (`[state+0x14..0x1b]`).
     topped: [bool; 8],
@@ -84,6 +86,7 @@ impl Results {
             panels: load_backdrop(&assets.game, "Statistic"),
             numbers,
             labels: assets.font("small"),
+            labels_gdi: crate::gdi::Gdi::for_language(lang_id, 12.0),
             strings,
             topped: [false; 8],
         }
@@ -244,11 +247,15 @@ impl Results {
                 }
             }
         }
-        // labels: 12 px GDI text in the exe (light grey on a dark green shadow); the small bitmap font stands in
+        // labels: 12 px GDI text in the exe (light grey on a dark green shadow); the small bitmap font stands in for English, the
+        // system font for the other languages (the bitmap font has no accented letters: "STRATENÉ" lost its É)
         for k in 0..8 {
             let Some(text) = self.strings.as_ref().and_then(|l| l.get(es::PAIR_LABELS[k] as usize - 1)) else { continue };
             let (lx, ly) = es::LABEL_POS[k];
-            ui::text(buf, w, h, &self.labels, text.trim(), cx + lx, cy + ly, 1.0, (206, 206, 206), (25, 45, 16));
+            match &self.labels_gdi {
+                Some(g) => g.draw_shadowed(buf, w, h, text.trim(), (cx + lx) as f32, (cy + ly) as f32, 1.0, (206, 206, 206), (25, 45, 16)),
+                None => ui::text(buf, w, h, &self.labels, text.trim(), cx + lx, cy + ly, 1.0, (206, 206, 206), (25, 45, 16)),
+            }
         }
         let t = if self.finished && self.ticks >= 1_000_000.0 { 1_000_000 } else { self.ticks as i32 };
         let c = es::counter(t, es::speed_sum(&self.stats));

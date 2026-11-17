@@ -845,6 +845,7 @@ pub(super) fn gpu_check_synthetic() {
             render::blit(buf, w, h, &view, &b, 30, 20, true);
             render::stamp_frame(&mut mask, w, h, &view, &m, 25, 25);
             render::blit_shadow_masked(buf, w, h, &view, &a, 28, 26, &mask);
+            opensow_viewer::fx::blob_masked(buf, w, h, &view, 30.0, 28.0, 20.0, 12.0, 140.0, Some(&mask));
             for (k, mode) in [Blit::Plain, Blit::Additive, Blit::AddHalf, Blit::Average, Blit::Smoke, Blit::Darken, Blit::Shade, Blit::Lens, Blit::Lens]
                 .into_iter()
                 .enumerate()

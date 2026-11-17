@@ -121,7 +121,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgroup_id) wi
         let sidx = base + u32(row) * stride + u32(col);
         if (opc == 15u) {
             let a = data[u.local + sidx];
-            if (a > 0u) { q = keep | blend(q, p0, a); }
+            if (a > 0u && !(p1 != 0u && keep != 0u)) { q = keep | blend(q, p0, a); }
             continue;
         }
         let s = atlas[sidx];

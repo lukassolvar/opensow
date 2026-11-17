@@ -76,11 +76,16 @@ pub fn shifted(view: &View, dx: i32, dy: i32) -> View {
 /// Blends `rgb` over the screen through an alpha grid (`bw` wide, 0..=255 per cell) whose top-left is screen `(bx, by)`: recorded as
 /// one coverage command for the GPU replay, otherwise mixed with the same integer formula.
 pub fn cover_grid(buf: &mut [u32], w: usize, h: usize, bx: i32, by: i32, bw: usize, grid: &[u32], rgb: (u8, u8, u8)) {
+    cover_grid_masked(buf, w, h, bx, by, bw, grid, rgb, None);
+}
+
+/// [`cover_grid`] that leaves the screen pixels `mask` marks alone (the exe's screen mask).
+pub fn cover_grid_masked(buf: &mut [u32], w: usize, h: usize, bx: i32, by: i32, bw: usize, grid: &[u32], rgb: (u8, u8, u8), mask: Option<&[bool]>) {
     if bw == 0 || grid.is_empty() {
         return;
     }
     if record::active() {
-        record::cover(bx, by, bw, grid, crate::render::pack(rgb.0, rgb.1, rgb.2));
+        record::cover_masked(bx, by, bw, grid, crate::render::pack(rgb.0, rgb.1, rgb.2), mask.map(|m| m.as_ptr() as usize));
         return;
     }
     let bh = grid.len() / bw;
@@ -92,7 +97,7 @@ pub fn cover_grid(buf: &mut [u32], w: usize, h: usize, bx: i32, by: i32, bw: usi
         for gx in 0..bw {
             let a = grid[gy * bw + gx];
             let x = bx + gx as i32;
-            if a > 0 && x >= 0 && x < w as i32 {
+            if a > 0 && x >= 0 && x < w as i32 && !mask.is_some_and(|m| m[y as usize * w + x as usize]) {
                 let p = &mut buf[y as usize * w + x as usize];
                 *p = blend(*p, rgb.0, rgb.1, rgb.2, a);
             }
@@ -111,6 +116,12 @@ fn falloff(t: f32) -> f32 {
 
 /// A soft dark ellipse centred on map pixel `(mx, my)` with half-sizes `(rx, ry)` map pixels and peak alpha `peak`.
 pub fn blob(buf: &mut [u32], w: usize, h: usize, view: &View, mx: f32, my: f32, rx: f32, ry: f32, peak: f32) {
+    blob_masked(buf, w, h, view, mx, my, rx, ry, peak, None);
+}
+
+/// [`blob`] that leaves out the screen pixels `mask` marks (the exe's screen mask: a ground unit's pool stays behind the foreground
+/// tiles and building masks that hide the unit itself).
+pub fn blob_masked(buf: &mut [u32], w: usize, h: usize, view: &View, mx: f32, my: f32, rx: f32, ry: f32, peak: f32, mask: Option<&[bool]>) {
     let (cx, cy) = ((mx - view.x) * view.zoom, (my - view.y) * view.zoom);
     let (rxs, rys) = ((rx * view.zoom).max(1.0), (ry * view.zoom).max(1.0));
     let (x0, y0) = ((cx - rxs).floor() as i32, (cy - rys).floor() as i32);
@@ -126,7 +137,7 @@ pub fn blob(buf: &mut [u32], w: usize, h: usize, view: &View, mx: f32, my: f32, 
             grid[gy * bw + gx] = (peak * falloff(d)).round() as u32;
         }
     }
-    cover_grid(buf, w, h, x0, y0, bw, &grid, (0, 0, 0));
+    cover_grid_masked(buf, w, h, x0, y0, bw, &grid, (0, 0, 0), mask);
 }
 
 /// Screen offsets and alphas of the blits that make a building's contact shadow: the building's own silhouette drawn as a faint shade
