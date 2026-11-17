@@ -1,6 +1,6 @@
 //! GPU presentation (wgpu): the CPU-drawn frame (the game's resolution, `0x00RRGGBB` pixels) is uploaded as a texture and
-//! the GPU scales it into the window (aspect kept, black bars, nearest neighbour) and presents it in step with the display's
-//! refresh. This replaces the CPU upscale + softbuffer copy, which at Retina window sizes cost as much as drawing the frame.
+//! the GPU scales it into the window (aspect kept, black bars, sharp bilinear: see [`SHADER`]) and presents it in step with
+//! the display's refresh. This replaces the CPU upscale + softbuffer copy, which at Retina window sizes cost as much as drawing the frame.
 //! `OPENSOW_SOFTWARE=1`, or a machine without a usable adapter, keeps the softbuffer path.
 //!
 //! A mission frame is not drawn on the CPU at all: it is recorded (`opensow_viewer::record`) and replayed on the GPU
@@ -11,7 +11,7 @@ use winit::window::Window;
 
 const SHADER: &str = r#"
 @group(0) @binding(0) var frame: texture_2d<f32>;
-@group(0) @binding(1) var pick: sampler;
+@group(0) @binding(1) var lin: sampler;
 
 struct Out {
     @builtin(position) pos: vec4<f32>,
@@ -28,10 +28,21 @@ fn vs(@builtin(vertex_index) i: u32) -> Out {
     return o;
 }
 
+// Sharp bilinear: every game pixel is a solid block, as with nearest neighbour, and only the one window pixel where two
+// blocks meet is blended. Plain nearest neighbour at a non-integer scale (1024x768 in 1920x1080 is 1.40625) shows every
+// second or third row and column twice; those doubled lines stay put while the map moves under them and read as a grid.
+// At whole-number scales (NATIVE, 2x, 3x) every window pixel samples a texel centre, so the output equals nearest neighbour.
 @fragment
 fn fs(o: Out) -> @location(0) vec4<f32> {
+    let size = vec2<f32>(textureDimensions(frame));
+    let texel = o.uv * size;
+    // window pixels per game pixel, per axis (the uv is linear over the viewport)
+    let scale = 1.0 / max(vec2<f32>(abs(dpdx(texel.x)), abs(dpdy(texel.y))), vec2<f32>(1e-6));
+    let flat = max(vec2<f32>(0.5) - 0.5 / scale, vec2<f32>(0.0));
+    let d = fract(texel) - 0.5;
+    let f = (d - clamp(d, -flat, flat)) * scale + 0.5;
     // the texture is BGRA from 0x00RRGGBB little-endian words; the unused top byte is 0, so alpha is forced to 1
-    return vec4<f32>(textureSample(frame, pick, o.uv).rgb, 1.0);
+    return vec4<f32>(textureSampleLevel(frame, lin, (floor(texel) + f) / size, 0.0).rgb, 1.0);
 }
 "#;
 
@@ -69,6 +80,57 @@ pub fn headless() -> Option<(wgpu::Device, wgpu::Queue, String)> {
     Some((device, queue, name))
 }
 
+/// The pipeline that draws the frame texture into a `format` target, its bind group layout and its sampler.
+fn present_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout, wgpu::Sampler) {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("present"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("frame"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+    let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("present"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("present"),
+        layout: Some(&pl),
+        vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs"), buffers: &[], compilation_options: Default::default() },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs"),
+            targets: &[Some(format.into())],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    });
+    // linear: the shader picks the sample points so that only block edges blend
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("sharp bilinear"),
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+    (pipeline, layout, sampler)
+}
+
 impl Gpu {
     /// A presenter for `window`, or `None` (with the reason on stderr) when no adapter or surface can be had.
     pub fn new(window: Arc<Window>) -> Option<Gpu> {
@@ -95,48 +157,7 @@ impl Gpu {
         config.desired_maximum_frame_latency = 2;
         surface.configure(&device, &config);
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("present"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("frame"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-        let pl =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("present"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("present"),
-            layout: Some(&pl),
-            vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs"), buffers: &[], compilation_options: Default::default() },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs"),
-                targets: &[Some(format.into())],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-        // nearest neighbour, like the software path: the game's pixels stay sharp
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor { label: Some("nearest"), ..Default::default() });
+        let (pipeline, layout, sampler) = present_pipeline(&device, format);
         eprintln!("gpu: presenting with {} ({:?})", adapter.get_info().name, adapter.get_info().backend);
         let replay = crate::replay::Replay::new(&device);
         Some(Gpu { surface, device, queue, config, pipeline, layout, sampler, frame: None, replay })
@@ -254,5 +275,134 @@ impl Gpu {
         self.queue.submit([enc.finish()]);
         self.queue.present(target);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A hardware device for the offscreen tests, or `None`: CI machines have no adapter (Linux) or only a software one
+    /// (Windows: WARP, where the test process crashed with an access violation), so the tests skip there as they do
+    /// without a GPU.
+    fn hardware_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .ok()?;
+        if adapter.get_info().device_type == wgpu::DeviceType::Cpu {
+            return None;
+        }
+        pollster::block_on(adapter.request_device(&device_descriptor(&adapter))).ok()
+    }
+
+    /// Draws the `iw` x `ih` frame `src` (`0x00RRGGBB`) into a `ww` x `wh` target with the present pipeline; the target's words back.
+    fn present_offscreen(device: &wgpu::Device, queue: &wgpu::Queue, src: &[u32], iw: u32, ih: u32, ww: u32, wh: u32) -> Vec<u32> {
+        let format = wgpu::TextureFormat::Bgra8Unorm;
+        let (pipeline, layout, sampler) = present_pipeline(device, format);
+        let extent = |w, h| wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
+        let texture = |w, h, usage| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: extent(w, h),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
+        };
+        let frame = texture(iw, ih, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
+        let bytes: Vec<u8> = src.iter().flat_map(|w| w.to_le_bytes()).collect();
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &frame, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            &bytes,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(iw * 4), rows_per_image: Some(ih) },
+            extent(iw, ih),
+        );
+        let target = texture(ww, wh, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
+        let view = frame.create_view(&Default::default());
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+            ],
+        });
+        let stride = (ww * 4).next_multiple_of(256);
+        let out = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: (stride * wh) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = device.create_command_encoder(&Default::default());
+        {
+            let tv = target.create_view(&Default::default());
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &tv,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture: &target, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &out,
+                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(stride), rows_per_image: Some(wh) },
+            },
+            extent(ww, wh),
+        );
+        queue.submit([enc.finish()]);
+        out.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let data = out.slice(..).get_mapped_range().unwrap();
+        (0..wh as usize)
+            .flat_map(|y| (0..ww as usize).map(move |x| (y, x)))
+            .map(|(y, x)| u32::from_le_bytes(data[y * stride as usize + x * 4..][..4].try_into().unwrap()) & 0xffffff)
+            .collect()
+    }
+
+    #[test]
+    fn whole_number_scales_equal_nearest_neighbour() {
+        let Some((device, queue)) = hardware_device() else { return };
+        let (iw, ih) = (7u32, 5u32);
+        let src: Vec<u32> = (0..iw * ih).map(|i| i.wrapping_mul(0x9e3779b1) >> 8).collect();
+        for k in [1u32, 2, 3] {
+            let got = present_offscreen(&device, &queue, &src, iw, ih, iw * k, ih * k);
+            let want: Vec<u32> = (0..ih * k).flat_map(|y| (0..iw * k).map(move |x| (y / k * iw + x / k) as usize)).map(|i| src[i]).collect();
+            assert_eq!(got, want, "scale {k}");
+        }
+    }
+
+    /// The bug the window showed: at 1.40625 (1024x768 in a 1920x1080 window) nearest neighbour gave every game pixel one or two
+    /// window pixels, and the doubled lines read as a grid while the map moved. Now each one covers its true width.
+    #[test]
+    fn fractional_scales_give_every_game_pixel_the_same_width() {
+        let Some((device, queue)) = hardware_device() else { return };
+        let (iw, ih) = (16u32, 2u32);
+        for ww in [24u32, 22, 37] {
+            let scale = ww as f32 / iw as f32;
+            for lit in 0..iw {
+                let src: Vec<u32> = (0..iw * ih).map(|i| if i % iw == lit { 0xffffff } else { 0 }).collect();
+                let got = present_offscreen(&device, &queue, &src, iw, ih, ww, ih);
+                let width: f32 = got[..ww as usize].iter().map(|&p| (p & 255) as f32 / 255.0).sum();
+                assert!((width - scale).abs() < 0.05, "window {ww}: game column {lit} covers {width} px, not {scale}");
+            }
+        }
     }
 }
