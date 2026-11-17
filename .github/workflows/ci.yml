@@ -1,6 +1,5 @@
 # Checks on every push to main and every pull request (docs/release.md "CI"): formatting and clippy (with and without the
-# `dev` feature) and the tests on Linux and Windows (tests that need the game's files skip; macOS is the development
-# machine and runs them before every push). The release files of every platform (build.yml, downloadable from the run's
+# `dev` feature) and the tests on Linux, macOS and Windows (tests that need the game's files skip). The release files of every platform (build.yml, downloadable from the run's
 # artifacts) are built only when the workflow is started by hand: macOS minutes cost ten times as much on a private
 # repository.
 name: CI
@@ -54,7 +53,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-2022]
+        os: [ubuntu-22.04, macos-15, windows-2022]
     steps:
       - uses: actions/checkout@v4
       - name: Linux libraries

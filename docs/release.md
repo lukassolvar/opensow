@@ -62,22 +62,23 @@ The `dist` profile (`Cargo.toml`) is `release` with thin LTO and stripped symbol
 `ci.yml` runs on every push to `main` and every pull request (changes to docs and Markdown only are skipped; a newer push
 cancels the older run):
 - `lint` (Ubuntu): `cargo fmt --check`, clippy on all targets, clippy without the `dev` feature;
-- `test` on Ubuntu 22.04 and Windows 2022: `cargo test --release` (tests that need the game's files skip: no game data on
-  the runners). Not on macOS: it is the development machine, where the full suite runs before every push;
+- `test` on Ubuntu 22.04, macOS 15 and Windows 2022: `cargo test --release` (tests that need the game's files skip: no
+  game data on the runners);
 - `build`: `build.yml`, the release files of every system, kept 14 days as the run's artifacts (test builds). Only when
   the workflow is started by hand (Actions tab, "Run workflow", or `gh workflow run ci.yml`) and on release tags
   (`release.yml`), not on every push.
 
-The macOS release file is built on `macos-15` (Apple silicon, the Intel half cross-compiled); `macos-14` is retired
-("The configuration 'macos-14-arm64-us-xl' is not supported" cancels the job before it starts).
+macOS runs on `macos-15` (Apple silicon; the release file's Intel half is cross-compiled there); `macos-14` is retired
+("The configuration 'macos-14-arm64-us-xl' is not supported" cancels a job before it starts).
 
 Speed: `Swatinem/rust-cache` keeps the dependencies' builds per job and system; only `main` (and tags) save caches, pull
 requests read them, so they never evict `main`'s. Warnings fail the lint and test jobs (`RUSTFLAGS=-D warnings`).
 
 Cost: the repository is private for now, on the Free plan's 2000 minutes a month; Windows minutes count twice, macOS ten
-times, and each job is rounded up to whole minutes. Measured on the first run: a push costs about 23 minutes (lint 2,
-Ubuntu tests 5, Windows tests 8 x 2); a run started by hand adds the four release files, about 20 minutes for Linux and
-Windows plus the macOS universal build (two builds, roughly 10 minutes x 10). A public repository runs all of it for free.
+times, and each job is rounded up to whole minutes. Measured on the first runs: lint 2, Ubuntu tests 5, Windows tests
+8 x 2, and the macOS tests an estimated 8 x 10, so a push costs about 100 minutes (about 20 pushes a month); a run started
+by hand adds the four release files, about 20 minutes for Linux and Windows plus the macOS universal build (two builds,
+roughly 10 minutes x 10). A public repository runs all of it for free.
 
 ## Local checks
 - macOS: `cargo build --profile dist --no-default-features -p opensow-launcher -p opensow-game` then
