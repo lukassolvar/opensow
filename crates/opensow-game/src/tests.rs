@@ -1679,6 +1679,64 @@ fn campaign_map_to_mission_and_back_with_progress() {
 }
 
 #[test]
+fn a_campaign_mission_won_after_loading_a_save_passes_its_land() {
+    // the statistics screen passes the mission number whoever started it (0x44d7d6): a quick load does not leave the campaign
+    let Some(mut g) = game() else { return };
+    let (w, h) = (640, 480);
+    g.progress.pass(1); // opens land 6 (Russia)
+    assert_eq!(g.progress.states[6], 2);
+    g.campaign = true;
+    g.start("M06");
+    let snapshot = g.play.as_mut().unwrap().snapshot();
+    let dir = std::env::temp_dir().join(format!("opensow-campaign-load-{}", std::process::id()));
+    let store = saveui::Store { write: dir.clone(), also: None, edition: g.assets.game.edition };
+    store.write(0, "Quick Save", "M06", &snapshot, &[], &vec![0u16; 160 * 120]).unwrap();
+    let saved = store.level_of(0).unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+    // from the main menu, as after a restart of the game
+    g.act(Action::ToMain);
+    assert!(!g.campaign);
+    g.saveui_event(saveui::Event::Load(saved));
+    assert!(g.campaign && g.play.as_ref().is_some_and(|p| p.level == "M06"));
+    g.play.as_mut().unwrap().world.outcome = Some(sim::Outcome::Victory);
+    g.update(0.0, w, h);
+    pass_results(&mut g, w, h);
+    assert_eq!(g.progress.states[6], 1, "Russia is passed");
+    assert!(g.lands.is_some() && g.play.is_none(), "the campaign map comes back");
+    assert_eq!(game_screens::campaign_mission("M00"), None);
+    assert_eq!(game_screens::campaign_mission("custom/foo"), None);
+    assert_eq!(game_screens::campaign_mission("m22"), Some(22));
+}
+
+#[test]
+fn a_warmonger_mission_won_after_loading_a_save_passes_its_land() {
+    // Warmonger's statistics screen is the same code (0x447dcc..0x447deb: Pass([0x491360]) on its own record)
+    use opensow_formats::Edition;
+    let Some(mut g) = game() else { return };
+    if g.assets.game.warmonger.is_none() {
+        return;
+    }
+    let (w, h) = (640, 480);
+    g.set_edition(Edition::Warmonger);
+    g.progress.states[3] = 2;
+    g.start("M03");
+    let snapshot = g.play.as_mut().unwrap().snapshot();
+    let dir = std::env::temp_dir().join(format!("opensow-wm-campaign-load-{}", std::process::id()));
+    let store = saveui::Store { write: dir.clone(), also: None, edition: Edition::Warmonger };
+    store.write(0, "Quick Save", "M03", &snapshot, &[], &vec![0u16; 160 * 120]).unwrap();
+    let saved = store.level_of(0).unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+    g.act(Action::ToMain);
+    g.saveui_event(saveui::Event::Load(saved));
+    assert!(g.campaign && g.assets.game.edition == Edition::Warmonger);
+    g.play.as_mut().unwrap().world.outcome = Some(sim::Outcome::Victory);
+    g.update(0.0, w, h);
+    pass_results(&mut g, w, h);
+    assert_eq!((g.progress.states[3], g.progress.states[4]), (1, 2), "the Warmonger chain moves on");
+    assert!(g.lands.is_some());
+}
+
+#[test]
 fn menus_and_the_map_raise_the_exes_interface_sounds() {
     let Some(mut g) = game() else { return };
     let (w, h) = (640, 480);

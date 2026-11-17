@@ -2,6 +2,12 @@
 
 use super::*;
 
+/// The land a campaign level stands for: `M01`..`M22` (the exe's mission number `[0x49a33c]`); the tutorial `M00` and other levels none.
+pub(super) fn campaign_mission(level: &str) -> Option<usize> {
+    let n: usize = level.strip_prefix(['M', 'm'])?.parse().ok()?;
+    (1..=22).contains(&n).then_some(n)
+}
+
 impl Game {
     /// Dev tools: a pressed tool button took effect.
     pub(super) fn dev_event(&mut self, item: devtools::Item) {
@@ -452,7 +458,12 @@ impl Game {
                 self.play = None;
                 match self.saved_skirmish(&saved, &custom_maps::dir()) {
                     Some((run, script)) => self.start_skirmish(run, script),
-                    None => self.start(&saved.level),
+                    None => {
+                        self.start(&saved.level);
+                        // the exe has no campaign flag: a won mission passes its number whoever started it (0x44d7d6), so a
+                        // campaign mission continued from a save still opens the next land
+                        self.campaign = campaign_mission(&saved.level).is_some();
+                    }
                 }
                 if !saved.snapshot.is_empty() {
                     if let Some(p) = self.play.as_mut() {
@@ -512,7 +523,7 @@ impl Game {
                 }
                 if self.campaign {
                     // CPassedLevels::Pass (0x4565a0, called by the statistics screen): this land is done and the next one opens
-                    let n = level.trim_start_matches(['M', 'm']).parse().unwrap_or(0);
+                    let n = campaign_mission(&level).unwrap_or(0);
                     if self.assets.game.edition == opensow_formats::Edition::Warmonger {
                         self.progress.pass_warmonger(n);
                     } else {
