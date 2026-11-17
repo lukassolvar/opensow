@@ -241,6 +241,8 @@ pub struct Recording {
     pub tainted: bool,
     /// The screen mask in use (its address): one per frame.
     mask: Option<usize>,
+    /// Where each shared grid ([`cover_shared`]) already lies in `local`, by its key.
+    shared: std::collections::HashMap<u64, u32>,
 }
 
 #[derive(Default)]
@@ -500,6 +502,29 @@ pub fn cover_masked(bx: i32, by: i32, bw: usize, grid: &[u32], rgb: u32, mask: O
         r.local.extend_from_slice(grid);
         let (cols, rows) = push_maps(r, xs, xe, ys, ye, |x| x - bx, |y| y - by);
         r.cmds.push(Cmd { op: op::COVER, xs, ys, xe, ye, cols, rows, base, stride: bw as u32, p: [rgb, mask.is_some() as u32, 0, 0, 0, 0, 0] });
+    });
+}
+
+/// [`cover_masked`] (no mask) for a grid that many commands of a frame share: `key` names the grid's contents (the same key must
+/// always mean the same words), and the recording stores it once.
+pub fn cover_shared(bx: i32, by: i32, bw: usize, grid: &[u32], rgb: u32, key: u64) {
+    if bw == 0 || grid.is_empty() {
+        return;
+    }
+    let bh = grid.len() / bw;
+    with_rec(|r, _, _| {
+        let Some((xs, ys, xe, ye)) = clip(r, bx, by, bx + bw as i32, by + bh as i32) else { return };
+        let base = match r.shared.get(&key) {
+            Some(&b) => b,
+            None => {
+                let b = r.local.len() as u32;
+                r.local.extend_from_slice(grid);
+                r.shared.insert(key, b);
+                b
+            }
+        };
+        let (cols, rows) = push_maps(r, xs, xe, ys, ye, |x| x - bx, |y| y - by);
+        r.cmds.push(Cmd { op: op::COVER, xs, ys, xe, ye, cols, rows, base, stride: bw as u32, p: [rgb, 0, 0, 0, 0, 0, 0] });
     });
 }
 
