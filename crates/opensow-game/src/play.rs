@@ -1491,38 +1491,33 @@ impl Play {
         }
     }
 
-    /// Everything that goes over the ground units but under the hovering Advancers: buildings in front of units standing behind
-    /// them, and the rest of the foreground.
-    fn finish_ground(&self, fg_row: &mut usize, buf: &mut [u32], w: usize, h: usize) {
+    /// What goes over the ground units but under the hovering Advancers: turrets in front of units standing behind them (not in the
+    /// exe). Buildings and the foreground tiles need nothing here: the ground units are drawn through the screen mask they stamped
+    /// (`0x461da0`), so their pixels already stay in front.
+    fn finish_ground(&self, buf: &mut [u32], w: usize, h: usize) {
         let view = self.view;
-        // units behind a building or turret (above the foot of its footprint) are hidden by it: draw it again over them
+        // units behind a turret (above the foot of its footprint) are hidden by it: draw it again over them (turrets stamp no mask)
         for st in self.world.structures.iter().filter(|s| s.alive()) {
             let Some((_, fh, _)) = opensow_formats::buildings::footprint(st.kind_id) else { continue };
             let Some(pl) = self.scene.placed.iter().find(|p| matches!(p.source, Source::Object(i) if i == st.object) && p.layer == 0) else { continue };
+            if pl.mask().is_some() {
+                continue;
+            }
             let f = &pl.set[pl.frame.min(pl.set.len() - 1)];
             let (x0, y0) = (pl.ax - f.hot_x as i32 - 24, pl.ay - f.hot_y as i32 - 24);
             let (x1, y1) = (x0 + f.width as i32 + 48, y0 + f.height as i32 + 48);
             let foot = ((st.cell.1 + fh) * 32) as f32;
-            let mask = pl.mask();
             // only over the units themselves
-            for u in
-                self.world.units.iter().filter(|u| {
-                    u.kind != kinds::ADVANCER && (mask.is_some() || u.y < foot) && (x0..x1).contains(&(u.x as i32)) && (y0..y1).contains(&(u.y as i32))
-                })
+            for u in self
+                .world
+                .units
+                .iter()
+                .filter(|u| u.kind != kinds::ADVANCER && u.y < foot && (x0..x1).contains(&(u.x as i32)) && (y0..y1).contains(&(u.y as i32)))
             {
                 let (sx0, sy0) = view.to_screen(u.x - 28.0, u.y - 40.0);
                 let (sx1, sy1) = view.to_screen(u.x + 28.0, u.y + 24.0);
-                match mask {
-                    // buildings: the exe's mask frame says which pixels stand in front of units (turrets: above the foot)
-                    Some(m) => opensow_viewer::render::blit_masked(buf, w, h, &view, f, m, pl.ax, pl.ay, (sx0, sy0, sx1, sy1)),
-                    None => opensow_viewer::render::blit_clip(buf, w, h, &view, f, pl.ax, pl.ay, false, (sx0, sy0, sx1, sy1)),
-                }
+                opensow_viewer::render::blit_clip(buf, w, h, &view, f, pl.ax, pl.ay, false, (sx0, sy0, sx1, sy1));
             }
-        }
-        let rows = self.scene.map.height as usize;
-        while *fg_row < rows {
-            opensow_viewer::render::draw_foreground_row(&self.scene, &view, buf, w, h, *fg_row);
-            *fg_row += 1;
         }
     }
 
@@ -1569,22 +1564,16 @@ impl Play {
         let screen_mask = self.screen_mask(w, h);
         // the smoke puffs (list `[0x49a3a8]`) are drawn first (`0x41faf7`), before the live buildings and all units, so those cover them
         self.draw_puffs(assets, &screen_mask, buf, w, h);
-        // Foreground tiles (trees, rocks) are drawn row by row between the units: a tile in cell row k hides the units
-        // standing in rows up to k (behind it) and not the ones below it.
-        let mut fg_row = 0usize;
+        // A ground unit's shadow, body and top are drawn through the screen mask (`0x46e9c0` -> `0x462110` / `0x461da0`, `0x479a80` ->
+        // `0x461da0`): no pixel lands where a foreground tile (tree, rock or tower top) or a building's mask frame was stamped, so those
+        // hide every unit under them. Only the hovering Advancer's body is drawn unmasked (`0x46a310` -> `0x46e8f0` -> `0x45edf0`).
         let mut ground_done = false;
         for &i in &order {
             let u = &self.world.units[i];
             if u.kind == kinds::ADVANCER && !ground_done {
                 ground_done = true;
-                self.finish_ground(&mut fg_row, buf, w, h);
+                self.finish_ground(buf, w, h);
                 self.draw_air_pass(assets, &order, &screen_mask, buf, w, h);
-            } else if u.kind != kinds::ADVANCER {
-                let row = (u.y.max(0.0) / 32.0) as usize;
-                while fg_row < row {
-                    opensow_viewer::render::draw_foreground_row(&self.scene, &view, buf, w, h, fg_row);
-                    fg_row += 1;
-                }
             }
             let Some(sp) = self.sprites.get(&(u.kind, u.player == 0)) else { continue };
             let (ax, ay) = u.px();
@@ -1597,15 +1586,23 @@ impl Play {
                 // contact shadow: a soft dark pool under the unit (docs/fx.md)
                 let f = &set[cframe.min(set.len() - 1)];
                 let rx = f.width as f32 * 0.55;
-                opensow_viewer::fx::blob(buf, w, h, &view, ax as f32, ay as f32, rx, rx * 0.6, 140.0);
+                opensow_viewer::fx::blob_masked(buf, w, h, &view, ax as f32, ay as f32, rx, rx * 0.6, 140.0, Some(&screen_mask));
             }
+            // the body blit: masked plain copy for ground units, plain for the Advancer
+            let body = |buf: &mut [u32], f: &Frame, x: i32, y: i32| {
+                if shadow {
+                    blit_blend_masked(buf, w, h, &view, f, x, y, Blit::Plain, Some(&screen_mask));
+                } else {
+                    blit(buf, w, h, &view, f, x, y, false);
+                }
+            };
             if let (Some(set), true) = (&sp.chassis_shadow, shadow) {
-                blit(buf, w, h, &view, &set[cframe.min(set.len() - 1)], ax, ay + cdy, true);
+                opensow_viewer::render::blit_shadow_masked(buf, w, h, &view, &set[cframe.min(set.len() - 1)], ax, ay + cdy, &screen_mask);
             }
             // the Advancer flies 64 px up and bobs (decoded hover table); its shadow stays on the ground
             let ay_body = u.sprite_y().round() as i32;
             if let Some(set) = &sp.chassis {
-                blit(buf, w, h, &view, &set[cframe.min(set.len() - 1)], ax, ay_body + cdy, false);
+                body(buf, &set[cframe.min(set.len() - 1)], ax, ay_body + cdy);
             }
             if let (Some(top), Some(aim)) = (&sp.top, &u.aim) {
                 let steps = aim.params.steps;
@@ -1614,10 +1611,10 @@ impl Play {
                     None => (aim.facing as usize, None),
                 };
                 if let (Some(set), true) = (&sp.top_shadow, shadow) {
-                    // a top's shadow is drawn with the masked shade blit `0x462110` (the chassis shadow is not masked)
+                    // like the chassis shadow, with the masked shade blit `0x462110`
                     opensow_viewer::render::blit_shadow_masked(buf, w, h, &view, &set[frame.min(set.len() - 1)], ax, ay + tdy, &screen_mask);
                 }
-                blit(buf, w, h, &view, &top[frame.min(top.len() - 1)], ax, ay + tdy, false);
+                body(buf, &top[frame.min(top.len() - 1)], ax, ay + tdy);
                 if let (Some(f), Some(set)) = (flash, &sp.flash) {
                     if let Some(fr) = set.get(f as usize) {
                         // the muzzle flash is added to the picture (`0x479a20` -> `0x45cde0`), its black stays invisible
@@ -1625,11 +1622,11 @@ impl Play {
                     }
                 }
             } else if let Some(top) = &sp.top {
-                blit(buf, w, h, &view, &top[cframe.min(top.len() - 1)], ax, ay + tdy, false);
+                body(buf, &top[cframe.min(top.len() - 1)], ax, ay + tdy);
             }
         }
         if !ground_done {
-            self.finish_ground(&mut fg_row, buf, w, h);
+            self.finish_ground(buf, w, h);
             self.draw_air_pass(assets, &order, &screen_mask, buf, w, h);
         }
         // a selected unit's health bar (`0x46a420` -> `0x437140`): every unit with the local selection flag (a box also takes enemy units), centred on it, 25 px above its ground point (23 for
@@ -1944,7 +1941,8 @@ impl Play {
         if let Some(g) = &self.hud_gdi {
             match shadow {
                 Some(sh) => g.draw_shadowed(buf, w, h, text, x as f32, y as f32, ui, fg, sh),
-                None => g.draw_shadowed(buf, w, h, text, x as f32, y as f32, ui, fg, fg),
+                // the exe's GDI helpers always draw a shadow; black when none is given (`0x467060`)
+                None => g.draw_rgb(buf, w, h, text, x as f32, y as f32, ui, fg),
             }
             return;
         }
@@ -2019,13 +2017,14 @@ impl Play {
         if let (Some(panel), true) = (&self.tut_panel, self.world.tutorial.is_some()) {
             self.draw_tutorial_panel(panel, assets, buf, w, h, ui);
         }
-        // the hint box of missions 1 and 6 (`0x4303e0`): darkened box around the screen middle, white text (0xffffff)
+        // the hint box of missions 1 and 6 (`0x4303e0`): darkened box around the screen middle, then `0x467060`: white text over a
+        // black copy 2 px right and down
         if let Some(hint) = self.world.hint {
             if let Some(text) = self.lang.as_ref().and_then(|l| l.get(hint.text)) {
                 let (cx, cy) = (w as i32 / 2, h as i32 / 2);
                 let r = ui::Rect { x: cx - u(hint.half as f32), y: cy - u(15.0), w: 2 * u(hint.half as f32), h: u(25.0) };
                 ui::dim_sub(buf, w, h, r, 32);
-                self.hud_put(&font, buf, w, h, text.trim(), cx - u(hint.text_dx as f32), cy - u(7.0), ui, (255, 255, 255), None);
+                self.hud_put(&font, buf, w, h, text.trim(), cx - u(hint.text_dx as f32), cy - u(7.0), ui, (255, 255, 255), Some((0, 0, 0)));
             }
         }
         self.draw_placement(assets, buf, w, h);

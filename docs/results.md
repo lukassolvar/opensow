@@ -23,7 +23,7 @@ Class object `0x70f814`. Init: music `statistic.wav` (`0x407bb0`, `Data\Sounds\M
 ## In OpenSOW
 `Game::update` raises `Results` when `World::outcome` is set (speech as before), `draw_banner` paints over the frame of the frozen mission, a click/key after two seconds opens the statistics (`statistic` music; the tutorial goes straight to the main menu), and leaving them calls `results_event(Done)`: won -> `progress.pass` (`pass_warmonger` for Warmonger) and the campaign map, a won skirmish, a lost mission and the tutorial -> main menu. The final mission still plays `mO` before the closing message. The progress is passed when the statistics are left (as in the exe). The banner tint (`endscreen::banner_rows` / `tint565`; `record::op::TINT_ROWS` on the GPU path), the bar arithmetic (`endscreen`), the sounds 47 / 48 and the input rules are the exe's.
 
-**Differs from the exe:** the statistics labels use the small bitmap font instead of the exe's 12 px GDI Times New Roman (`Results::draw_layout`).
+**Differs from the exe:** the English statistics labels use the small bitmap font instead of the exe's 12 px GDI Times New Roman (`Results::draw_layout`); the other languages use the 12 px system font (`gdi.rs`) with the same colours and shadow, because the bitmap font has no accented letters (Slovak "STRATENÉ" lost its É).
 
 **Differs from the exe:** the banner picture is scaled like the HUD (window height / 768, never below 1, `Results::draw_banner`); the exe blits it 1:1.
 

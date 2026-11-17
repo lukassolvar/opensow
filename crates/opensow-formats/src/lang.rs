@@ -194,6 +194,89 @@ const SUPPLEMENT_CZ: &[(usize, &str)] = &[
     (301, "náklad: posily"),
 ];
 
+/// Typos in the shipped Slovak / Czech files: (file index, wrong text as shipped, correction). Each is replaced only while the
+/// string still holds the shipped text, so a fixed install file wins. String 260 ("nedostupný", the weapon of objects without one)
+/// becomes "n/a" like the info box's other "n/a" texts (`ÚTOK: n/a`, the scope of the pod), which also keeps the two-column lines short.
+const CORRECTIONS_SK: &[(usize, &str, &str)] = &[
+    (53, "Data nie sú k dizpozícií", "Dáta nie sú k dispozícii"),
+    (74, "Juhoafrická Republika", "Juhoafrická republika"),
+    (77, "k postupnému obsadenie", "k postupnému obsadeniu"),
+    (81, "výskumného laboratóriá", "výskumného laboratória"),
+    (82, "než prídu posily", "kým prídu posily"),
+    (83, "konvoj privážajúce", "konvoj privážajúci"),
+    (83, "ťažkú \u{200b}\u{200b}protivzdušnú", "ťažkú protivzdušnú"),
+    (83, "Až konvoj dôjde", "Keď konvoj dôjde"),
+    (84, "k dizpozícií", "k dispozícii"),
+    (86, "Vaše ďalšia misia", "Vaša ďalšia misia"),
+    (87, "než dorazia posily", "kým dorazia posily"),
+    (92, "k obrane, než príde pomoc", "k obrane, kým príde pomoc"),
+    (94, "Nasledujúce misia", "Nasledujúca misia"),
+    (96, "Váša ďalšia úloha", "Vaša ďalšia úloha"),
+    (97, "jediný spôsob ako", "jediný spôsob, ako"),
+    (98, "Zvýštiť", "Zvýšiť"),
+    (108, "k postupnému obsadenie", "k postupnému obsadeniu"),
+    (114, "Až sa objaví pomoc", "Keď sa objaví pomoc"),
+    (115, "nepriateľské obrany", "nepriateľskej obrany"),
+    (117, "k obsadenie výskumné laboratóriá", "k obsadeniu výskumného laboratória"),
+    (117, "obe nepriateľská veliteľstvo", "obe nepriateľské veliteľstvá"),
+    (131, "Posili prichádzajú", "Posily prichádzajú"),
+    (145, "SATELITNÉ OCHRANA", "SATELITNÁ OCHRANA"),
+    (153, "Čakajte, než sa výroba", "Čakajte, kým sa výroba"),
+    (155, "režimom vylepšovanie", "režimom vylepšovania"),
+    (160, "čakajte, než sa výroba", "čakajte, kým sa výroba"),
+    (162, "Ku zničenie všetkých", "Ku zničeniu všetkých"),
+    (167, "ikonu zvýšenie technickej", "ikonu zvýšenia technickej"),
+    (169, "vaša veliteľstvo", "vaše veliteľstvo"),
+    (170, "napadnú pomocou", "napadnúť pomocou"),
+    (211, "Zlatý dol", "Zlatá baňa"),
+    (244, "4x protivzdušnej rakety", "4x protivzdušné rakety"),
+    (260, "nedostupný", "n/a"),
+    (302, "slabému pancierovanie", "slabému pancierovaniu"),
+    (304, "ideálnou bojovú kombináciou", "ideálnou bojovou kombináciou"),
+    (304, "poškodiť PVT jednotkou", "poškodiť PVT jednotku"),
+    (305, "dobe zameriavanie strely", "dobe zameriavania strely"),
+    (306, "kalibr", "kaliber"),
+    (307, "dve delá ktoré", "dve delá, ktoré"),
+    (307, "najlepšie jednotka", "najlepšia jednotka"),
+    (307, "blízkej ciele", "blízke ciele"),
+    (312, "na druhej stranu", "na druhej strane"),
+    (313, "silnými plameňomety", "silnými plameňometmi"),
+    (315, "má silnejší pancierovanie", "má silnejšie pancierovanie"),
+    (317, "plazmového delá", "plazmového dela"),
+    (319, "štyrmi delami z ktorých", "štyrmi delami, z ktorých"),
+    (319, "stredný dostriel diel, ale  aj", "stredný dostrel diel, ale aj"),
+    (327, "o 20%", "o 20%."),
+    (333, "Tento nákladné lietadlo je schopný", "Toto nákladné lietadlo je schopné"),
+    (333, "Vhľadom", "Vzhľadom"),
+    (339, "produkujú laboratória", "produkujú laboratóriá"),
+    (350, "nemôžme", "nemôžeme"),
+];
+
+/// Like [`CORRECTIONS_SK`] for Czech.
+const CORRECTIONS_CZ: &[(usize, &str, &str)] = &[
+    (77, "Osud Marocké základny", "Osud marocké základny"),
+    (85, "k znovuzískání", "ke znovuzískání"),
+    (165, "K získaní dalších", "K získání dalších"),
+    (170, "napadnou pomocí", "napadnout pomocí"),
+    (260, "nedostupný", "n/a"),
+    (269, "prazdna pozice", "prázdná pozice"),
+    (304, "I když  útočí", "I když útočí"),
+    (304, "poškodit PVT jednotkou", "poškodit PVT jednotku"),
+    (323, "řídí roboti, kteří", "řídí roboty, kteří"),
+    (327, "o 20 %", "o 20 %."),
+    (333, "Vhledem", "Vzhledem"),
+    (363, "Ulozit hru", "Uložit hru"),
+];
+
+/// The typo corrections `with_supplement` applies to `language`: (file index, shipped text, correction); empty for other languages.
+pub fn corrections(language: Language) -> &'static [(usize, &'static str, &'static str)] {
+    match language {
+        Language::Slovak => CORRECTIONS_SK,
+        Language::Czech => CORRECTIONS_CZ,
+        _ => &[],
+    }
+}
+
 /// File indices of Slovak / Czech labels the shipped files write in lower case ("nastavenia", "zrušiť") while English capitalises
 /// them: menu rows, Options labels and buttons, lobby buttons, save-slot texts, side names, statistics headings, load/save buttons.
 /// Weapon names and other strings that are lower case in English too (they follow a label like `VÝBUCH: %s`) are left alone.
@@ -238,13 +321,18 @@ impl LangFile {
     /// Fills in strings the shipped file leaves in English where the original game never had a translation (info box labels,
     /// On/Off, a few lobby lines). These are this port's own translations, not data from the install: only Slovak and Czech, and only
     /// strings that equal the English one (so a later fixed install file wins). It also capitalises the Slovak / Czech labels the
-    /// files write in lower case ([`CAPITALISE`]). `docs/text.md`.
+    /// files write in lower case ([`CAPITALISE`]) and fixes the typos of [`CORRECTIONS_SK`] / [`CORRECTIONS_CZ`]. `docs/text.md`.
     pub fn with_supplement(mut self, language: Language) -> LangFile {
         let table: &[(usize, &str)] = match language {
             Language::Slovak => SUPPLEMENT_SK,
             Language::Czech => SUPPLEMENT_CZ,
             _ => return self,
         };
+        for &(i, wrong, right) in corrections(language) {
+            if let Some(s) = self.strings.get_mut(i).filter(|s| s.contains(wrong) && !s.contains(right)) {
+                *s = s.replacen(wrong, right, 1);
+            }
+        }
         for &(i, text) in table {
             let is_english = SUPPLEMENT_ENGLISH.iter().any(|&(k, e)| k == i && self.strings.get(i).is_some_and(|s| s.trim() == e));
             if is_english {
@@ -280,6 +368,20 @@ mod tests {
         assert!(Language::Czech.supported() && Language::Slovak.supported() && Language::ChineseTraditional.supported());
         assert!(!Language::Polish.supported() && !Language::Hungarian.supported() && !Language::Russian.supported());
         assert_eq!(Language::SUPPORTED[0], Language::English);
+    }
+
+    #[test]
+    fn typos_are_corrected_only_while_the_shipped_text_is_there() {
+        let mut strings: Vec<String> = (0..365).map(|i| format!("x{i}")).collect();
+        strings[145] = "SATELITNÉ OCHRANA".into();
+        strings[260] = "nedostupný".into();
+        strings[327] = "o 20%".into();
+        let file = LangFile { strings };
+        let sk = file.clone().with_supplement(Language::Slovak);
+        assert_eq!((sk.get(145), sk.get(260), sk.get(327)), (Some("SATELITNÁ OCHRANA"), Some("n/a"), Some("o 20%.")));
+        // applying twice changes nothing (a correction that extends its own text is not repeated)
+        assert_eq!(sk.clone().with_supplement(Language::Slovak).get(327), Some("o 20%."));
+        assert_eq!(file.with_supplement(Language::English).get(145), Some("SATELITNÉ OCHRANA"));
     }
 
     #[test]

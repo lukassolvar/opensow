@@ -482,16 +482,24 @@ pub fn foreground_rows(g: &GroundRef, view: &View, s0: usize, s1: usize, y0: usi
 
 /// [`op::COVER`]: an alpha grid `bw` wide (0..=255, 0 = none) with its top-left at screen `(bx, by)`.
 pub fn cover(bx: i32, by: i32, bw: usize, grid: &[u32], rgb: u32) {
+    cover_masked(bx, by, bw, grid, rgb, None);
+}
+
+/// [`cover`] that skips the screen pixels set in the screen mask `mask` (its address, as for the masked sprite commands).
+pub fn cover_masked(bx: i32, by: i32, bw: usize, grid: &[u32], rgb: u32, mask: Option<usize>) {
     if bw == 0 || grid.is_empty() {
         return;
     }
     let bh = grid.len() / bw;
     with_rec(|r, _, _| {
         let Some((xs, ys, xe, ye)) = clip(r, bx, by, bx + bw as i32, by + bh as i32) else { return };
+        if let Some(m) = mask {
+            use_mask(r, m);
+        }
         let base = r.local.len() as u32;
         r.local.extend_from_slice(grid);
         let (cols, rows) = push_maps(r, xs, xe, ys, ye, |x| x - bx, |y| y - by);
-        r.cmds.push(Cmd { op: op::COVER, xs, ys, xe, ye, cols, rows, base, stride: bw as u32, p: [rgb, 0, 0, 0, 0, 0, 0] });
+        r.cmds.push(Cmd { op: op::COVER, xs, ys, xe, ye, cols, rows, base, stride: bw as u32, p: [rgb, mask.is_some() as u32, 0, 0, 0, 0, 0] });
     });
 }
 
@@ -646,7 +654,7 @@ pub fn replay(rec: &Recording, out: &mut [u32]) {
                     let si = c.base as usize + row as usize * c.stride as usize + col as usize;
                     if c.op == op::COVER {
                         let a = rec.local[si];
-                        if a > 0 {
+                        if a > 0 && !(p[1] != 0 && mask[i]) {
                             out[i] = blend(q, p[0], a);
                         }
                         continue;
