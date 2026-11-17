@@ -12,8 +12,7 @@ One file per system, plus its `.sha256` (`sha256sum` format) for the launcher's 
 | Linux x86_64 / aarch64 (glibc 2.35+, ALSA `libasound.so.2`) | `opensow-X.Y.Z-linux-<arch>.tar.gz` | folder `OpenSOW`: `opensow-launcher`, `opensow-game`, README, licences |
 
 `OpenSOW.app`: `Contents/MacOS` holds both programs (the launcher is the bundle's executable and starts the game beside it),
-`Contents/Resources` the icon (`OpenSOW.icns`, made from the launcher's `art/tank.png` with `sips` / `iconutil`) and the
-licences; identifier `io.github.opensow`, `LSMinimumSystemVersion` 11.0. The bundle carries an ad-hoc signature over the whole
+`Contents/Resources` the icon (`OpenSOW.icns`, see "Icons") and the licences; identifier `io.github.opensow`, `LSMinimumSystemVersion` 11.0. The bundle carries an ad-hoc signature over the whole
 bundle (no Apple certificate): Apple silicon runs no unsigned code, and the launcher's update replaces the whole bundle
 (docs/launcher.md), so the seal stays valid.
 
@@ -26,6 +25,22 @@ default (cargo builds, tests, the headless switches in AGENTS.md); release files
   `OPENSOW_CPU_DRAW` and `OPENSOW_AUDIO_DEBUG`). The original's cheat phrases are part of the game and stay.
 - launcher: no `--screenshot` / `--icon-png`; `--check-update` stays.
 - Windows: without `dev` both programs use the GUI subsystem, so no console window opens behind them.
+
+## Icons
+One picture in two framings, `crates/opensow-launcher/art/icon.png` (Windows, Linux: the full square) and `icon-macos.png`
+(macOS), both 1024 px RGBA and committed launcher art. It is a 64x64 pixel image (40 colours, rounded corners on the
+pixel grid) blown up without smoothing, in the game's sprite style: a factory on a patch of desert in a brass frame, drawn
+new for OpenSOW, not one of the game's sprites. Each system gets it its own way:
+- macOS: `package.sh` makes `OpenSOW.icns` (16 to 512@2x, `sips` / `iconutil`) from `icon-macos.png`, which follows
+  Apple's grid (the 64 pixels at 13 px each, 832 px, centred with a transparent margin); Finder, the Dock and the `.dmg` show it, and the game
+  shows it too because it runs from the same bundle. macOS ignores window icons.
+- Windows: the build scripts of both programs (`build.rs`, shared code in `crates/opensow-launcher/build_icon.rs`) make
+  `OpenSOW.ico` (PNG entries 16 to 256) from `icon.png` and link it into the `.exe` as resource 1 (`embed-resource`: `rc.exe`
+  on Windows, `llvm-rc` when cross-compiling), so Explorer, the taskbar and shortcuts show it; both windows also set it as
+  their window icon.
+- Linux: both windows set it as their window icon (X11; title bars, task switchers), and the archive carries it as
+  `opensow.png` for a `.desktop` file. Wayland desktops take icons only from installed `.desktop` files, which the archive
+  does not install.
 
 The `dist` profile (`Cargo.toml`) is `release` with thin LTO and stripped symbols.
 

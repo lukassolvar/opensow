@@ -225,7 +225,7 @@ impl ApplicationHandler<UserEvent> for Launcher {
             .with_title(self.app.tx().window_title())
             .with_inner_size(winit::dpi::LogicalSize::new(1000.0, 620.0))
             .with_min_inner_size(winit::dpi::LogicalSize::new(640.0, 420.0));
-        let icon = winit::window::Icon::from_rgba(ui::icon_rgba(64), 64, 64).ok();
+        let icon = winit::window::Icon::from_rgba(WINDOW_ICON.to_vec(), 64, 64).ok();
         let attrs = attrs.with_window_icon(icon);
         let window = Rc::new(el.create_window(attrs).expect("window"));
         let ctx = softbuffer::Context::new(window.clone()).expect("context");
@@ -342,6 +342,10 @@ fn demo_update(state: &str) -> UpdateState {
 /// Developer features (cargo feature `dev`, on by default; release archives are built without it, docs/release.md): the
 /// headless `--screenshot` and `--icon-png`. `--check-update` stays (it helps with update reports).
 const DEV: bool = cfg!(feature = "dev");
+
+/// The application icon at 64x64 RGBA for the window (made by build.rs from `art/icon.png`; macOS ignores window
+/// icons and shows the bundle's).
+const WINDOW_ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon64.rgba"));
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

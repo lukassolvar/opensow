@@ -3,7 +3,7 @@
 Rust reimplementation of State of War (2001 Windows RTS). Details live in `docs/` (start with `docs/roadmap.md` for status, `docs/architecture.md`, `docs/formats.md`, `docs/executable.md`); keep this file to rules and traps that the code does not tell you.
 
 ## Rules
-- Never commit game data or derived images (PNG/JPG/sprites); `.gitignore` blocks them. Assets come from the user's own install. Two exceptions: the launcher's art in `crates/opensow-launcher/art` (three background screenshots + `tank.png` icon, docs/launcher.md) and the README screenshots in `docs/screenshots/*.jpg` (rendered headless, 1280 px wide).
+- Never commit game data or derived images (PNG/JPG/sprites); `.gitignore` blocks them. Assets come from the user's own install. Two exceptions: the launcher's art in `crates/opensow-launcher/art` (three background screenshots + `tank.png`, docs/launcher.md; the application icon `icon.png` / `icon-macos.png`, docs/release.md "Icons") and the README screenshots in `docs/screenshots/*.jpg` (rendered headless, 1280 px wide).
 - Find the game via `OPENSOW_GAME_DIR` or `GameDir::locate()` (default: Steam depot path on macOS). Game paths use `\` and mixed case; always resolve case-insensitively (`GameDir::resolve`).
 - Two editions share one engine: Warmonger only contributes mission data and land texts; everything else comes from the base game via `GameDir::edition` + `GameDir::resolve` (docs/warmonger.md).
 - Everything is little-endian; use `Reader` (bounds-checked), never index raw slices.

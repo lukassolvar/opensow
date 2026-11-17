@@ -103,6 +103,10 @@ impl App {
     }
 }
 
+/// The application icon at 64x64 RGBA for the window (made by build.rs from the launcher's `art/icon.png`; macOS
+/// ignores window icons and shows the bundle's).
+const WINDOW_ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon64.rgba"));
+
 impl ApplicationHandler for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -110,7 +114,8 @@ impl ApplicationHandler for App {
         }
         let c = &self.game.options.cfg;
         self.window_res = (c.width, c.height);
-        let mut attrs = Window::default_attributes().with_title("OpenSOW");
+        let icon = winit::window::Icon::from_rgba(WINDOW_ICON.to_vec(), 64, 64).ok();
+        let mut attrs = Window::default_attributes().with_title("OpenSOW").with_window_icon(icon);
         if !self.game.options.native() {
             let (rw, rh) = self.size();
             attrs = attrs.with_inner_size(LogicalSize::new(rw as f64, rh as f64));

@@ -24,6 +24,9 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/crates/opensow-launcher/Cargo.toml" | head -1)
 name="opensow-$version-$platform"
 programs=(opensow-launcher opensow-game)
+# the application icon (docs/release.md "Icons"); Windows has it inside the .exe files (build.rs)
+icon="$root/crates/opensow-launcher/art/icon.png"
+icon_macos="$root/crates/opensow-launcher/art/icon-macos.png"
 
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
@@ -49,14 +52,13 @@ macos-*)
     done
     lipo -info "$app/Contents/MacOS/opensow-launcher"
     cp "$root/LICENSE-MIT" "$root/LICENSE-APACHE" "$app/Contents/Resources/"
-    # the icon: the launcher's tank picture at every size macOS asks for (256 px is the largest source)
+    # the icon: art/icon-macos.png (1024 px, Apple's grid) at every size macOS asks for, 16 to 512@2x
     iconset="$stage/OpenSOW.iconset"
     mkdir "$iconset"
-    for s in 16 32 64 128 256; do
-        sips -z $s $s "$root/crates/opensow-launcher/art/tank.png" --out "$iconset/icon_${s}x${s}.png" >/dev/null
+    for s in 16 32 128 256 512; do
+        sips -z $s $s "$icon_macos" --out "$iconset/icon_${s}x${s}.png" >/dev/null
+        sips -z $((s * 2)) $((s * 2)) "$icon_macos" --out "$iconset/icon_${s}x${s}@2x.png" >/dev/null
     done
-    for s in 16 32 64 128; do cp "$iconset/icon_$((s * 2))x$((s * 2)).png" "$iconset/icon_${s}x${s}@2x.png"; done
-    rm "$iconset/icon_64x64.png"
     iconutil -c icns "$iconset" -o "$app/Contents/Resources/OpenSOW.icns"
     cat >"$app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -99,6 +101,7 @@ linux-*)
     mkdir "$stage/OpenSOW"
     for p in "${programs[@]}"; do cp "$bin/$p" "$stage/OpenSOW/"; done
     cp "$root/README.md" "$root/LICENSE-MIT" "$root/LICENSE-APACHE" "$stage/OpenSOW/"
+    cp "$icon" "$stage/OpenSOW/opensow.png"
     file="$name.tar.gz"
     tar czf "$out/$file" -C "$stage" OpenSOW
     ;;
