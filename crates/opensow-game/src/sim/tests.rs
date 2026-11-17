@@ -2140,6 +2140,9 @@ fn the_anti_air_turret_launches_a_missile_that_hits_its_target_by_handle_when_it
             // the strength is taken off the handle's unit when the bullet lands (0x4108bc), not at the launch
             assert_eq!((b.strength, b.target), (15, Some(HitTarget::Unit(adv))));
             assert_eq!(w.unit(adv).unwrap().hp, hp);
+            // the launch sounds: the volley spawner's muzzle sound for kind 110 (`0x47cf40`), `sfx/turets/02.wav`
+            assert!(w.sounds.iter().any(|s| s.0 == 12 && s.3), "the launch plays the turret's muzzle sound");
+            assert!(!w.sounds.iter().any(|s| s.0 == 20), "the impact sound only comes when the missile lands");
             for _ in 0..200 {
                 w.step();
             }
