@@ -1,4 +1,5 @@
-//! The computer opponent's turn: it gathers a snapshot of the world for each of its planners (`defence`, `advancer_ai`, `airlift_ai`, `air_ai`) and carries out what they decide.
+//! The computer opponent's turn: the decoded exe routines, plus the skirmish planners `airlift_ai` and `air_ai`, which get a
+//! snapshot of the world and carry out what they decide.
 
 use super::*;
 
@@ -15,13 +16,13 @@ impl World {
         }
     }
 
-    /// Spectating: the computer runs side 0 as well. The strategy, strike and defence timers are one set shared by the
-    /// code, so side 0 swaps its own set in for the call and back out.
+    /// Spectating: the computer runs side 0 as well. The strategy and strike timers are one set shared by the code, so
+    /// side 0 swaps its own set in for the call and back out.
     pub(super) fn step_ai_spectate(&mut self) {
         let swap = |w: &mut World| {
-            let s = (w.ai_strategy, w.ai_timer, w.ai_strike, w.ai_defence);
-            (w.ai_strategy, w.ai_timer, w.ai_strike, w.ai_defence) = w.spectate_ai;
-            w.spectate_ai = s;
+            let (strategy, timer, strike, unused) = w.spectate_ai;
+            w.spectate_ai = (w.ai_strategy, w.ai_timer, w.ai_strike, unused);
+            (w.ai_strategy, w.ai_timer, w.ai_strike) = (strategy, timer, strike);
         };
         swap(self);
         self.step_ai(0);
@@ -89,7 +90,7 @@ impl World {
         let enemy_turrets = self.structures.iter().filter(|s| s.alive() && !mine(s.owner) && matches!(s.kind, ObjectKind::Turret(_))).count();
         // the Advancers choose their building first (`0x42fae0` is called at `0x42f602`, before the strategy roll)
         let think = self.tick.is_multiple_of(self.difficulty_of(side).handicap().think_every.max(1) as u64);
-        if !self.skirmish && think {
+        if think {
             self.ai_pick_buildings(side);
         }
         // strategy: re-rolled when it no longer fits the enemy's turret count (0x42f67e..0x42f6c1) or its timer expires
@@ -121,17 +122,7 @@ impl World {
         for i in idle {
             let (cell, kind) = (self.units[i].cell(), self.units[i].kind);
             let pick = if is_anti_air(kind) {
-                // skirmish: an Advancer far away is no goal (it flies about); then the anti-air units go with the others to the
-                // enemy HQ as a body shield (the fallback below)
-                enemy_adv
-                    .filter(|&id| {
-                        !self.skirmish
-                            || self.unit(id).is_some_and(|a| {
-                                let (ac, d) = (a.cell(), 30);
-                                (ac.0 - cell.0).abs().max((ac.1 - cell.1).abs()) <= d
-                            })
-                    })
-                    .map(Target::Unit)
+                enemy_adv.map(Target::Unit)
             } else {
                 let (u, t, b) = self.nearest_enemy(side, cell);
                 let order = match self.ai_strategy {
@@ -159,29 +150,24 @@ impl World {
                 }
             }
         }
-        // Advancers choose a building: score = random(3) + bonuses - distance (0x42fb94..0x42fd9f); skirmish: `ai_advancers`
-        if self.skirmish {
-            self.ai_advancers(side);
-        }
         // air strikes every 600 ticks: bomber, fighter or tripler at random if in stock (0x42f930..0x42fa2a);
-        // skirmish on Hard and Brutal: the stock is spent where it pays (`ai_air`)
+        // skirmish on Hard and Brutal: the stock is spent where it pays (`ai_air`), the timer still drives the turrets
         let proactive = self.skirmish && matches!(self.difficulty_of(side), Difficulty::Hard | Difficulty::Brutal);
         self.ai_strike -= 1;
-        let due = !proactive && self.ai_strike <= 0;
+        let due = self.ai_strike <= 0;
+        if due {
+            self.ai_strike = self.difficulty_of(side).handicap().strike_period;
+        }
         if proactive {
             self.ai_air(side);
         } else if due {
-            self.ai_strike = self.difficulty_of(side).handicap().strike_period;
             let force = [AirForce::Bomber, AirForce::Fighter, AirForce::Tripler][self.random(3) as usize];
             if let Some((x, y)) = self.strike_target(side) {
                 self.launch_strike(side, force, x, y);
             }
         }
-        // skirmish: the player-like planner on its own timer (docs/skirmish.md); campaign: the exe's routine below
         if self.skirmish {
             self.ai_airlift(side);
-            self.ai_defend(side);
-            return;
         }
         // `0x42fa30`: the turret routine runs right after the air-strike pick, on the same 600-step timer (`0x42f942` jumps past
         // both while it runs; twice at most, the second time only while the credits still reach 200)
@@ -189,100 +175,6 @@ impl World {
             self.ai_build_turret(side);
             if self.credits[side] >= 200 {
                 self.ai_build_turret(side);
-            }
-        }
-    }
-
-    /// Skirmish only: the computer's Advancers by `advancer_ai::think` (not the exe's pick): jobs weighed by gain, time and
-    /// anti-air risk, broken off under fire, failures remembered. Looks every 30 ticks (90 on Easy).
-    pub(super) fn ai_advancers(&mut self, side: usize) {
-        use advancer_ai::{Adv, Job, Order, Rel, Site, Threat};
-        let every = advancer_ai::LOOK * if self.difficulty_of(side) == Difficulty::Easy { 3 } else { 1 };
-        if !self.tick.is_multiple_of(every) {
-            return;
-        }
-        let foe_side = |p: i32| (p != 0) != (side != 0);
-        let sites: Vec<Site> = self
-            .structures
-            .iter()
-            .enumerate()
-            .filter(|(_, st)| st.alive())
-            .map(|(k, st)| {
-                let rel = match side_of(st.owner) {
-                    Some(o) if o == side => Rel::Own,
-                    Some(_) => Rel::Foe,
-                    None => Rel::Neutral,
-                };
-                let upgrade_left = if rel == Rel::Own { st.slots.get(st.active).map_or(0, |sl| (sl.unlock_points() as i32 - st.upgrade).max(1)) } else { 0 };
-                Site {
-                    index: k,
-                    kind_id: st.kind_id,
-                    rel,
-                    hp: st.hp,
-                    max_hp: st.max_hp,
-                    upgrade_left,
-                    protected: st.protected,
-                    action_cell: st.action_cell(),
-                    healing: st.heal > 0,
-                }
-            })
-            .collect();
-        let mut threats: Vec<Threat> = self
-            .structures
-            .iter()
-            .filter(|st| st.alive() && st.heal == 0 && st.kind_id == kinds::ANTI_AIR_TURRET && side_of(st.owner).is_some_and(|o| o != side))
-            .map(|st| Threat { cell: st.cell, range: 9.0, dps: 0.45 })
-            .collect();
-        threats.extend(self.units.iter().filter(|u| u.hp > 0 && foe_side(u.player) && (is_anti_air(u.kind) || u.kind == kinds::ADVANCER)).map(|u| Threat {
-            cell: u.cell(),
-            range: weapon_range(u.kind).map_or(9.0, |r| r.1 as f32),
-            dps: match u.kind {
-                40 => 0.3,
-                42 => 0.5,
-                _ => 0.3,
-            },
-        }));
-        let advs: Vec<Adv> = self
-            .units
-            .iter()
-            .filter(|u| u.hp > 0 && u.kind == kinds::ADVANCER && !foe_side(u.player))
-            .map(|u| {
-                let working = u.action.is_some_and(|(_, k)| self.structures.get(k).is_some_and(|st| st.action_cell() == u.cell()));
-                // its job's building is in the destruction animation (the capture follows): wait for it
-                let holding = self.adv_mind[side].tasks.iter().any(|t| {
-                    t.unit == u.id
-                        && t.job == Job::Destroy
-                        && self.structures.get(t.target).is_some_and(|st| !st.alive() && st.dying.is_some())
-                        && u.cell() == self.structures[t.target].action_cell()
-                });
-                Adv { id: u.id, cell: u.cell(), hp: u.hp, max_hp: u.max_hp, working, idle: u.action.is_none() && u.path.is_empty(), holding }
-            })
-            .collect();
-        let mut mind = std::mem::take(&mut self.adv_mind[side]);
-        mind.tiered = true;
-        mind.bold = match self.difficulty_of(side) {
-            Difficulty::Hard => 1,
-            Difficulty::Brutal => 2,
-            _ => 0,
-        };
-        let orders = advancer_ai::think(&mut mind, &advs, &sites, &threats, self.rates[side], self.tick);
-        self.adv_mind[side] = mind;
-        for (id, order) in orders {
-            match order {
-                Order::Go { target, job } => {
-                    let action = match job {
-                        Job::Destroy => Action::Destroy,
-                        Job::Repair => Action::Repair,
-                        Job::Upgrade => Action::Upgrade,
-                    };
-                    self.order_job(id, target, action);
-                }
-                Order::Retreat(cell) => {
-                    if let Some(u) = self.units.iter_mut().find(|u| u.id == id) {
-                        u.action = None;
-                    }
-                    self.order_move(id, cell, None);
-                }
             }
         }
     }
@@ -384,128 +276,6 @@ impl World {
                 },
             ),
         }
-    }
-
-    /// Like `order_action`, with the action given instead of read off the pointer (the computer does not use the human's
-    /// repair toggle).
-    pub(super) fn order_job(&mut self, id: u32, target: usize, action: Action) {
-        let Some(u) = self.unit(id) else { return };
-        if u.kind != kinds::ADVANCER || !self.action_valid(u, action, target) {
-            return;
-        }
-        let cell = self.structures[target].action_cell();
-        let c = centre(cell);
-        self.order_move(id, cell, Some((c.0 as i32, c.1 as i32)));
-        if let Some(u) = self.units.iter_mut().find(|u| u.id == id) {
-            u.action = Some((action, target));
-        }
-    }
-
-    /// Skirmish only: the computer's turrets by `defence::decide` (not the exe's routine). Looks every second while an
-    /// own building is under pressure, every four seconds otherwise (half as often on Easy); at most one gun per look.
-    pub(super) fn ai_defend(&mut self, side: usize) {
-        use defence::{Foe, Gun, Plan, Site, Snapshot};
-        self.ai_defence -= 1;
-        if self.ai_defence > 0 {
-            return;
-        }
-        let mine = |o: Owner| side_of(o) == Some(side);
-        let foe_side = |p: i32| (p != 0) != (side != 0);
-        let own: Vec<usize> = (0..self.structures.len())
-            .filter(|&k| {
-                let st = &self.structures[k];
-                st.alive() && mine(st.owner) && !matches!(st.kind, ObjectKind::Turret(_))
-            })
-            .collect();
-        let index = |k: usize| own.iter().position(|&o| o == k);
-        let sites: Vec<Site> = own
-            .iter()
-            .map(|&k| {
-                let st = &self.structures[k];
-                let c = st.center_cell();
-                let advancer = self.units.iter().any(|u| {
-                    u.hp > 0
-                        && u.kind == kinds::ADVANCER
-                        && foe_side(u.player)
-                        && (u.action.is_some_and(|(_, t)| t == k) || {
-                            let uc = u.cell();
-                            (uc.0 - c.0).abs().max((uc.1 - c.1).abs()) <= 6
-                        })
-                });
-                Site { kind_id: st.kind_id, cell: st.cell, advancer }
-            })
-            .collect();
-        let guns: Vec<Gun> = self
-            .structures
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| t.alive() && mine(t.owner) && kinds::TURRETS.contains(&t.kind_id))
-            .map(|(k, t)| Gun {
-                tier: (t.kind_id - 24) as u32,
-                cell: t.cell,
-                attacked: self.units.iter().any(|u| u.hp > 0 && u.kind == kinds::ADVANCER && foe_side(u.player) && u.action.is_some_and(|(_, a)| a == k)),
-            })
-            .collect();
-        let foes: Vec<Foe> = self
-            .units
-            .iter()
-            .filter(|u| u.hp > 0 && u.kind != kinds::ADVANCER && foe_side(u.player))
-            .map(|u| {
-                let weight = if kinds::WALKERS.contains(&u.kind) {
-                    2.5
-                } else if is_anti_air(u.kind) {
-                    0.3
-                } else {
-                    1.0
-                };
-                let target = match u.chase.or(u.target) {
-                    Some(Target::Structure(k)) => index(k),
-                    _ => None,
-                };
-                Foe { cell: u.cell(), weight, target }
-            })
-            .collect();
-        let theirs = |st: &Structure| st.alive() && side_of(st.owner).is_some_and(|o| o != side);
-        let enemy_base = self
-            .structures
-            .iter()
-            .find(|st| theirs(st) && st.kind_id == kinds::HEADQUARTERS)
-            .or_else(|| self.structures.iter().find(|st| theirs(st)))
-            .map(|st| st.center_cell());
-        let mut keep_clear = Vec::new();
-        for &k in &own {
-            let st = &self.structures[k];
-            if let Some(e) = factory_exit(st.kind_id) {
-                let at = |d: (i32, i32)| (st.cell.0 + d.0, st.cell.1 + d.1);
-                let (p, a) = (at(e.primary), at(e.alternative));
-                keep_clear.extend([p, (p.0, p.1 + 1), (p.0, p.1 + 2), a, (a.0, a.1 - 1), (a.0, a.1 - 2)]);
-            }
-            keep_clear.extend(st.rally);
-        }
-        let mut snap = Snapshot { sites, guns, foes, enemy_base, credits: self.credits[side], flags: self.turret_flags[side], keep_clear };
-        let urgent = defence::needs(&snap).iter().any(|n| n.urgent(&snap));
-        let me = if side == 0 { Owner::Player } else { Owner::Enemy };
-        // as many guns as the attack needs and the credits allow (at most four per look), each seen by the next decision
-        for _ in 0..4 {
-            let plan = defence::decide(&snap, |tier, cell| {
-                let free = |x: i32, y: i32| {
-                    !self.is_blocked(x, y)
-                        && !self.is_no_build(x, y)
-                        && !self.units.iter().any(|u| u.hp > 0 && u.cell() == (x, y))
-                        && !self.structures.iter().any(|s| s.alive() && s.covers((x, y)))
-                };
-                let own_near = |x: i32, y: i32| self.structures.iter().any(|s| s.alive() && s.owner == me && s.covers((x, y)));
-                can_place(24 + tier as i32, cell, free, own_near)
-            });
-            let Plan::Build { tier, cell } = plan else { break };
-            if !self.build_turret(side, tier, cell) {
-                break;
-            }
-            snap.guns.push(Gun { tier, cell, attacked: false });
-            snap.credits = self.credits[side];
-        }
-        let slow = if self.difficulty_of(side) == Difficulty::Easy { 2 } else { 1 };
-        self.ai_defence = if urgent { 60 } else { 240 } * slow;
     }
 
     /// The computer's turret routine (`0x431120`): the decision is `formats::turretai::plan` (exe-verified, docs/ai.md item 7);

@@ -123,7 +123,7 @@ impl Site {
         opensow_formats::kinds::TURRETS.contains(&self.kind_id)
     }
 
-    /// Ground firepower of a turret (tier points as in `defence.rs`; the A.A. turret has none).
+    /// Ground firepower of a turret (tier points 2 / 0 / 3 / 4 / 4 for tiers 1-5; the A.A. turret has none).
     fn ground_power(&self) -> f32 {
         match self.kind_id {
             25 => 2.0,

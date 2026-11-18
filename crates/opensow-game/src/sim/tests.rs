@@ -1671,112 +1671,53 @@ fn turrets(w: &World) -> Vec<(i32, (i32, i32))> {
 }
 
 #[test]
-fn in_a_skirmish_one_attacker_gets_one_gun_and_a_wave_several() {
-    let built = |n: usize| {
-        let mut w = turret_world(n, 5000, [true; 5]);
-        w.skirmish = true;
-        for _ in 0..20 {
-            w.ai_defence = 0;
-            w.ai_defend(1);
-        }
-        turrets(&w)
-    };
-    let one = built(1);
-    assert_eq!(one.len(), 1, "{one:?}");
-    let wave = built(6);
-    assert!(wave.len() >= 3 && wave.len() <= 5, "{wave:?}");
-    // the attackers stand south of the factory (rows 12, factory rows 8..10): the direct guns face them
-    assert!(wave.iter().filter(|t| t.0 != 29).all(|t| t.1 .1 >= 10), "{wave:?}");
+fn a_hard_skirmish_computer_builds_turrets_with_the_campaign_routine() {
+    // Hard aims its air strikes with `ai_air`; the 600-step timer must still run the exe's turret routine
+    let mut w = turret_world(3, 50_000, [true; 5]);
+    w.skirmish = true;
+    w.difficulty = Difficulty::Hard;
+    w.ai_strategy = 3;
+    w.ai_timer = 100_000;
+    w.ai_strike = 600;
+    for t in 1..600 {
+        w.tick = t;
+        w.step_ai(1);
+    }
+    assert!(turrets(&w).is_empty());
+    w.tick = 600;
+    w.step_ai(1);
+    assert!((1..=2).contains(&turrets(&w).len()), "{:?}", turrets(&w));
 }
 
-/// Skirmish world: the computer's HQ (with its Advancer) in the west, a neutral gold mine guarded by the player's anti-air
-/// turret and an open neutral windtrap.
-fn advancer_world() -> (World, usize, usize) {
-    let mut w = open_world(48, 24);
+#[test]
+fn a_skirmish_computer_advancer_takes_the_campaign_pick_and_never_its_own_hq() {
+    let mut w = open_world(40, 20);
     w.structures.clear();
-    let mut hq = factory(Owner::Enemy, 13536, 100);
+    let mut hq = factory(Owner::Enemy, 4000, 100);
     hq.kind = ObjectKind::Headquarters;
-    hq.cell = (2, 10);
-    hq.protected = true;
+    hq.cell = (2, 8);
+    hq.slots.clear();
     w.add_structure(hq);
-    let mut mine = factory(Owner::Neutral, 6768, 105);
-    mine.kind = ObjectKind::GoldMine;
-    mine.cell = (22, 4);
-    mine.slots.clear();
-    let mine_k = w.structures.len();
-    w.add_structure(mine);
-    // two of them: too much fire to take one out
-    for cell in [(24, 8), (20, 8)] {
-        let mut aa = factory(Owner::Player, 1250, 26);
-        aa.kind = ObjectKind::Turret(2);
-        aa.cell = cell;
-        aa.weapon = 110;
-        aa.aim = TopAim::new(110, 0);
-        aa.max_hp = 1250;
-        aa.slots.clear();
-        w.add_structure(aa);
-    }
     let mut wind = factory(Owner::Neutral, 6768, 107);
     wind.kind = ObjectKind::Wind;
-    wind.cell = (16, 18);
+    wind.cell = (20, 8);
     wind.slots.clear();
     let wind_k = w.structures.len();
     w.add_structure(wind);
-    w.ai = true;
+    let adv = w.add_unit(kinds::ADVANCER, 1, 3 * CELL, 7 * CELL);
     w.skirmish = true;
-    (w, mine_k, wind_k)
+    w.step_ai(1);
+    assert_eq!(w.unit(adv).and_then(|u| u.action).map(|(_, k)| k), Some(wind_k), "the damaged own HQ (0x42fbbd: -10000) is passed over");
 }
 
 #[test]
-fn the_skirmish_advancer_takes_the_open_building_first_then_pushes_the_guarded_one() {
-    let (mut w, mine, wind) = advancer_world();
-    // the exe's pick would go for the gold mine first (worth more, a foreign A.A. turret next to it even scores a bonus)
-    let mut first: std::collections::BTreeMap<usize, u64> = Default::default();
-    let (mut captured, mut fallen) = (None, None);
-    for _ in 0..12000 {
-        w.step();
-        for u in w.units.iter().filter(|u| u.kind == kinds::ADVANCER && u.player == 1 && u.hp > 0) {
-            if let Some((_, k)) = u.action {
-                first.entry(k).or_insert(w.tick);
-            }
-        }
-        if fallen.is_none() && w.structures[wind].hp <= 0 {
-            fallen = Some(w.tick);
-        }
-        if captured.is_none() && w.structures[wind].owner == Owner::Enemy {
-            captured = Some(w.tick);
-        }
-    }
-    assert!(captured.is_some(), "the windtrap was captured");
-    let fallen = fallen.unwrap();
-    for k in [mine, 2, 3] {
-        assert!(first.get(&k).is_none_or(|&t| t >= fallen), "nothing guarded before the open windtrap fell: {first:?}, fell at {fallen}");
-    }
-    assert!([mine, 2, 3].iter().any(|k| first.contains_key(k)), "then it does not sit at home: {first:?}");
-}
-
-#[test]
-fn a_skirmish_advancer_shot_down_does_not_return_to_the_same_target() {
-    let (mut w, mine, _) = advancer_world();
-    // pretend the mine looked safe: the planner sends the Advancer there, then it dies on the way
-    w.adv_mind[1].tasks.push(advancer_ai::Task {
-        unit: 999,
-        target: mine,
-        job: advancer_ai::Job::Destroy,
-        start_hp: 800,
-        best: f32::MAX,
-        best_tick: 0,
-        score: 1.0,
-        forced: false,
-    });
-    for _ in 0..31 {
-        w.step();
-    }
-    assert!(w.adv_mind[1].denied.iter().any(|d| d.target == mine), "{:?}", w.adv_mind[1]);
-    for _ in 0..600 {
-        w.step();
-        assert!(w.units.iter().all(|u| !(u.kind == kinds::ADVANCER && u.player == 1 && u.action.is_some_and(|(_, k)| k == mine))));
-    }
+fn skirmish_anti_air_units_go_after_the_enemy_advancer_anywhere() {
+    let mut w = open_world(80, 20);
+    let aa = w.add_unit(1, 1, 2 * CELL, 2 * CELL);
+    let adv = w.add_unit(kinds::ADVANCER, 0, 70 * CELL, 15 * CELL);
+    w.skirmish = true;
+    w.step_ai(1);
+    assert_eq!(w.unit(aa).and_then(|u| u.chase), Some(Target::Unit(adv)));
 }
 
 #[test]
@@ -1882,20 +1823,6 @@ fn the_campaign_computer_never_calls_a_carryall() {
         w.step();
     }
     assert_eq!(w.air_stock[1][g], 3);
-}
-
-#[test]
-fn the_skirmish_planner_waits_between_looks() {
-    let mut w = turret_world(1, 5000, [true; 5]);
-    w.skirmish = true;
-    w.ai_defend(1);
-    assert_eq!(turrets(&w).len(), 1);
-    assert_eq!(w.ai_defence, 60, "under pressure: again in a second");
-    let mut w = turret_world(0, 2000, [true; 5]);
-    w.skirmish = true;
-    w.ai_defend(1);
-    assert!(turrets(&w).is_empty(), "a calm opening buys nothing (piled-up money, 3000+, would fortify)");
-    assert_eq!(w.ai_defence, 240);
 }
 
 #[test]
