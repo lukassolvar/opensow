@@ -51,7 +51,7 @@ pub fn display_name(t: Thing) -> String {
     }
 }
 
-/// How much a building is worth to take, as the skirmish Advancer weighs it (`sim/advancer_ai.rs` `worth`).
+/// How much a building is worth to take, for the balance card (the port's own weights, not in the exe).
 pub fn worth(kind: i32) -> f32 {
     match kind {
         100 => 10.0,
@@ -737,8 +737,8 @@ impl Editor {
         self.hq_centres().map(|c| c.map(|(hx, hy)| ((hx - x).powi(2) + (hy - y).powi(2)).sqrt()))
     }
 
-    /// How much of the neutral buildings each side's Advancer can reach: the sum of worth / (1 + flight / 16) (the skirmish
-    /// Advancer's nearness weighting), blue then green. Close numbers = an even map for captures.
+    /// How much of the neutral buildings each side's Advancer can reach: the sum of worth / (1 + flight / 16), blue
+    /// then green. Close numbers = an even map for captures.
     pub fn reach(&self) -> [f32; 2] {
         let mut s = [0.0f32; 2];
         for (i, o) in self.t.level.objects.iter().enumerate().filter(|(_, o)| o.raw[14] == 2) {

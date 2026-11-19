@@ -81,8 +81,6 @@ impl World {
             ai_strategy: 0,
             ai_timer: 0,
             ai_strike: 600,
-            ai_defence: 0,
-            adv_mind: Default::default(),
             airlifts: Vec::new(),
             last_airlift: [None; 2],
             last_air: [0; 2],

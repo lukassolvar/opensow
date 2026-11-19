@@ -11,10 +11,8 @@ impl World {
             return;
         }
         let (player, cell, active) = (if s.owner == Owner::Player { 0 } else { 1 }, s.cell, s.active.min(s.slots.len()));
-        let mut rate = rate_row(self.tutorial_step, self.wind[player as usize]);
-        if self.ai && (player == 1 || self.spectate) {
-            rate = rate * self.difficulty_of(player as usize).handicap().production_pct / 100;
-        }
+        let free = if self.ai && (player == 1 || self.spectate) { self.difficulty_of(player as usize).handicap().free_windtrap_levels } else { 0 };
+        let rate = rate_row(self.tutorial_step, self.wind[player as usize] + free);
         let gain = steps_at(rate, (self.tick % 60) as u32);
         for j in 0..active {
             let slot = &mut self.structures[i].slots[j];

@@ -55,7 +55,7 @@ Play against the computer on all 14 multiplayer maps of both games, or on your o
 
 - Set both sides' credits, research, air forces and turrets, or swap sides.
 - Four computer levels: Easy, Normal, Hard and Brutal.
-- The computer plays like a player: turrets, Advancer captures, carryall drops and air strikes.
+- The computer plays the campaign AI, plus carryall drops and aimed air strikes on Hard and Brutal.
 
 ![](docs/screenshots/skirmish-setup.jpg)
 
