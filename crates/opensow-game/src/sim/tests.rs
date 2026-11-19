@@ -2542,7 +2542,7 @@ fn satellite_protection_kills_a_foreign_advancer() {
 /// Skirmish difficulty (docs/skirmish.md): only the computer's side is scaled, Normal is the exe's behaviour, hundredths carry over.
 #[test]
 fn difficulty_scales_the_computers_income_only_and_levels_are_ordered() {
-    for (d, expect) in [(Difficulty::Easy, 7), (Difficulty::Normal, 12), (Difficulty::Hard, 18), (Difficulty::Brutal, 30)] {
+    for (d, expect) in [(Difficulty::Easy, 12), (Difficulty::Normal, 12), (Difficulty::Hard, 12), (Difficulty::Brutal, 12)] {
         let mut w = open_world(16, 12);
         w.difficulty = d;
         for owner in [Owner::Player, Owner::Enemy] {
@@ -2564,10 +2564,35 @@ fn difficulty_scales_the_computers_income_only_and_levels_are_ordered() {
         assert_eq!(w.credits[1], expect, "{d:?}");
     }
     assert_eq!(Difficulty::Brutal.next(), Difficulty::Easy);
-    assert_eq!(Difficulty::Normal.handicap(), Handicap { income_pct: 100, production_pct: 100, think_every: 1, strike_period: 600 });
-    assert!(Difficulty::ALL
-        .windows(2)
-        .all(|p| p[0].handicap().income_pct < p[1].handicap().income_pct && p[0].handicap().production_pct < p[1].handicap().production_pct));
+    assert_eq!(Difficulty::Normal.handicap(), Handicap { income_pct: 100, free_windtrap_levels: 0, think_every: 1, strike_period: 600 });
+    assert!(Difficulty::ALL.windows(2).all(|p| {
+        let (a, b) = (p[0].handicap(), p[1].handicap());
+        a.income_pct <= b.income_pct && a.free_windtrap_levels <= b.free_windtrap_levels && a.think_every >= b.think_every && a.strike_period >= b.strike_period
+    }));
+}
+
+/// Hard and Brutal give the computer free windtrap levels (12 steps/s each), never the human.
+#[test]
+fn hard_and_brutal_give_the_computers_factories_free_windtrap_levels() {
+    for (d, expect) in [(Difficulty::Normal, 30), (Difficulty::Hard, 42), (Difficulty::Brutal, 54)] {
+        let mut w = open_world(16, 12);
+        w.difficulty = d;
+        w.ai = true;
+        let mut ours = factory(Owner::Player, 13536, 101);
+        ours.cell = (2, 2);
+        let mut theirs = factory(Owner::Enemy, 13536, 101);
+        theirs.cell = (9, 2);
+        w.add_structure(ours);
+        w.add_structure(theirs);
+        w.add_unit(7, 0, 8 * CELL, 8 * CELL);
+        w.add_unit(7, 1, 15 * CELL, 11 * CELL);
+        for _ in 0..60 {
+            w.step();
+        }
+        let progress = |i: usize| w.structures[i].slots[0].progress;
+        assert_eq!(progress(0), 30, "{d:?}: the human's factory runs at the base rate");
+        assert_eq!(progress(1), expect, "{d:?}: base 30 + 12 per free level");
+    }
 }
 
 /// `--spectate`: the computer plays side 0 too, with its own difficulty and its own timers.

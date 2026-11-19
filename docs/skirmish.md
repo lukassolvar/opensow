@@ -47,16 +47,16 @@ Every skirmish map starts its owned buildings and turrets at full hit points and
 Then the ordinary `World::from_level` / `Play` run with `ai = true` (the computer opponent of docs/ai.md). RESTART from the pause menu replays the same choices; the main menu forgets them.
 
 ## Difficulty
-**Differs from the exe:** the original has no difficulty setting. Normal is the exe's behaviour exactly (its AI is an exe-verified port, docs/ai.md); the other levels never change what the computer decides, only how rich and fast it is and how often it re-decides (`sim::Difficulty`, `Handicap`; they apply to side 1 only, and only while `World::ai` is on, so the campaign and the human are never touched):
+**Differs from the exe:** the original has no difficulty setting. Normal is the exe's behaviour exactly (its AI is an exe-verified port, docs/ai.md); the other levels never change what the computer decides, only how fast it reacts, how often it strikes from the air and, on Hard and Brutal, how many free windtrap levels it gets (income is never scaled; Easy reacts and strikes slowest) and how often it re-decides (`sim::Difficulty`, `Handicap`; they apply to side 1 only, and only while `World::ai` is on, so the campaign and the human are never touched):
 
-| level | income (gold, research) | production speed | idle units / Advancers re-ordered | air strike every |
+| level | income (gold, research) | free windtrap levels | idle units / Advancers re-ordered | air strike every |
 |---|---|---|---|---|
-| Easy | 60 % | 70 % | every 120 ticks (2 s) | 1200 ticks |
-| **Normal** | 100 % | 100 % | every tick (the exe) | 600 ticks (the exe) |
-| Hard | 150 % | 130 % | every tick | none: `ai_air` instead ("Air strikes" below); the 420-tick timer still runs the turret routine |
-| Brutal | 250 % | 180 % | every tick | none: `ai_air` instead; the 240-tick timer still runs the turret routine |
+| Easy | 100 % | 0 | every 120 ticks (2 s) | 1200 ticks |
+| **Normal** | 100 % | 0 | every tick (the exe) | 600 ticks (the exe) |
+| Hard | 100 % | +1 (42 steps/s) | every tick | none: `ai_air` instead ("Air strikes" below); the 420-tick timer still runs the turret routine |
+| Brutal | 100 % | +2 (54 steps/s) | every tick | none: `ai_air` instead; the 240-tick timer still runs the turret routine |
 
-Income is the per-second yield scaled in hundredths with the remainder carried (`World::income_rest`); production scales the rate row (`30 + 12 * windtrap levels`) before `steps_at`. The computer's start resources are the lobby's own numbers (no extra bonus: set them in its column). Tests: `sim::tests::difficulty_scales_the_computers_income_only_and_levels_are_ordered`, `an_easy_computer_re_orders_idle_units_only_every_two_seconds`. Headless: `--difficulty easy|normal|hard|brutal`.
+Income is the per-second yield scaled in hundredths with the remainder carried (`World::income_rest`); the free windtrap levels are added to the computer's own windtrap sum in the rate row (`30 + 12 * levels` steps/s, so +40 % of the base each and never compounding with its own windtraps; the human never gets them). The computer's start resources are the lobby's own numbers (no extra bonus: set them in its column). Tests: `sim::tests::difficulty_scales_the_computers_income_only_and_levels_are_ordered`, `an_easy_computer_re_orders_idle_units_only_every_two_seconds`. Headless: `--difficulty easy|normal|hard|brutal`.
 
 ## Limits
 - The human is always drawn in player 0's colour (blue), also when starting on the green side; the computer is green.

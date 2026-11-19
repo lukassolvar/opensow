@@ -888,7 +888,7 @@ impl SkirmishMenu {
         let nx = ls.x + ls.w + t.len(12);
         let gap = np / 6;
         let y0 = row.y + (row.h - 2 * np - gap) / 2 - np / 8;
-        for (k, line) in tr.income(hc.income_pct, hc.production_pct).iter().enumerate() {
+        for (k, line) in tr.income(hc.income_pct, 100 + 40 * hc.free_windtrap_levels).iter().enumerate() {
             self.ink.fit(c, w, h, line, nx, y0 + k as i32 * (np + gap), np, MUTED, row.x + row.w - nx - 4);
         }
         // resources

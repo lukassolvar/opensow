@@ -724,8 +724,8 @@ pub enum Difficulty {
 pub struct Handicap {
     /// Gold and research income per second, percent of the buildings' normal yield.
     pub income_pct: u32,
-    /// Factory and air base production speed, percent (the rate row is scaled, windtraps still add to it).
-    pub production_pct: u32,
+    /// Windtrap levels the computer's factories and air bases get for free, on top of its own windtraps (each is 12 steps/s).
+    pub free_windtrap_levels: u32,
     /// Idle units and Advancers are re-ordered only on every n-th tick (1 = every tick, as the exe does).
     pub think_every: u32,
     /// Ticks between the computer's air strikes (the exe's 600).
@@ -739,10 +739,10 @@ impl Difficulty {
     /// The computer's advantages or disadvantages at this level.
     pub fn handicap(self) -> Handicap {
         match self {
-            Difficulty::Easy => Handicap { income_pct: 60, production_pct: 70, think_every: 120, strike_period: 1200 },
-            Difficulty::Normal => Handicap { income_pct: 100, production_pct: 100, think_every: 1, strike_period: 600 },
-            Difficulty::Hard => Handicap { income_pct: 150, production_pct: 130, think_every: 1, strike_period: 420 },
-            Difficulty::Brutal => Handicap { income_pct: 250, production_pct: 180, think_every: 1, strike_period: 240 },
+            Difficulty::Easy => Handicap { income_pct: 100, free_windtrap_levels: 0, think_every: 120, strike_period: 1200 },
+            Difficulty::Normal => Handicap { income_pct: 100, free_windtrap_levels: 0, think_every: 1, strike_period: 600 },
+            Difficulty::Hard => Handicap { income_pct: 100, free_windtrap_levels: 1, think_every: 1, strike_period: 420 },
+            Difficulty::Brutal => Handicap { income_pct: 100, free_windtrap_levels: 2, think_every: 1, strike_period: 240 },
         }
     }
 
