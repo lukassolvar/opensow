@@ -37,7 +37,7 @@ Placeholders / not implemented (marked `PLACEHOLDER` in code):
 - the tutorial's instruction panel is the original's (wrap, dark box, coin, sliding arrow; docs/tutorial.md);
 - **Differs from the exe:** no network play (the multiplayer lobby runs offline, docs/network.md);
 - sound is complete as far as the exe plays any: menu, map, weapon, impact, beam, aircraft and explosion effects with the exe's pan and distance rules, speech (incl. `01-game-saved`), music and the tutorial voices (docs/audio.md). The exe has no unit idle sounds or voices (all 82 effect call sites were scanned), so there is nothing to port;
-- air-strike icons recharge only through the air base's production slots (as in the exe, docs/production.md); a destroyed building stays on the map, dead, while its destruction animation runs (about 3 s for buildings, 0.75 s for turrets, `Structure::dying`, docs/projectiles.md) - what the exe draws meanwhile is not checked.
+- air-strike icons recharge only through the air base's production slots (as in the exe, docs/production.md); a destroyed building stays on the map, dead, while its destruction animation runs (about 3 s for buildings, 0.75 s for turrets, `Structure::dying`, docs/projectiles.md), drawn in its destroyed frame (a turret as its wrecked base without the gun; docs/art.md), with no health bar and its selection cleared.
 Victory/defeat: docs/ai.md ("Win, lose and mission scripts").
 
 ## Camera zoom (not in the exe)

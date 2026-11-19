@@ -106,8 +106,9 @@ impl Placed {
 
     /// Shows a building as the exe's state machine does (`0x40e099`..`0x40e0eb`): scaffold stages while it is being built up
     /// after a capture (hit points in thirds), else the idle loop, the damaged frame at half hit points or less, or for a
-    /// neutral one its grey look. `heal` is the hit points still to be added.
-    pub fn set_building_state(&mut self, owner: Owner, hp: i32, max_hp: i32, heal: i32, tick: u32) {
+    /// neutral one its grey look; while its destruction animation runs (`dying`) the destroyed state 5 (`0x40e08c`). `heal` is
+    /// the hit points still to be added.
+    pub fn set_building_state(&mut self, owner: Owner, hp: i32, max_hp: i32, heal: i32, tick: u32, dying: bool) {
         use opensow_formats::buildings::*;
         let (Some(a), Some(art)) = (self.anim, self.art.as_mut()) else { return };
         if owner != art.owner {
@@ -134,6 +135,9 @@ impl Placed {
                         2
                     },
                 )
+            } else if dying {
+                // turrets have no frame for state 5 (bounds 5..5): `0x4092f0` still draws its first index, the base's frame 5
+                (set, a.range(STATE_DESTROYED).0)
             } else {
                 (set, a.frame(hp, max_hp, tick))
             }
@@ -285,7 +289,7 @@ impl Art {
             anim,
             art: Some(Box::new(art)),
         };
-        p.set_building_state(owner, 1, 1, 0, 0);
+        p.set_building_state(owner, 1, 1, 0, 0, false);
         Some(p)
     }
 
@@ -397,22 +401,45 @@ mod tests {
     #[test]
     fn neutral_buildings_never_show_damage_and_captured_ones_change_colour() {
         let mut p = placed(Owner::Neutral);
-        p.set_building_state(Owner::Neutral, 100, 100, 0, 0);
+        p.set_building_state(Owner::Neutral, 100, 100, 0, 0, false);
         assert_eq!((p.set[0].pixels[0], p.frame), (1, 17)); // grey neutral frame of the blue set
-        p.set_building_state(Owner::Neutral, 49, 100, 0, 0);
+        p.set_building_state(Owner::Neutral, 49, 100, 0, 0, false);
         assert_eq!(p.frame, 17); // about half hit points is still the regular look
-        p.set_building_state(Owner::Neutral, 30, 100, 0, 0);
+        p.set_building_state(Owner::Neutral, 30, 100, 0, 0, false);
         assert_eq!((p.set[0].pixels[0], p.frame), (1, 17), "the exe shows state 6 for a neutral building at any hit points");
-        p.set_building_state(Owner::Neutral, 1, 100, 0, 0);
+        p.set_building_state(Owner::Neutral, 1, 100, 0, 0, false);
         assert_eq!(p.frame, 17);
         // captured: a new building at 1 hp builds up (scaffold, construction, finished) in the new colour
-        p.set_building_state(Owner::Enemy, 1, 100, 99, 5);
+        p.set_building_state(Owner::Enemy, 1, 100, 99, 5, false);
         assert_eq!((p.set[0].pixels[0], p.frame), (2, 0));
-        p.set_building_state(Owner::Enemy, 40, 100, 60, 5);
+        p.set_building_state(Owner::Enemy, 40, 100, 60, 5, false);
         assert_eq!(p.frame, 1);
-        p.set_building_state(Owner::Enemy, 90, 100, 10, 5);
+        p.set_building_state(Owner::Enemy, 90, 100, 10, 5, false);
         assert_eq!(p.frame, 2);
-        p.set_building_state(Owner::Enemy, 100, 100, 0, 5);
+        p.set_building_state(Owner::Enemy, 100, 100, 0, 5, false);
         assert!((3..15).contains(&p.frame));
+    }
+
+    #[test]
+    fn dying_structures_show_the_destroyed_state_frame() {
+        // kind 106: 4 damaged = 15, 5 destroyed = 16, 6 neutral = 17 (`0x40e08c`: a dead building gets state 5)
+        let mut p = placed(Owner::Enemy);
+        p.set_building_state(Owner::Enemy, 0, 100, 0, 5, false);
+        assert_eq!(p.frame, 15);
+        p.set_building_state(Owner::Enemy, 0, 100, 0, 5, true);
+        assert_eq!(p.frame, 16);
+        // `0x40e0df`: the neutral state wins over the destroyed one
+        p.set_building_state(Owner::Neutral, 0, 100, 0, 5, true);
+        assert_eq!(p.frame, 17);
+        // still building up (`[b+0x68]`): the stage by thirds wins (`0x40e061` comes before the dead check)
+        let mut p = placed(Owner::Enemy);
+        p.set_building_state(Owner::Player, 1, 100, 99, 5, false);
+        p.set_building_state(Owner::Player, 0, 100, 99, 5, true);
+        assert_eq!(p.frame, 0);
+        // turrets: state 5 is empty (bounds 5..5), so `0x4092f0` draws frame 5 + 0 of the base
+        let mut p = placed(Owner::Enemy);
+        p.anim = opensow_formats::buildings::anim(25);
+        p.set_building_state(Owner::Enemy, 0, 100, 0, 5, true);
+        assert_eq!(p.frame, 5);
     }
 }

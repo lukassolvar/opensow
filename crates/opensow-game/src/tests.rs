@@ -1881,3 +1881,35 @@ fn movie_and_briefing_animation_sound_follow_the_options() {
     g.apply_audio();
     assert_eq!(g.movie_gain(), 0.0, "--mute opens nothing");
 }
+
+#[test]
+fn dying_structures_show_their_destroyed_frame_and_a_turret_loses_only_its_gun() {
+    use opensow_viewer::art::Source;
+    let Some(mut g) = game() else { return };
+    g.mute = true;
+    g.start("M01");
+    let (w, h) = (640, 480);
+    let mut buf = vec![0u32; w * h];
+    let p = g.play.as_mut().expect("M01 runs");
+    // M01: an enemy light factory (kind 101) at (24, 14), an enemy turret 3 (kind 27) at (27, 20)
+    let at = |p: &play::Play, cell: (i32, i32)| p.world.structures.iter().position(|s| s.cell == cell).unwrap();
+    let (factory, turret) = (at(p, (24, 14)), at(p, (27, 20)));
+    p.world.debug_destroy_at(25, 15);
+    p.world.debug_destroy_at(27, 20);
+    let mut layers = |g: &mut Game, i: usize| {
+        g.draw(&mut buf, w, h);
+        let p = g.play.as_ref().unwrap();
+        let object = p.world.structures[i].object;
+        p.scene.placed.iter().filter(|s| matches!(s.source, Source::Object(o) if o == object)).map(|s| (s.layer, s.frame)).collect::<Vec<_>>()
+    };
+    let destroyed = |kind| opensow_formats::buildings::anim(kind).unwrap().range(opensow_formats::buildings::STATE_DESTROYED).0;
+    assert_eq!(layers(&mut g, factory), vec![(0, destroyed(101))]);
+    assert_eq!(layers(&mut g, turret), vec![(0, 5)], "the base stays (its wrecked frame 5), the gun top goes");
+    // the turret's animation ends after about 90 passes (2 per tick); then it is removed
+    let p = g.play.as_mut().unwrap();
+    for _ in 0..60 {
+        p.world.step();
+    }
+    assert!(p.world.structures[turret].dying.is_none());
+    assert!(layers(&mut g, turret).is_empty());
+}
