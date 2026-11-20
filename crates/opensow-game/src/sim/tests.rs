@@ -2394,6 +2394,25 @@ fn a_custom_escort_walks_its_pods_through_the_route_to_the_goal() {
     assert!((c.0 - 20).abs() <= 1 && (c.1 - 20).abs() <= 1, "{c:?}");
     // about 33 cells of 32 px at 7 px/s: some 150 s
     assert!((60 * 130..60 * 170).contains(&ticks), "{ticks} ticks");
+    // a route with the most waypoints a custom map keeps: the pod passes every one, in order
+    let mut w = open_world(40, 40);
+    let pod = w.add_unit(kinds::POD, 0, 3 * CELL + 16, 3 * CELL + 16);
+    w.add_unit(1, 1, 38 * CELL + 16, 38 * CELL + 16);
+    let route: Vec<(i32, i32)> = (0..opensow_formats::custommap::MAX_WAYPOINTS as i32).map(|k| (3 + (k + 1) % 2 * 3, 4 + k)).collect();
+    let mut convoy = route.clone();
+    convoy.push((20, 36));
+    w.set_convoy(convoy);
+    let mut passed = 0;
+    let mut ticks = 0;
+    while w.outcome.is_none() && ticks < 60 * 60 * 15 {
+        w.step();
+        ticks += 1;
+        let c = w.unit(pod).unwrap().cell();
+        if passed < route.len() && (c.0 - route[passed].0).abs() <= 1 && (c.1 - route[passed].1).abs() <= 1 {
+            passed += 1;
+        }
+    }
+    assert_eq!((w.outcome, passed), (Some(Outcome::Victory), route.len()), "after {ticks} ticks");
     // the convoy shot down: lost
     let mut w = open_world(40, 40);
     let pod = w.add_unit(kinds::POD, 0, 3 * CELL + 16, 3 * CELL + 16);

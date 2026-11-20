@@ -554,7 +554,7 @@ impl MapEditor {
 
     /// Height of the checks card (one line per problem found).
     pub(super) fn checks_height(&self, l: &L, s: &Session) -> i32 {
-        let n = (s.map().problems().len() + landing_issues(s).len() + escort_issues(s).len()).max(1) as i32;
+        let n = (s.map().problems().len() + landing_issues(s).len() + usize::from(!escort_issues(s).is_empty())).max(1) as i32;
         n * (l.g.small + 8) + 18
     }
 
@@ -574,9 +574,10 @@ impl MapEditor {
             l.push(r, None, Look::Text(format!("! {}", self.tr.landing_problem(k + 1, *why)), l.px(g.small), (220, 200, 120)));
             y += g.small + 8;
         }
-        for leg in &route {
+        // the convoy cannot walk its route: the map shows which legs (red); one line here, and the map cannot be played
+        if !route.is_empty() {
             let r = l.r(l.x0 + 10, y, l.inner - 20, g.small + 6);
-            l.push(r, None, Look::Text(format!("! {}", self.tr.route_problem(*leg)), l.px(g.small), (220, 200, 120)));
+            l.push(r, None, Look::Text(format!("! {}", self.tr.convoy_path()), l.px(g.small), WARN));
             y += g.small + 8;
         }
         if problems.is_empty() && landings.is_empty() && route.is_empty() {

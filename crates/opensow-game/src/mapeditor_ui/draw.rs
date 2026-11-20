@@ -111,7 +111,7 @@ impl MapEditor {
                     .map(|k| (s.reinforcement.drops[k].cell, if landing_issue(s, k).is_some() { WARN } else { page::GOLD }))
                     .collect();
                 if let Some((MapTool::Landing, c)) = drop_cell {
-                    marks.push((c, if landing_refusal(s, c, None).is_none() { ACCENT } else { (230, 60, 50) }));
+                    marks.push((c, if landing_refusal(s, c, None).is_none() { ACCENT } else { RED }));
                 }
                 for ((cx, cy), col) in marks {
                     let (x0, y0, x1, y1) = (at(cx - 1, s.view.x), at(cy, s.view.y), at(cx + 3, s.view.x), at(cy + 2, s.view.y));
@@ -120,7 +120,7 @@ impl MapEditor {
                     page::ring(&mut map, mw, h, at(cx, s.view.x) + cell / 2, y0 + cell / 2, (cell / 3).max(3), 2, col);
                 }
             }
-            // an escort: the route as dotted legs (orange where the convoy cannot walk), the waypoints as rings, the goal as its
+            // an escort: the route as dotted legs (red where the convoy cannot walk), the waypoints as rings, the goal as its
             // 3x3 zone; while a tool is armed, the goal zone or waypoint under the pointer, green or red
             if s.mission.win == custommap::WinRule::Escort {
                 let (z, vx, vy) = (s.view.zoom, s.view.x, s.view.y);
@@ -131,7 +131,7 @@ impl MapEditor {
                 let pods: Vec<(i32, i32)> = s.ed.level().markers.iter().filter(|m| m.kind == custommap::POD && m.player == 0).map(|m| m.cell()).collect();
                 for (i, &p) in points.iter().enumerate() {
                     let name = (i < s.escort.route.len()).then_some(i + 1);
-                    let col = if bad.contains(&name) { WARN } else { ACCENT };
+                    let col = if bad.contains(&name) { RED } else { ACCENT };
                     let from: Vec<(i32, i32)> = if i == 0 { pods.clone() } else { vec![points[i - 1]] };
                     for f in from {
                         dotted(&mut map, mw, h, mid(f), mid(p), col);
@@ -150,7 +150,7 @@ impl MapEditor {
                     zone(&mut map, g, ACCENT);
                 }
                 if let Some((tool @ (MapTool::Goal | MapTool::Waypoint), c)) = drop_cell {
-                    let col = if s.ed.can_place(Thing::Unit(1), c, None).is_ok() { ACCENT } else { (230, 60, 50) };
+                    let col = if s.ed.can_place(Thing::Unit(1), c, None).is_ok() { ACCENT } else { RED };
                     if tool == MapTool::Goal {
                         zone(&mut map, c, col);
                     } else {

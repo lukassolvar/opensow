@@ -313,50 +313,16 @@ fn win_index(w: custommap::WinRule) -> usize {
     }
 }
 
-/// Whether a ground unit can walk from `from` to `to` over `grid` (`Editor::walkable`). Eight neighbours: the game's wave
-/// (`formats::wave`, `0x4753a0`) tries a diagonal exactly when the orthogonal cells beside it are not free, so a unit slips
-/// between two blocked cells that touch at a corner.
-fn walks(grid: &[bool], size: (i32, i32), from: (i32, i32), to: (i32, i32)) -> bool {
-    let (w, h) = size;
-    let inside = |c: (i32, i32)| c.0 >= 0 && c.1 >= 0 && c.0 < w && c.1 < h;
-    if !inside(from) || !inside(to) {
-        return false;
+/// The legs of an escort the convoy cannot walk (`custom_maps::route_issues`); nothing without the escort rule.
+fn escort_issues(s: &Session) -> Vec<Option<usize>> {
+    if s.mission.win != custommap::WinRule::Escort {
+        return Vec::new();
     }
-    let idx = |c: (i32, i32)| (c.1 * w + c.0) as usize;
-    let mut seen = vec![false; grid.len()];
-    let mut queue = std::collections::VecDeque::from([from]);
-    seen[idx(from)] = true;
-    while let Some(c) = queue.pop_front() {
-        if c == to {
-            return true;
-        }
-        for n in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)].map(|d| (c.0 + d.0, c.1 + d.1)) {
-            if inside(n) && !seen[idx(n)] && grid[idx(n)] {
-                seen[idx(n)] = true;
-                queue.push_back(n);
-            }
-        }
-    }
-    false
+    custom_maps::route_issues(&s.ed.walkable(), s.ed.grid_size(), s.ed.level(), &s.escort)
 }
 
-/// The legs of an escort the convoy cannot walk: to waypoint `n` (from 1; from every blue pod for the first leg) or to the
-/// goal (`None`). Nothing without the escort rule or a goal.
-fn escort_issues(s: &Session) -> Vec<Option<usize>> {
-    let Some(goal) = s.escort.goal.filter(|_| s.mission.win == custommap::WinRule::Escort) else { return Vec::new() };
-    let (grid, size) = (s.ed.walkable(), s.ed.grid_size());
-    let pods: Vec<(i32, i32)> = s.ed.level().markers.iter().filter(|m| m.kind == custommap::POD && m.player == 0).map(|m| m.cell()).collect();
-    let points: Vec<(i32, i32)> = s.escort.route.iter().copied().chain([goal]).collect();
-    let name = |i: usize| (i < s.escort.route.len()).then_some(i + 1);
-    let mut out = Vec::new();
-    for (i, &p) in points.iter().enumerate() {
-        let from: Vec<(i32, i32)> = if i == 0 { pods.clone() } else { vec![points[i - 1]] };
-        if from.iter().any(|&f| !walks(&grid, size, f, p)) {
-            out.push(name(i));
-        }
-    }
-    out
-}
+/// Refused: a drop under the pointer that may not go there, a route leg the convoy cannot walk.
+const RED: (u8, u8, u8) = (230, 60, 50);
 
 /// A dotted line from `a` to `b` (window pixels): 3x3 dots every 7 pixels.
 fn dotted(buf: &mut [u32], w: usize, h: usize, a: (i32, i32), b: (i32, i32), col: (u8, u8, u8)) {

@@ -46,7 +46,7 @@ pub const MAX_FEATURES: usize = 512;
 /// Most ground patches a generated layout keeps (a 128 x 128 map of 88 px steps needs 47 x 47).
 pub const MAX_PATCHES: usize = 4096;
 /// Most waypoints of an escort route.
-pub const MAX_WAYPOINTS: usize = 8;
+pub const MAX_WAYPOINTS: usize = 32;
 /// The convoy's unit: the Rogon pod of the original's missions 3 and 8.
 pub const POD: i32 = crate::kinds::POD;
 /// Most carryall landings of a reinforcement, and the most credits / research points / aircraft of a kind it brings.
@@ -909,8 +909,12 @@ mod tests {
         assert_eq!((back.mission.win, back.escort.clone()), (WinRule::Escort, m.escort.clone()));
         assert_eq!(back.to_bytes(), d);
         assert!(back.escort.in_goal((61, 69)) && back.escort.in_goal((60, 70)) && !back.escort.in_goal((62, 70)));
+        // a long winding route round-trips whole
+        m.escort.route = (0..32).map(|k| (3 + k % 2 * 3, 4 + k)).collect();
+        let back = CustomMap::parse(&m.to_bytes()).unwrap();
+        assert_eq!(back.escort, m.escort);
         // a route without a goal yet is kept; too many waypoints are cut
-        m.escort = Escort { goal: None, route: vec![(1, 2); 12] };
+        m.escort = Escort { goal: None, route: vec![(1, 2); MAX_WAYPOINTS + 4] };
         let back = CustomMap::parse(&m.to_bytes()).unwrap();
         assert_eq!((back.escort.goal, back.escort.route.len()), (None, MAX_WAYPOINTS));
         assert_eq!(back.problems(), vec![Problem::NoGoal]);

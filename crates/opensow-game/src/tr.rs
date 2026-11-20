@@ -231,7 +231,7 @@ impl Tr {
                     "無法讀取此地圖檔案：檔案已損壞或不是地圖。",
                 ])
                 .to_string(),
-            crate::custom_maps::Blocker::Mission(p) => {
+            crate::custom_maps::Blocker::Mission(_) | crate::custom_maps::Blocker::ConvoyPath => {
                 let tail = self.pick([
                     "Edit the map to play it.",
                     "Upravte mapu, aby sa dala hrať.",
@@ -240,7 +240,11 @@ impl Tr {
                     "請先編輯地圖。",
                 ]);
                 let stop = if self.0 >= 3 { "。" } else { ". " };
-                format!("{}{stop}{tail}", self.problem(*p))
+                let what = match b {
+                    crate::custom_maps::Blocker::Mission(p) => self.problem(*p).to_string(),
+                    _ => self.convoy_path().to_string(),
+                };
+                format!("{what}{stop}{tail}")
             }
             crate::custom_maps::Blocker::NoHeadquarters(side) => {
                 let s = self.side(*side == 1);
@@ -554,18 +558,9 @@ impl Tr {
         ])
     }
 
-    /// The checks card's line for a route leg the convoy cannot walk: to waypoint `n` (from 1), or to the goal (`None`).
-    pub fn route_problem(self, n: Option<usize>) -> String {
-        match (n, self.0) {
-            (Some(n), 1) => format!("Konvoj nedôjde k bodu trasy {n}"),
-            (Some(n), 2) => format!("Konvoj nedojde k bodu trasy {n}"),
-            (Some(n), 3) => format!("护送队无法走到路点 {n}"),
-            (Some(n), 4) => format!("護送隊無法走到路點 {n}"),
-            (Some(n), _) => format!("The convoy cannot walk to waypoint {n}"),
-            (None, _) => self
-                .pick(["The convoy cannot walk to the goal", "Konvoj nedôjde do cieľa", "Konvoj nedojde do cíle", "护送队无法走到目标", "護送隊無法走到目標"])
-                .to_string(),
-        }
+    /// The checks card's line (and the skirmish screen's reason) when the convoy cannot walk every leg of its route.
+    pub fn convoy_path(self) -> &'static str {
+        self.pick(["Invalid convoy path", "Neplatná trasa konvoja", "Neplatná trasa konvoje", "护送队路线无效", "護送隊路線無效"])
     }
 
     /// The skirmish screen's line about a custom map's mission (`None`: a plain skirmish).
