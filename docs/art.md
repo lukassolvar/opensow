@@ -11,7 +11,12 @@ Stems: `_base _light _med _heavy _air _mine _rlab _wind _walker` (kinds 100..108
   from boundaries `[b+0x28..0x44]` (0 scaffold, 1 construction, 2 just finished, 3 = the idle loop, 4 damaged = hp <= max/2, 5 destroyed, 6 neutral).
   During the build-up (`[b+0x68]`) the state is hp in thirds (0/1/2). The loop frame `[b+0x4c]` advances every `[b+0x58]` ticks (60/s):
   light/medium/heavy factory and wind trap 2, air base and gold mine 6, lab and walker factory 4; the HQ has no loop (all single frames).
-  Loop length: 12 frames (air base 22, walker factory 8). Single-frame states are painted once into the background. Viewer `--walk TICKS` shows the loop at a tick; the game animates live.
+  Loop length: 12 frames (air base 22, walker factory 8). Single-frame states are painted once into the background.
+  While dying (`[b+0x69]`, set by `0x409130`) a building shows state 5 (`0x40e08c`; the build-up stage while `[b+0x68]` is still set, state 6 if neutral);
+  the draw loops `0x41fb20` / `0x420170` have no dead check. Turrets have no state-5 frame (bounds 5..5), so `0x4092f0` draws base frame 5,
+  the wrecked base (also the neutral frame); the gun top is a unit and is removed at once (`0x409130` -> `0x43a7e0`). The overlay pass `0x409400`
+  skips the health bar, the satellite text and the `[b+0x394]` sprites of a dead building, and `0x409130` clears its selection bytes `[b+0x88..0x8a]`.
+  Viewer `--walk TICKS` shows the loop at a tick; the game animates live.
 - Green (enemy) sets are the same art recoloured with one trailing frame fewer. Neutral uses the blue set's last frame.
 - Shadows: same index as the sprite; use frame `min(idx, len-1)`; draw before sprites at ~40 % black. `.sha` hot spots are relative to the same anchor.
 - Anchor: the sprite hot spot goes at the centre of the object's cell (`cell*32+16`). Verified on M01 (HQ, factories, lab sit correctly on terrain).

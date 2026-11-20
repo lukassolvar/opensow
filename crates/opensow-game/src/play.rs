@@ -1338,17 +1338,18 @@ impl Play {
             self.scene.placed.sort_by_key(|p| (p.sort_y, p.layer));
         }
         // destroyed buildings and turrets disappear when their destruction animation ends (they stay, dead, while it runs: `Structure::dying`)
-        // a turret's gun top (unit kinds 109-113) is freed the moment it dies, so a turret vanishes with its first explosion
-        let dead: HashSet<usize> =
-            self.world.structures.iter().filter(|s| !s.present() || (s.dying.is_some() && matches!(s.kind, ObjectKind::Turret(_)))).map(|s| s.object).collect();
-        if !dead.is_empty() {
-            self.scene.placed.retain(|p| !matches!(p.source, Source::Object(i) if dead.contains(&i)));
+        // a turret's gun top (unit kinds 109-113) is freed the moment it dies (`0x409130` -> `0x43a7e0`); its base stays
+        let dead: HashSet<usize> = self.world.structures.iter().filter(|s| !s.present()).map(|s| s.object).collect();
+        let gunless: HashSet<usize> =
+            self.world.structures.iter().filter(|s| s.dying.is_some() && matches!(s.kind, ObjectKind::Turret(_))).map(|s| s.object).collect();
+        if !dead.is_empty() || !gunless.is_empty() {
+            self.scene.placed.retain(|p| !matches!(p.source, Source::Object(i) if dead.contains(&i) || (p.layer == 1 && gunless.contains(&i))));
         }
-        // idle loops of working buildings, damaged look at half hit points (`0x40dfb6`, `0x40e099`)
+        // idle loops of working buildings, damaged look at half hit points, destroyed look while dying (`0x40dfb6`, `0x40e08c`, `0x40e099`)
         let tick = self.world.tick as u32;
         for st in &self.world.structures {
             if let Some(p) = self.scene.placed.iter_mut().find(|p| matches!(p.source, Source::Object(i) if i == st.object) && p.layer == 0) {
-                p.set_building_state(st.owner, st.hp, st.max_hp, st.heal, tick);
+                p.set_building_state(st.owner, st.hp, st.max_hp, st.heal, tick, st.dying.is_some());
             }
             // a turret's gun top turns and recoils like a unit's top
             if let (Some(aim), Some(p)) =

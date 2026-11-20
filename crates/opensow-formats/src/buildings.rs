@@ -80,7 +80,7 @@ pub fn anim(kind: i32) -> Option<BuildingAnim> {
         105 => (15, 6),
         106 => (15, 4),
         108 => (11, 4),
-        // turrets (cases `0x40a8e0..0x40a95b`): six frames per base, one per state, nothing for the destroyed state
+        // turrets (cases `0x40a8e0..0x40a95b`): six frames per base; the destroyed state is empty, so the draw shows frame 5 (wrecked, also neutral)
         25..=29 => return Some(BuildingAnim { bounds: [0, 1, 2, 3, 4, 5, 5, 6], period: 6 }),
         _ => return None,
     };
