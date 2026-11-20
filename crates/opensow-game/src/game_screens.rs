@@ -58,6 +58,10 @@ impl Game {
             }
             lands::Event::Edition(e) => {
                 self.set_edition(e);
+                let i = usize::from(e == opensow_formats::Edition::Warmonger);
+                if self.movies && !self.seen_intros[i] {
+                    return self.campaign_map(false);
+                }
                 // the same map for the other campaign: no animation, the music keeps playing
                 let progress = self.effective_progress();
                 self.lands = Some(lands::Lands::new(&mut self.assets, progress, false, 0.0));

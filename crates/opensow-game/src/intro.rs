@@ -183,9 +183,9 @@ impl Intro {
         let dir = LANGUAGES.get(language).ok_or("unknown language")?;
         let default = format!("data\\levels\\{name}.sgv");
         // only the intro and outro have language copies; everything else falls back to the main folder
-        // the language copies of the ending are the base game's; Warmonger has its own (docs/warmonger.md)
-        let own_ending = game.edition == opensow_formats::Edition::Warmonger && name.eq_ignore_ascii_case("mO");
-        let file = (!dir.is_empty() && !own_ending)
+        // the language copies of the intro and ending are the base game's; Warmonger has its own (docs/warmonger.md)
+        let own_movie = game.edition == opensow_formats::Edition::Warmonger && (name.eq_ignore_ascii_case("mO") || name.eq_ignore_ascii_case("mI"));
+        let file = (!dir.is_empty() && !own_movie)
             .then(|| game.resolve(&format!("data\\diffdata\\{dir}\\levels\\{name}.sgv")))
             .flatten()
             .or_else(|| game.resolve(&default))
