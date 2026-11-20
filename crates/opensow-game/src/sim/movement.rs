@@ -8,8 +8,8 @@ impl World {
     /// the cell after `start` to `goal`. A blocked goal is replaced by the nearest free cell (the exe reaches into the
     /// blocked cell and relies on the walking code to stop short).
     /// The search runs on the ground layer (`0x4753a0`, grid `0x5fac38`) or the air layer (`0x474b30`, grid `0x60ac38`, the
-    /// same search over the border terrain).
-    pub fn find_path_on(&self, air: bool, start: (i32, i32), goal: (i32, i32)) -> Option<Vec<(f32, f32)>> {
+    /// same search over the border terrain and every Advancer's cell; the goal is only moved off the terrain).
+    pub fn find_path_on(&mut self, air: bool, start: (i32, i32), goal: (i32, i32)) -> Option<Vec<(f32, f32)>> {
         let blocked = |x: i32, y: i32| if air { self.is_air_blocked(x, y) } else { self.is_blocked(x, y) };
         let goal = if blocked(goal.0, goal.1) {
             self.rings.search(0, 12).iter().map(|&(dx, dy)| (goal.0 + dx as i32, goal.1 + dy as i32)).find(|&(x, y)| !blocked(x, y))?
@@ -19,10 +19,17 @@ impl World {
         if start == goal {
             return Some(vec![centre(goal)]);
         }
-        let mut wave = Wave::new(blocked);
         // the exe searches from the destination to the unit (`[unit+0x5c]` is the destination, the target argument the
         // unit's own position), so the route comes back unit first
-        let mut route = wave.find(goal, start, 0)?;
+        let mut route = match if air { self.occupancy() } else { None } {
+            Some(occ) => {
+                let mut wave = Wave { cells: std::mem::take(&mut occ.air_stat), base: occ.stat_base };
+                let route = wave.find(goal, start, 0);
+                (occ.air_stat, occ.stat_base) = (wave.cells, wave.base);
+                route
+            }
+            None => Wave::new(|x, y| if air { self.is_air_blocked(x, y) } else { self.is_blocked(x, y) }).find(goal, start, 0),
+        }?;
         route.remove(0);
         Some(route.into_iter().map(centre).collect())
     }
