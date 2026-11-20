@@ -61,7 +61,7 @@ Which strings use which path: "GDI versus bitmap fonts" below. OpenSOW: path 1 i
 | 269-272 | Empty Savegame..., No Time, No Date, savegame is damaged!!! | save slots `0x443ca0` |
 | 273-276 | BLUE SIDE, GREEN SIDE, CREDITS, RESEARCH | multiplayer level picker `0x447100` |
 | 277-279 | Session Lost, Green/Blue Player has left the game | in-game MP `0x434e80` |
-| 280, 281 | Now increase tech-level in your factory. / Now use fighters ... island. | mission hint boxes `0x4303e0`, `0x430770` (docs/ai.md) |
+| 280, 281 | Now increase tech-level in your factory. / Now use fighters ... island. | mission hint boxes `0x4303e0`, `0x430770` (docs/ai.md); Warmonger has its own lines (docs/warmonger.md) |
 | 282-301 | No Info Available; NAME/BLAST/SHELL: %s; TYPE: ...; OFFENCE/DEFENCE: %d, n/a, special, ultimate; SCOPE/SPEED: %s/%d; cargo: reinforcements | info box lines `0x43cf20` |
 | 302-350 | unit/building description pages | info box page text `0x43c410` |
 | 351 | Quick Save | `0x444660` |
