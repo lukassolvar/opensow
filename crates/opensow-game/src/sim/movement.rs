@@ -1,6 +1,7 @@
 //! How a unit moves each tick: path search, chasing a target, cell occupancy and local avoidance, and the unit's whole per-tick step.
 
 use super::*;
+use opensow_formats::wave::LocalStep;
 
 impl World {
     /// The exe's wave search (`opensow_formats::wave`, exact vs `0x4753a0`) over the cell grid. Returns the cell centres from
@@ -60,7 +61,7 @@ impl World {
             }
         }
         let (handle, tcell) = match t {
-            Target::Unit(_) => (0, tcell),
+            Target::Unit(uid) => (0x3000000 + uid, tcell),
             Target::Structure(k) => (0x2000000 + k as u32, self.structures[k].center_cell()),
         };
         // a target of handle type 4 (an Advancer) is chased over the air layer (`0x478200`), every other target over the ground's
@@ -81,7 +82,8 @@ impl World {
         }
     }
 
-    /// Unit-avoidance grids for this tick (`0x61ac38` / `0x62ac38`, static `0x5eac38`): built on first use.
+    /// Unit-avoidance grids for this tick (`0x61ac38` / `0x62ac38`, static `0x5eac38` / `0x60ac38`): built on first use in a
+    /// tick, as the exe rebuilds them before the turns (`0x42d77f..0x42d7a7`), then stamped as units move.
     pub(super) fn occupancy(&mut self) -> Option<&mut Occupancy> {
         if self.occ.is_none() && self.cells.0 <= 128 && self.cells.1 <= 128 {
             let mut stat = vec![0u32; 16384];
@@ -111,34 +113,26 @@ impl World {
             let mut air = Wave::new(|_, _| false);
             ground.cells = stat.clone();
             air.cells = air_stat.clone();
+            // the static grids hold each unit's current cell (0x4582a0 / 0x458190), the unit grids its step cell, which is its
+            // own cell while it stands (0x458420 / 0x4580d0)
             for u in self.units.iter().filter(|u| u.hp > 0) {
-                let (x, y) = u.cell();
-                if (0..128).contains(&x) && (0..128).contains(&y) {
-                    let grid = if u.kind == kinds::ADVANCER { &mut air } else { &mut ground };
-                    grid.cells[(x * 128 + y) as usize] = 0x3000000 + u.id;
+                let handle = 0x3000000 + u.id;
+                let (stat, grid) = if u.kind == kinds::ADVANCER { (&mut air_stat, &mut air.cells) } else { (&mut stat, &mut ground.cells) };
+                if let Some(at) = grid_index(u.cell()) {
+                    stat[at] = handle;
+                }
+                if let Some(at) = grid_index(u.heading_cell().unwrap_or(u.cell())) {
+                    grid[at] = handle;
                 }
             }
-            // a corpse re-stamps its cell with the terrain marker every step (0x46dfeb / 0x46e004)
+            // a corpse re-stamps its cell with the terrain marker every step (0x46dfeb / 0x46e004), a dying unit's step cell gets
+            // it as well (0x458491)
             // DELIBERATE DEVIATION: a dead Advancer's corpse (air grid) does not block. The exe stamps it for 430 steps, but then the
             // spot above a building an enemy Advancer was capturing stays closed and the player's Advancer cannot start repairing
             for c in self.corpses.iter().filter(|c| !c.air) {
-                let (x, y) = (c.x.div_euclid(CELL), c.y.div_euclid(CELL));
-                if (0..128).contains(&x) && (0..128).contains(&y) {
-                    let grid = if c.air { &mut air } else { &mut ground };
-                    grid.cells[(x * 128 + y) as usize] = 0xFFFFFD;
-                }
-            }
-            // a walking unit also holds the cell it is heading to (0x473190 stamps `[unit+0x6c/0x70]`), so two units never
-            // take the same next cell
-            for u in self.units.iter().filter(|u| u.hp > 0) {
-                if let Some((x, y)) = u.heading_cell().filter(|&c| c != u.cell()) {
-                    if (0..128).contains(&x) && (0..128).contains(&y) {
-                        let grid = if u.kind == kinds::ADVANCER { &mut air } else { &mut ground };
-                        let at = (x * 128 + y) as usize;
-                        if grid.cells[at] == 0 {
-                            grid.cells[at] = 0x3000000 + u.id;
-                        }
-                    }
+                if let Some(at) = grid_index((c.x.div_euclid(CELL), c.y.div_euclid(CELL))) {
+                    stat[at] = 0xFFFFFD;
+                    ground.cells[at] = 0xFFFFFD;
                 }
             }
             self.occ = Some(Occupancy { ground, air, stat, air_stat, stat_base: 1 });
@@ -146,26 +140,19 @@ impl World {
         self.occ.as_mut()
     }
 
-    /// A unit's pixel step took it into another cell: the exe clears the old cell and stamps the new one in the same pass
-    /// (`0x46f759` / `0x46f7ff` write the static grid at every pixel step), so units planning later in the same tick see the move.
-    /// The unit grid holds the step cell, which is already stamped, so only the cell the unit left changes here.
+    /// A unit's pixel step took it into another cell: the exe clears the cell it left and stamps the new one in the static grid
+    /// at every pixel step (`0x46f759` / `0x46f7ff`), so units planning later in the same tick see the move. The unit grid holds
+    /// the step cell and does not change here.
     pub(super) fn occupancy_moved(&mut self, i: usize, old: (i32, i32)) {
         let (own, air, new) = (0x3000000 + self.units[i].id, self.units[i].kind == kinds::ADVANCER, self.units[i].cell());
-        let heading = self.units[i].heading_cell();
         let Some(occ) = self.occ.as_mut() else { return };
-        let grid = if air { &mut occ.air } else { &mut occ.ground };
-        let mut set = |cell: (i32, i32), from: u32, to: u32| {
-            if (0..128).contains(&cell.0) && (0..128).contains(&cell.1) {
-                let at = (cell.0 * 128 + cell.1) as usize;
-                if grid.cells[at] == from {
-                    grid.cells[at] = to;
-                }
-            }
-        };
-        if heading != Some(old) {
-            set(old, own, 0);
+        let stat = if air { &mut occ.air_stat } else { &mut occ.stat };
+        if let Some(at) = grid_index(old) {
+            stat[at] = 0;
         }
-        set(new, 0, own);
+        if let Some(at) = grid_index(new) {
+            stat[at] = own;
+        }
     }
 
     /// The planning half of the exe's walking step (`0x46f550` when the pixel line is empty): arrival, the global route search
@@ -229,17 +216,33 @@ impl World {
         let mut route = vec![at];
         route.extend(&cells);
         let k = cells.len().min(6);
-        let heading = self.units[i].heading_cell().filter(|&c| c != at);
+        let old_step = self.units[i].heading_cell().unwrap_or(at);
         let Some(occ) = self.occupancy() else { return false };
         let Occupancy { ground, air: agrid, stat, air_stat, stat_base } = occ;
         // 0x473190 first clears the unit's old step cell
-        if let Some((x, y)) = heading.filter(|&(x, y)| (0..128).contains(&x) && (0..128).contains(&y)) {
-            let grid = if air { &mut *agrid } else { &mut *ground };
-            if grid.cells[(x * 128 + y) as usize] == own {
-                grid.cells[(x * 128 + y) as usize] = 0;
+        if let Some(cell) = grid_index(old_step) {
+            if air {
+                agrid.cells[cell] = 0
+            } else {
+                ground.cells[cell] = 0
             }
         }
         let r = if air { agrid.local_step(air_stat, *stat_base, own, &route, at) } else { ground.local_step(stat, *stat_base, own, &route, at) };
+        let waiting = self.take_local_step(i, r, &route, k, at);
+        // and stamps the step cell, new or kept, whatever the search found (0x47321c), so units planning later this tick see it
+        let step = self.units[i].heading_cell().unwrap_or(at);
+        if let (Some(occ), Some(cell)) = (self.occ.as_mut(), grid_index(step)) {
+            if air {
+                occ.air.cells[cell] = own
+            } else {
+                occ.ground.cells[cell] = own
+            }
+        }
+        waiting
+    }
+
+    /// What `avoid` does with the local search's result; returns `true` when the unit waits.
+    fn take_local_step(&mut self, i: usize, r: LocalStep, route: &[(i32, i32)], k: usize, at: (i32, i32)) -> bool {
         let u = &mut self.units[i];
         if r.stop {
             u.halt();
@@ -261,17 +264,6 @@ impl World {
                 u.step = u.path.first().copied();
             }
             return waiting;
-        }
-        // the new step cell is stamped at once, so units planning later this tick see it taken
-        if let Some((x, y)) = self.units[i].heading_cell().filter(|&c| c != at) {
-            let air = self.units[i].kind == kinds::ADVANCER;
-            let handle = 0x3000000 + self.units[i].id;
-            if let Some(occ) = self.occupancy().filter(|_| (0..128).contains(&x) && (0..128).contains(&y)) {
-                let grid = if air { &mut occ.air } else { &mut occ.ground };
-                if grid.cells[(x * 128 + y) as usize] == 0 {
-                    grid.cells[(x * 128 + y) as usize] = handle;
-                }
-            }
         }
         false
     }
@@ -609,4 +601,9 @@ impl World {
             }
         }
     }
+}
+
+/// The index of a cell in the exe's 128 x 128 grids, `None` outside them.
+pub(super) fn grid_index((x, y): (i32, i32)) -> Option<usize> {
+    ((0..128).contains(&x) && (0..128).contains(&y)).then_some((x * 128 + y) as usize)
 }

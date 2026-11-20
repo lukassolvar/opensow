@@ -427,6 +427,10 @@ impl World {
             look,
             slot,
         });
+        // the unit constructor stamps the new unit into the ground static grid, whatever its layer (`0x46c0b9`)
+        if let (Some(occ), Some(at)) = (self.occ.as_mut(), movement::grid_index((x.div_euclid(CELL), y.div_euclid(CELL)))) {
+            occ.stat[at] = 0x3000000 + id;
+        }
         id
     }
 

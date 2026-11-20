@@ -146,6 +146,10 @@ impl World {
     pub(super) fn step_corpse(&mut self, n: usize) {
         let c = self.corpses[n];
         self.corpses[n].left -= 1;
+        // the dying unit stamps its cell with the terrain marker every step (`0x46e004`); an Advancer's does not (see `occupancy`)
+        if let (false, Some(occ), Some(at)) = (c.air, self.occ.as_mut(), movement::grid_index((c.x.div_euclid(CELL), c.y.div_euclid(CELL)))) {
+            occ.stat[at] = 0xFFFFFD;
+        }
         if c.left - 1 < CORPSE_BLAST_BELOW && !c.blasted {
             self.corpses[n].blasted = true;
             for &size in corpse_blasts(c.variant) {

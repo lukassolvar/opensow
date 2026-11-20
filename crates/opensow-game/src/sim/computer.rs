@@ -419,12 +419,6 @@ impl World {
         let Some(o) = self.occupancy() else { return (None, None, None) };
         let mut grid = o.stat.clone();
         let mut base = o.stat_base;
-        for u in self.units.iter().filter(|u| u.hp > 0 && u.kind != kinds::ADVANCER) {
-            let (x, y) = u.cell();
-            if (0..128).contains(&x) && (0..128).contains(&y) && grid[(x * 128 + y) as usize] == 0 {
-                grid[(x * 128 + y) as usize] = 0x3000000 + u.id;
-            }
-        }
         let classify = |h: u32| {
             if h >= 0x3000000 {
                 match self.unit(h - 0x3000000) {

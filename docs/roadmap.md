@@ -31,7 +31,7 @@ Not decided to be done; ordered roughly by value.
 3. [done] **Text and languages**: non-English text is drawn with `gdi.rs` (Times New Roman / Arial Bold, CJK fallback face); only EN/SK/CZ/CS/CT are offered, PL/HU/RU fall back to English (docs/text.md).
 4. [done] **CHuffcomp**: it is the savegame compressor, the only use found (`save::huff_encode`, docs/savegame.md).
 5. [done] **Destruction animation**: a dying building shows its destroyed frame (state 5), a dying turret its wrecked base without the gun (docs/art.md).
-6. **Pathing grid**: one merged grid rebuilt each tick instead of the exe's incremental updates (docs/walking.md); small known deviation.
+6. [done] **Pathing grid**: the exe also rebuilds its grids every tick; the game now keeps them split like the exe (static grid with every unit's current cell, unit grid with step cells), so a unit standing on the look-ahead cell holds walkers back (docs/walking.md).
 7. **Distribution and platforms**: signed / notarised builds (docs/release.md). Done: the application icon on every system, the release files (universal macOS `.dmg` with `OpenSOW.app`, Windows `.zip`, Linux `.tar.gz`) built without the dev features, and CI on Linux, macOS and Windows (`.github/workflows`, docs/release.md), locating the install without Steam (launcher: Locate, drop, Auto-detect), GPU presentation (`gpu.rs` / `replay.rs`).
 8. **Playability polish**: gamepad or touch. Done: resolutions up to 3840x2160 and Native (docs/options.md), skirmish difficulty Easy..Brutal (docs/skirmish.md).
 9. [done] **CI**: fmt, clippy and the tests on Linux, macOS and Windows plus the release files on every push (docs/release.md); tests that need the install skip there.
