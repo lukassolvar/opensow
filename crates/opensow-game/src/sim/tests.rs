@@ -1609,12 +1609,34 @@ fn a_unit_leaving_a_cell_frees_it_for_units_planning_later_in_the_same_tick() {
     let id = w.add_unit(7, 0, 3 * CELL + 31, 3 * CELL + 16);
     let i = w.units.iter().position(|u| u.id == id).unwrap();
     let own = 0x3000000 + id;
-    let at = |w: &mut World, c: (i32, i32)| w.occupancy().unwrap().ground.cells[(c.0 * 128 + c.1) as usize];
-    assert_eq!(at(&mut w, (3, 3)), own, "the grid holds the unit's cell");
+    let at = |w: &mut World, c: (i32, i32)| w.occupancy().unwrap().stat[(c.0 * 128 + c.1) as usize];
+    assert_eq!(at(&mut w, (3, 3)), own, "the static grid holds the unit's cell");
     w.units[i].x += 1.0; // one pixel step across the cell border
     w.occupancy_moved(i, (3, 3));
     assert_eq!(at(&mut w, (3, 3)), 0, "the cell it left is free at once");
     assert_eq!(at(&mut w, (4, 3)), own, "and the new one is its own");
+}
+
+/// 0x476989: the static grid `0x5eac38` holds every ground unit's current cell, and a look-ahead cell holding another object
+/// gives no step, so a unit standing there holds the walker back instead of being walked around.
+#[test]
+fn a_unit_standing_on_the_look_ahead_cell_holds_the_walker_back() {
+    let setup = |ahead: usize| {
+        let mut w = open_world(20, 12);
+        let id = w.add_unit(7, 0, 2 * CELL + 16, 5 * CELL + 16);
+        w.order_move(id, (14, 5), None);
+        let i = w.units.iter().position(|u| u.id == id).unwrap();
+        let (x, y) = w.units[i].path[ahead - 1];
+        w.add_unit(7, 0, x as i32, y as i32);
+        w.occ = None;
+        (w, i)
+    };
+    let (mut w, i) = setup(6);
+    assert!(w.avoid(i), "the look-ahead cell (6 ahead) is taken: no step");
+    assert_eq!(w.units[i].step, None);
+    let (mut w, i) = setup(3);
+    assert!(!w.avoid(i), "a unit nearer than the look-ahead cell is walked around");
+    assert!(w.units[i].step.is_some());
 }
 
 /// Runs the destruction animations to their end; returns the passes it took.

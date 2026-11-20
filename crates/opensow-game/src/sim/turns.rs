@@ -127,9 +127,26 @@ impl World {
         for n in corpses_before..self.corpses.len() {
             self.step_corpse(n);
         }
-        // a corpse whose time is up frees its slot (`0x43a7e0`)
-        self.corpses.retain(|c| c.player.clamp(0, 2) as usize != p || c.left >= 0);
-        self.occ = None;
+        // a corpse whose time is up frees its slot (`0x43a7e0`) and clears its cell in the static grid (`0x46a230`)
+        let mut freed = Vec::new();
+        self.corpses.retain(|c| {
+            let keep = c.player.clamp(0, 2) as usize != p || c.left >= 0;
+            if !keep {
+                freed.push(*c);
+            }
+            keep
+        });
+        if let Some(occ) = self.occ.as_mut() {
+            for c in freed {
+                if let Some(at) = movement::grid_index((c.x.div_euclid(CELL), c.y.div_euclid(CELL))) {
+                    if c.air {
+                        occ.air_stat[at] = 0
+                    } else {
+                        occ.stat[at] = 0
+                    }
+                }
+            }
+        }
         self.bullet_turn(p);
     }
 
