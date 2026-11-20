@@ -278,8 +278,11 @@ fn an_escort_takes_pods_a_goal_and_waypoints_and_checks_the_way() {
         .collect();
     // a blue pod on open ground, a goal and a waypoint it can walk to
     let start = *cells.iter().find(|&&c| grid[(c.1 * size.0 + c.0) as usize]).unwrap();
-    let reach: Vec<(i32, i32)> =
-        cells.iter().copied().filter(|&c| c != start && (c.0 - start.0).abs() + (c.1 - start.1).abs() > 10 && walks(&grid, size, start, c)).collect();
+    let reach: Vec<(i32, i32)> = cells
+        .iter()
+        .copied()
+        .filter(|&c| c != start && (c.0 - start.0).abs() + (c.1 - start.1).abs() > 10 && custom_maps::walks(&grid, size, start, c))
+        .collect();
     let blocked = *cells.iter().find(|&&c| !grid[(c.1 * size.0 + c.0) as usize]).unwrap();
     {
         let s = m.s.as_mut().unwrap();
@@ -310,12 +313,20 @@ fn an_escort_takes_pods_a_goal_and_waypoints_and_checks_the_way() {
     assert_eq!(problems(&m), vec![]);
     assert!(escort_issues(m.s.as_ref().unwrap()).is_empty());
     // a goal the pods cannot walk to (an island, a plateau) is reported, not refused
-    let island = cells.iter().copied().find(|&c| grid[(c.1 * size.0 + c.0) as usize] && !walks(&grid, size, start, c));
+    let island = cells.iter().copied().find(|&c| grid[(c.1 * size.0 + c.0) as usize] && !custom_maps::walks(&grid, size, start, c));
     if let Some(c) = island {
         m.s.as_mut().unwrap().escort.goal = Some(c);
         assert_eq!(escort_issues(m.s.as_ref().unwrap()), vec![None]);
         m.s.as_mut().unwrap().escort.route.push(c);
         assert_eq!(escort_issues(m.s.as_ref().unwrap()), vec![Some(2)], "the leg to the island waypoint; from there to the goal is fine");
+        // two legs broken: the checks card still says it once
+        m.s.as_mut().unwrap().escort.goal = Some(reach[reach.len() - 1]);
+        m.s.as_mut().unwrap().escort.route = vec![c, reach[1]];
+        assert_eq!(escort_issues(m.s.as_ref().unwrap()), vec![Some(1), Some(2)]);
+        let line = format!("! {}", m.tr.convoy_path());
+        let lines = m.widgets(w, h).into_iter().filter(|wd| matches!(&wd.look, Look::Text(t, ..) if *t == line)).count();
+        assert_eq!(lines, 1);
+        m.s.as_mut().unwrap().escort.route = vec![reach[0], c];
         m.s.as_mut().unwrap().escort.route.pop();
         m.s.as_mut().unwrap().escort.goal = Some(reach[reach.len() - 1]);
     }
@@ -335,6 +346,16 @@ fn an_escort_takes_pods_a_goal_and_waypoints_and_checks_the_way() {
     let back = custom_maps::load(&m.save_in(&dir).unwrap()).unwrap();
     assert_eq!((back.mission.win, back.escort.goal, back.escort.route.clone()), (WinRule::Escort, Some(reach[reach.len() - 1]), vec![reach[0]]));
     assert_eq!(custommap::pods(&back.level, 0), 1);
+    // waypoints come until the route is full, then the tool lets go and Add is no longer offered
+    m.s.as_mut().unwrap().escort.route.clear();
+    m.s.as_mut().unwrap().tool = None;
+    m.press(Hit::WaypointAdd);
+    for &c in reach.iter().take(32) {
+        click(&mut m, c);
+    }
+    assert_eq!(m.s.as_ref().unwrap().escort.route, reach[..32].to_vec());
+    assert_eq!(m.s.as_ref().unwrap().tool, None);
+    assert!(!m.controls(w, h).iter().any(|(_, hit)| *hit == Hit::WaypointAdd));
     // another rule lets the tools go
     m.press(Hit::GoalSet);
     m.press(Hit::WinRule(0));

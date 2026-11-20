@@ -296,6 +296,9 @@ pub struct SkirmishMenu {
     pub custom: Vec<crate::custom_maps::Entry>,
     /// The maps folder (`custom_maps::dir`; tests use their own).
     custom_dir: std::path::PathBuf,
+    /// The Custom tab's escort maps checked so far: whether the convoy cannot walk its route (`custom_maps::convoy_blocked`,
+    /// which loads the terrain, so it runs when a map is chosen).
+    convoy: std::collections::HashMap<usize, bool>,
     /// Index of the chosen map in `maps`.
     pub map: usize,
     /// Both sides' starting values as edited.
@@ -369,6 +372,7 @@ impl SkirmishMenu {
             tab: Tab::Original,
             custom: Vec::new(),
             custom_dir: crate::custom_maps::dir(),
+            convoy: std::collections::HashMap::new(),
             map: 0,
             setup: Setup::default(),
             defaults: Setup::default(),
@@ -399,6 +403,7 @@ impl SkirmishMenu {
     pub fn set_tab(&mut self, tab: Tab) {
         if tab == Tab::Custom {
             self.custom = crate::custom_maps::list_in(&self.custom_dir);
+            self.convoy.clear();
             self.maps = self.custom.iter().map(|e| e.star_key()).collect();
             self.names = self.custom.iter().map(|e| e.name.clone()).collect();
         } else {
@@ -425,7 +430,13 @@ impl SkirmishMenu {
 
     /// Why the selected custom map cannot be played (`None` on the Original tab).
     pub fn blocker(&self) -> Option<crate::custom_maps::Blocker> {
-        (self.tab == Tab::Custom).then(|| self.custom.get(self.map).and_then(|e| e.blocker())).flatten()
+        (self.tab == Tab::Custom).then(|| self.custom_blocker(self.map)).flatten()
+    }
+
+    /// Why custom map `i` cannot be played: its file, or (once it was chosen) its convoy's route.
+    fn custom_blocker(&self, i: usize) -> Option<crate::custom_maps::Blocker> {
+        let e = self.custom.get(i)?;
+        e.blocker().or_else(|| self.convoy.get(&i).is_some_and(|&b| b).then_some(crate::custom_maps::Blocker::ConvoyPath))
     }
 
     /// Chooses a map, loads its defaults and its picture.
@@ -444,6 +455,9 @@ impl SkirmishMenu {
             }
             Tab::Custom => {
                 let Some(map) = self.custom.get(i).and_then(|e| e.map.as_ref().ok()).filter(|_| self.custom[i].blocker().is_none()) else { return };
+                if *self.convoy.entry(i).or_insert_with(|| crate::custom_maps::convoy_blocked(&self.game, map)) {
+                    return;
+                }
                 // a custom map's own resources are its default (no carryall rule: its maker chose them)
                 self.setup = Setup::of_map(&map.level);
                 // the human plays blue on every custom map (no Swap sides on that tab)
@@ -745,7 +759,7 @@ impl SkirmishMenu {
                     ui::fill(c, w, h, r, (40, 110, 50), 90);
                 }
                 let tp = px(g.body_px - 2);
-                let broken = self.tab == Tab::Custom && self.custom.get(i).is_some_and(|e| e.blocker().is_some());
+                let broken = self.tab == Tab::Custom && self.custom_blocker(i).is_some();
                 let colour = if broken {
                     WARN
                 } else if chosen {
@@ -1194,6 +1208,34 @@ mod tests {
         assert_eq!(m.objective(), None, "a plain skirmish map says nothing");
         m.set_tab(Tab::Original);
         assert!(swap(&m));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_escort_map_whose_convoy_cannot_walk_its_route_is_not_played() {
+        use crate::custom_maps::{self, Blocker};
+        use opensow_formats::custommap::{Escort, WinRule, POD};
+        let Some((mut m, assets)) = menu() else { return };
+        let dir = crate::mapeditor_ui::tests::many_maps("skirmish-convoy", 1);
+        let file = std::fs::read_dir(&dir).unwrap().flatten().next().unwrap().path();
+        let mut map = custom_maps::load(&file).unwrap();
+        let Some((grid, size)) = custom_maps::walkable(&assets.game, &map) else { return };
+        let open = |c: (i32, i32)| grid[(c.1 * size.0 + c.0) as usize];
+        let cells: Vec<(i32, i32)> = (0..size.1).flat_map(|y| (0..size.0).map(move |x| (x, y))).collect();
+        let start = *cells.iter().find(|&&c| open(c) && c.1 > 8).unwrap();
+        let reach = *cells.iter().rev().find(|&&c| c != start && open(c) && custom_maps::walks(&grid, size, start, c)).unwrap();
+        let blocked = *cells.iter().find(|&&c| !open(c)).unwrap();
+        map.mission.win = WinRule::Escort;
+        map.level.markers.push(opensow_formats::level::Marker { kind: POD, player: 0, x: start.0 * 32 + 16, y: start.1 * 32 + 16 });
+        m.custom_dir = dir.clone();
+        for (goal, playable) in [(blocked, false), (reach, true)] {
+            map.escort = Escort { goal: Some(goal), route: Vec::new() };
+            std::fs::write(&file, map.to_bytes()).unwrap();
+            m.set_tab(Tab::Custom);
+            m.select_map(0);
+            assert_eq!(m.map_level().is_some(), playable, "goal {goal:?}");
+            assert_eq!(m.blocker() == Some(Blocker::ConvoyPath), !playable, "goal {goal:?}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

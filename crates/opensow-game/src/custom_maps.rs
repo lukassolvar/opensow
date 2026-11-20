@@ -1,7 +1,7 @@
 //! The players' own skirmish maps (docs/map-editor-ingame.md): the `maps` folder in the per-user data folder, its listing for the
 //! skirmish screen's Custom tab and the map editor, loading and saving (`formats::custommap`), and where a map's ground comes from.
 
-use opensow_formats::custommap::{self, CustomMap, Problem, Terrain};
+use opensow_formats::custommap::{self, CustomMap, Escort, Problem, Terrain};
 use opensow_formats::level::Level;
 use opensow_formats::{Edition, GameDir};
 use opensow_viewer::scene::{Ground, Scene};
@@ -51,6 +51,8 @@ pub enum Blocker {
     NoHeadquarters(usize),
     /// An escort map without pods or a goal (`custommap::Problem::NoPods`, `NoGoal`).
     Mission(Problem),
+    /// An escort map whose convoy cannot walk every leg of its route ([`convoy_blocked`]).
+    ConvoyPath,
 }
 
 /// The maps in `folder`, by name (case-insensitive); unreadable files are listed too (their error shows in the list).
@@ -177,6 +179,65 @@ pub fn terrains(game: &GameDir) -> Vec<Terrain> {
         g.resolve(&format!("Data\\Levels\\{m}.map")).is_some_and(|p| p.exists())
     });
     out
+}
+
+/// Whether a ground unit can walk from `from` to `to` over `grid` (`Editor::walkable`). Eight neighbours: the game's wave
+/// (`formats::wave`, `0x4753a0`) tries a diagonal exactly when the orthogonal cells beside it are not free, so a unit slips
+/// between two blocked cells that touch at a corner.
+pub fn walks(grid: &[bool], size: (i32, i32), from: (i32, i32), to: (i32, i32)) -> bool {
+    let (w, h) = size;
+    let inside = |c: (i32, i32)| c.0 >= 0 && c.1 >= 0 && c.0 < w && c.1 < h;
+    if !inside(from) || !inside(to) {
+        return false;
+    }
+    let idx = |c: (i32, i32)| (c.1 * w + c.0) as usize;
+    let mut seen = vec![false; grid.len()];
+    let mut queue = std::collections::VecDeque::from([from]);
+    seen[idx(from)] = true;
+    while let Some(c) = queue.pop_front() {
+        if c == to {
+            return true;
+        }
+        for n in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)].map(|d| (c.0 + d.0, c.1 + d.1)) {
+            if inside(n) && !seen[idx(n)] && grid[idx(n)] {
+                seen[idx(n)] = true;
+                queue.push_back(n);
+            }
+        }
+    }
+    false
+}
+
+/// The legs of an escort the convoy cannot walk over `grid`: to waypoint `n` (from 1; from every blue pod for the first leg)
+/// or to the goal (`None`). Nothing without a goal.
+pub fn route_issues(grid: &[bool], size: (i32, i32), level: &Level, escort: &Escort) -> Vec<Option<usize>> {
+    let Some(goal) = escort.goal else { return Vec::new() };
+    let pods: Vec<(i32, i32)> = level.markers.iter().filter(|m| m.kind == custommap::POD && m.player == 0).map(|m| m.cell()).collect();
+    let points: Vec<(i32, i32)> = escort.route.iter().copied().chain([goal]).collect();
+    let mut out = Vec::new();
+    for (i, &p) in points.iter().enumerate() {
+        let from: Vec<(i32, i32)> = if i == 0 { pods.clone() } else { vec![points[i - 1]] };
+        if from.iter().any(|&f| !walks(grid, size, f, p)) {
+            out.push((i < escort.route.len()).then_some(i + 1));
+        }
+    }
+    out
+}
+
+/// Where a ground unit can stand on a saved map (`Editor::walkable` over its ground, a layout included) and the grid's size;
+/// `None` when the terrain's files are missing.
+pub fn walkable(game: &GameDir, map: &CustomMap) -> Option<(Vec<bool>, (i32, i32))> {
+    let (g, name) = terrain_source(game, map.terrain());
+    let ground = base_ground(game, &map.ground(), opensow_viewer::scene::load_ground(&g, &name).ok()?, &mut Sources::default());
+    let ed = opensow_viewer::editor::Editor::custom(&map.name, map.level.clone(), map.ext.clone(), &ground.map);
+    Some((ed.walkable(), ed.grid_size()))
+}
+
+/// Whether an escort map's convoy cannot walk its whole route (its terrain loaded from the install).
+pub fn convoy_blocked(game: &GameDir, map: &CustomMap) -> bool {
+    map.mission.win == custommap::WinRule::Escort
+        && map.escort.goal.is_some()
+        && walkable(game, map).is_some_and(|(grid, size)| !route_issues(&grid, size, &map.level, &map.escort).is_empty())
 }
 
 /// Shows the folder in the system's file manager (created first).
