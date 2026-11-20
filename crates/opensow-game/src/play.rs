@@ -154,6 +154,8 @@ pub struct Play {
     viewport: (usize, usize),
     /// The language strings (messages are shown for a few seconds in the HUD).
     lang: Option<opensow_formats::lang::LangFile>,
+    /// Warmonger's own English hint lines (read from its exe), for the Warmonger campaign in English.
+    wm_hints: Option<opensow_formats::warmonger::Hints>,
     /// GDI stand-in for the satellite-protection label (11 px Times New Roman bold).
     label_font: Option<crate::gdi::Gdi>,
     /// Unicode text for the HUD messages, countdown, hints and pause banner when the language is not English: the bitmap fonts only
@@ -307,6 +309,9 @@ impl Play {
                 .and_then(|p| std::fs::read(p).ok())
                 .and_then(|d| opensow_formats::lang::LangFile::parse(&d).ok())
                 .map(|f| f.with_supplement(assets.game.language())),
+            wm_hints: (assets.game.edition == opensow_formats::Edition::Warmonger && assets.game.language() == opensow_formats::lang::Language::English)
+                .then(|| assets.game.warmonger_exe().and_then(|p| std::fs::read(p).ok()).and_then(|d| opensow_formats::warmonger::parse_hints(&d)))
+                .flatten(),
         };
         play.world.sheet_sizes = assets.art.sheet_sizes();
         play.world.set_mission(level.trim_start_matches(['M', 'm']).parse().ok());
@@ -2021,7 +2026,7 @@ impl Play {
         // the hint box of missions 1 and 6 (`0x4303e0`): darkened box around the screen middle, then `0x467060`: white text over a
         // black copy 2 px right and down
         if let Some(hint) = self.world.hint {
-            if let Some(text) = self.lang.as_ref().and_then(|l| l.get(hint.text)) {
+            if let Some(text) = hint_line(hint, self.lang.as_ref(), self.wm_hints.as_ref()) {
                 let (cx, cy) = (w as i32 / 2, h as i32 / 2);
                 let r = ui::Rect { x: cx - u(hint.half as f32), y: cy - u(15.0), w: 2 * u(hint.half as f32), h: u(25.0) };
                 ui::dim_sub(buf, w, h, r, 32);
@@ -2145,6 +2150,20 @@ pub fn message_pose(born: u32, width: i32, newer: &[u32], now: u32) -> Option<(i
     Some((x, y))
 }
 
+/// The text of a hint box: Warmonger's own line when given (its exe picks the line by the box, docs/warmonger.md), else the language string.
+fn hint_line<'a>(
+    hint: crate::sim::Hint,
+    lang: Option<&'a opensow_formats::lang::LangFile>,
+    wm: Option<&'a opensow_formats::warmonger::Hints>,
+) -> Option<&'a str> {
+    match wm {
+        Some(h) if hint.text == 281 => Some(&h.fighters),
+        Some(h) if hint.half == 0xbc => Some(&h.upgrade_next),
+        Some(h) => Some(&h.upgrade),
+        None => lang?.get(hint.text),
+    }
+}
+
 /// The original's health bar: a thin pale-green line over a dark one, no frame; the lost part is dark.
 /// The exe's health bar (`0x437140`, RGB565 values): a 1 px frame (`0x0001`) around `max / scale` x 3 px, the filled part
 /// `hp / scale` px in three shades (top row light, bottom row dark) and the rest `0x0066`; green while `hp > max / 2`, yellow
@@ -2185,7 +2204,18 @@ fn health_bar(buf: &mut [u32], w: usize, h: usize, view: &View, x: i32, y: i32, 
 
 #[cfg(test)]
 mod tests {
-    use super::message_pose;
+    use super::{hint_line, message_pose};
+    use crate::sim::Hint;
+
+    #[test]
+    fn warmonger_hints_use_its_own_line_for_each_box() {
+        let wm = opensow_formats::warmonger::Hints { upgrade: "up".into(), upgrade_next: "next".into(), fighters: "fight".into() };
+        let line = |text, half| hint_line(Hint { text, half, text_dx: 0 }, None, Some(&wm));
+        assert_eq!(line(280, 0x94), Some("up"));
+        assert_eq!(line(280, 0xbc), Some("next"), "one slot at its limit: the wider box gets the longer line");
+        assert_eq!(line(281, 0xc1), Some("fight"));
+        assert_eq!(hint_line(Hint { text: 280, half: 0x94, text_dx: 0 }, None, None), None);
+    }
 
     #[test]
     fn a_message_slides_in_stays_and_expires() {

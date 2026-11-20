@@ -2483,6 +2483,8 @@ fn warmonger_missions_and_texts_load_through_the_edition_overlay() {
     let texts = warmonger::parse_texts(&exe).expect("eleven land texts in the exe");
     assert!(texts[0].heading.starts_with("TERRITORY : 01") && texts[10].heading.starts_with("TERRITORY : 11"));
     assert!(texts[2].briefing.contains("convoy") && texts[10].objective.contains("Rahman"));
+    let hints = warmonger::parse_hints(&exe).expect("hint lines in the exe");
+    assert!(hints.upgrade_next.contains("next unit") && hints.fighters.starts_with("Now use fighters"), "{hints:?}");
     assert!(game.level_files().iter().any(|f| f.to_ascii_lowercase().ends_with(".net")));
 }
 

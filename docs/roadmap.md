@@ -27,7 +27,7 @@ Known deviations from the original are marked `**Differs from the exe:**` in eac
 ## Gaps and ideas (review 2026-11-06)
 Not decided to be done; ordered roughly by value.
 1. **Golden-trace regression tests**: with no original to compare against, pin our own sim. Per mission (a few), run N ticks headless (`--play Mxx --ticks N --report`) and check in a compact trace (unit/building HP and positions, credits, RNG state) that `cargo test` compares. Catches accidental changes to tick order or RNG call order. Tests that need the install skip without it.
-2. **Warmonger coverage**: audited and integrated as a campaign toggle on the world map (docs/warmonger.md); remaining: trace the few differing mission-number rules of its exe and check its in-game strings.
+2. [done] **Warmonger coverage**: integrated as a campaign toggle on the world map; its mission-number rules match the base exe except the radar frame, and its in-game strings differ only in the mission hints, which it shows in English (docs/warmonger.md).
 3. [done] **Text and languages**: non-English text is drawn with `gdi.rs` (Times New Roman / Arial Bold, CJK fallback face); only EN/SK/CZ/CS/CT are offered, PL/HU/RU fall back to English (docs/text.md).
 4. [done] **CHuffcomp**: it is the savegame compressor, the only use found (`save::huff_encode`, docs/savegame.md).
 5. [done] **Destruction animation**: a dying building shows its destroyed frame (state 5), a dying turret its wrecked base without the gun (docs/art.md).

@@ -32,22 +32,46 @@ pub fn parse_texts(exe: &[u8]) -> Option<Vec<LandText>> {
     let mut found = Vec::new();
     let mut from = 0;
     while let Some(i) = find(exe, KEY, from) {
-        let mut pos = i;
-        let mut strings = Vec::new();
-        while strings.len() < 4 {
-            while exe.get(pos) == Some(&0) {
-                pos += 1;
-            }
-            let end = pos + exe.get(pos..)?.iter().position(|&b| b == 0)?;
-            strings.push(String::from_utf8_lossy(&exe[pos..end]).into_owned());
-            pos = end;
-        }
-        let mut it = strings.into_iter();
-        let (heading, coordinate, briefing, objective) = (it.next()?, it.next()?, it.next()?, it.next()?);
+        let (strings, pos) = strings_at(exe, i, 4)?;
+        let [heading, coordinate, briefing, objective] = strings.try_into().ok()?;
         found.push(LandText { heading, coordinate, briefing, objective });
         from = pos;
     }
     (found.len() == LANDS.len()).then_some(found)
+}
+
+/// Warmonger's English lines of the mission hint boxes. Its hint routines (`0x42f650`, `0x42fa30`) are the base game's
+/// (`0x4303e0`, `0x430770`) instruction for instruction, but they push three string literals where the base game pushes the
+/// language strings 280, 280 and 281 (docs/warmonger.md).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hints {
+    /// No slot at its limit (missions 1 and 6, box 0x94); the same text as the base game's string 280.
+    pub upgrade: String,
+    /// One slot at its limit (mission 1, box 0xbc); the base game shows string 280 again.
+    pub upgrade_next: String,
+    /// Eight fighters in stock (mission 1, box 0xc1); the base game's 281 names the A.A. turrets on the island.
+    pub fighters: String,
+}
+
+/// Reads [`Hints`] out of Warmonger's exe: the three NUL-terminated strings from the first `Now increase tech-level`.
+pub fn parse_hints(exe: &[u8]) -> Option<Hints> {
+    let (strings, _) = strings_at(exe, find(exe, b"Now increase tech-level", 0)?, 3)?;
+    let [upgrade, upgrade_next, fighters] = strings.try_into().ok()?;
+    Some(Hints { upgrade, upgrade_next, fighters })
+}
+
+/// `n` NUL-terminated strings from `pos`, skipping the NUL padding between them, and the position after the last.
+fn strings_at(exe: &[u8], mut pos: usize, n: usize) -> Option<(Vec<String>, usize)> {
+    let mut strings = Vec::with_capacity(n);
+    while strings.len() < n {
+        while exe.get(pos) == Some(&0) {
+            pos += 1;
+        }
+        let end = pos + exe.get(pos..)?.iter().position(|&b| b == 0)?;
+        strings.push(String::from_utf8_lossy(&exe[pos..end]).into_owned());
+        pos = end;
+    }
+    Some((strings, pos))
 }
 
 fn find(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
@@ -82,6 +106,21 @@ mod tests {
         );
         assert_eq!(case_of(22), Some(10));
         assert_eq!(case_of(5), None);
+    }
+
+    #[test]
+    fn parses_the_three_hint_lines_after_the_first_one() {
+        let exe = b"credits\0\0\0Now increase tech-level here.\0\0\0\0Now increase tech-level of next.\0\0\0Now use fighters.\0\0\0sprites2\0";
+        assert_eq!(
+            parse_hints(exe),
+            Some(Hints {
+                upgrade: "Now increase tech-level here.".into(),
+                upgrade_next: "Now increase tech-level of next.".into(),
+                fighters: "Now use fighters.".into()
+            })
+        );
+        assert_eq!(parse_hints(b"Now increase tech-level here.\0\0only two\0"), None);
+        assert_eq!(parse_hints(b"nothing here"), None);
     }
 
     #[test]
