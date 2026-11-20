@@ -238,7 +238,7 @@ fn resolve_in(root: &Path, game_path: &str) -> Option<PathBuf> {
 
 /// How a `Data\Levels\<file>` path relates to Warmonger.
 enum Owner {
-    /// `M01..M22.*` and the ending movie `mO`: the selected edition's own file.
+    /// `M01..M22.*`, the intro `mI` and the ending movie `mO`: the selected edition's own file.
     Mission,
     /// `*.net`: the base game's first, Warmonger's own maps are added.
     Skirmish,
@@ -252,8 +252,7 @@ fn owner(game_path: &str) -> Owner {
         return Owner::Shared;
     }
     match file.rsplit_once('.') {
-        // `mO` is the campaign's ending movie; the intro `mI` stays the base game's
-        Some((stem, _)) if is_mission_stem(stem) || stem.eq_ignore_ascii_case("mo") => Owner::Mission,
+        Some((stem, _)) if is_mission_stem(stem) || stem.eq_ignore_ascii_case("mo") || stem.eq_ignore_ascii_case("mi") => Owner::Mission,
         Some((_, ext)) if ext.eq_ignore_ascii_case("net") => Owner::Skirmish,
         _ => Owner::Shared,
     }
@@ -450,6 +449,7 @@ mod edition_tests {
             "Data/Levels/00-the first step.net",
             "Data/Levels/M00.map",
             "Data/Levels/mO.sgv",
+            "Data/Levels/MI.sgv",
             "State of War Warmonger.exe",
         ] {
             touch(&w, f);
@@ -475,7 +475,7 @@ mod edition_tests {
         assert_eq!(read(&g, "Data\\Levels\\M00.map").as_deref(), Some("Data/Levels/M00.map"), "the tutorial stays the base game's");
         assert!(g.resolve("Data\\Sprites2\\Menu\\x.tsp").is_some(), "art is always the base game's");
         assert_eq!(read(&g, "Data\\Levels\\mO.sgv").as_deref(), Some("Data/Levels/mO.sgv"));
-        assert!(g.resolve("Data\\Levels\\mI.sgv").is_some(), "the intro is the base game's");
+        assert_eq!(read(&g, "Data\\Levels\\mI.sgv").as_deref(), Some("Data/Levels/MI.sgv"), "Warmonger's own intro");
         g.edition = Edition::Original;
         assert!(g.resolve("Data\\Levels\\mO.sgv").is_some_and(|p| p.starts_with(&g.root)));
         g.edition = Edition::Warmonger;
