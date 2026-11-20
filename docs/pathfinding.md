@@ -36,9 +36,7 @@ The three routines are **the same code as the ground versions on the other grids
 - `0x473f10(x, y)` = `0x476870` (`Wave::local_step`) with unit grid `0x62ac38` / `[0x49a374]` and static grid `0x60ac38` / `[0x49a368]`; `0x476870(x, y, mode)` dispatches to it for `mode != 0`.
 - `0x478200` = `0x477630` (`wave::approach`) for a chase target whose handle type (`0x43aaa0` = bits 19-21 of the handle) is 4, i.e. an **Advancer** (kind 40; the air grid `0x60ac38` is the only one that stamps such handles): `0x477630` hands the whole call over. The chaser's own layer does not matter, the target's does. One quirk of its unrolled block code (`wave::approach_air`, `opensow approach ... air`): of the 7 x 7 block it saves and restores, the cell *three places earlier in the linear index* (`index - 3`) is the one freed when it holds the target's handle, so the strip `y-6..y` beside the block is freed and not restored, and handles at `y+1..y+3` stay blocked. Air grids hold no building handles, so the quirk hardly ever shows.
 
-OpenSOW: same (`find_path_on(true, ..)`, `Occupancy.air` / `air_stat`, `approach_air` in `chase_step`; `sim/movement.rs`).
-
-**Differs from the exe:** the air route search `find_path_on(true, ..)` runs over the air terrain only; the exe's `0x60ac38` also holds the other Advancers' current cells (`0x458190`), so its global air route goes around them. The local search and the chase do see them (`Occupancy.air_stat`).
+OpenSOW: same (`find_path_on(true, ..)`, `Occupancy.air` / `air_stat`, `approach_air` in `chase_step`; `sim/movement.rs`). The air route search runs over `Occupancy.air_stat`, which holds the air terrain and every Advancer's current cell (`0x458190`, moved at each pixel step by `0x46f759` / `0x46f7ff`), so an Advancer's route goes around the other Advancers, as the local search and the chase do. The blocked-goal move (above) looks at the air terrain only, so a destination on another Advancer's cell is searched into, as in the exe (the wave frees its start cell).
 
 ## The second-step search (`0x475c30`, `0x4732f0`; `Wave::local_step_second`)
 

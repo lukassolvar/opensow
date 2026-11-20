@@ -3177,3 +3177,17 @@ fn a_range_one_walker_stands_still_and_shoots_buildings_and_turrets_from_every_s
         }
     }
 }
+
+/// 0x474b30 searches over the air grid 0x60ac38, which holds every Advancer's cell: the route bends around one in the way.
+#[test]
+fn the_advancer_route_goes_around_another_advancer() {
+    let mut w = open_world(20, 12);
+    w.add_unit(kinds::ADVANCER, 0, 2 * CELL + 16, 5 * CELL + 16);
+    w.add_unit(kinds::ADVANCER, 0, 6 * CELL + 16, 5 * CELL + 16);
+    let route: Vec<(i32, i32)> = w.find_path_on(true, (2, 5), (10, 5)).unwrap().iter().map(|&(x, y)| (x as i32 / CELL, y as i32 / CELL)).collect();
+    assert_eq!(route.last(), Some(&(10, 5)));
+    assert!(!route.contains(&(6, 5)), "the route crosses the other Advancer: {route:?}");
+    // a goal on another Advancer's cell is still searched into, as the exe frees the search's start cell
+    let route = w.find_path_on(true, (2, 5), (6, 5)).unwrap();
+    assert_eq!(route.last(), Some(&centre((6, 5))));
+}
