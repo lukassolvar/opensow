@@ -1913,3 +1913,39 @@ fn dying_structures_show_their_destroyed_frame_and_a_turret_loses_only_its_gun()
     assert!(p.world.structures[turret].dying.is_none());
     assert!(layers(&mut g, turret).is_empty());
 }
+
+#[test]
+fn new_game_plays_the_intro_once_before_the_campaign_map() {
+    let Some(mut g) = game() else { return };
+    (g.movies, g.mute) = (true, true);
+    g.act(Action::NewGame);
+    assert_eq!(g.intro.as_ref().map(|i| i.name.as_str()), Some("mI"));
+    assert!(g.lands.is_none(), "the map waits for the intro");
+    g.end_movie();
+    assert!(g.intro.is_none() && g.lands.is_some(), "the map follows the intro");
+    g.lands_event(lands::Event::Back);
+    g.act(Action::NewGame);
+    assert!(g.intro.is_none(), "the intro plays only once");
+    assert!(g.lands.is_some());
+}
+
+#[test]
+fn the_first_switch_to_warmonger_plays_its_intro_once() {
+    use opensow_formats::Edition;
+    let Some(mut g) = game() else { return };
+    if g.assets.game.warmonger.is_none() {
+        return;
+    }
+    (g.movies, g.mute) = (true, true);
+    g.seen_intros = [true, false];
+    g.act(Action::NewGame);
+    assert!(g.intro.is_none() && g.lands.is_some(), "the base intro was seen already");
+    g.lands_event(lands::Event::Edition(Edition::Warmonger));
+    assert_eq!(g.intro.as_ref().map(|i| i.name.as_str()), Some("mI"));
+    assert!(g.lands.is_none());
+    g.end_movie();
+    assert!(g.lands.is_some() && g.assets.game.edition == Edition::Warmonger, "Warmonger's map follows its intro");
+    g.lands_event(lands::Event::Edition(Edition::Original));
+    g.lands_event(lands::Event::Edition(Edition::Warmonger));
+    assert!(g.intro.is_none() && g.lands.is_some(), "only the first switch plays it");
+}

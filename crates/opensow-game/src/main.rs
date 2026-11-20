@@ -86,6 +86,8 @@ enum Then {
     Level(String),
     /// The outro is over: show the closing message.
     Screen(Screen),
+    /// A campaign's intro is over: show its map (with the `mA` animation when `true`).
+    Lands(bool),
 }
 
 /// Developer features (cargo feature `dev`, on by default; release archives are built without it, docs/release.md): the F12
@@ -139,8 +141,10 @@ struct Game {
     quit: bool,
     /// The intro movie while it plays; it replaces everything else on screen.
     intro: Option<intro::Intro>,
-    /// The boot screens (Cypronia logo, title picture) while they show; they come before the intro movie.
+    /// The boot screens (Cypronia logo, title picture) while they show.
     boot: Option<boot::Boot>,
+    /// Whose intro was played, by edition (original, Warmonger): each plays once, before its campaign map.
+    seen_intros: [bool; 2],
     then: Then,
     language: usize,
     /// Play the briefing movies and the outro (off for headless runs and `--no-intro`).
@@ -299,7 +303,7 @@ fn main() {
                 game.boot = Some(b);
                 game.boot_music();
             }
-            None => game.play_movie("mI", Then::Menu),
+            None => game.play_music("Menu"),
         }
     }
     if let Some(m) = std::env::var("OPENSOW_START").ok().filter(|_| DEV) {

@@ -81,12 +81,13 @@ Verification: all 100 frames are bit-identical to FFmpeg's output; the test pins
 
 ## Playing the intro (`opensow-game`)
 
-`opensow-game` plays `mI.sgv` full screen before the menu (`intro.rs`): `mpeg1::Stream` (incremental
+`opensow-game` plays `mI.sgv` full screen (`intro.rs`): `mpeg1::Stream` (incremental
 decoder) yields frames as the clock needs them, dropping frames if the machine is slow; the layer II track is
 decoded up front and played through `rodio` (`playback` feature only; no device = silent).
 Any key or click skips it.
+**Differs from the exe:** the exe plays the intro at every start, before the menu. OpenSOW plays it once (ever) per campaign, right before that campaign's map: "New game" plays the selected campaign's `mI` (then `mA` and the map), and the first switch to Warmonger on the map plays Warmonger's own `mI` (docs/warmonger.md). Which intros were played is kept in `intros.txt` of the user data folder (`edition::remember_intro`; skipping counts as played). Asked for by the player (2026-11-20).
 **Differs from the exe:** the exe places the movie in a 640x480 rectangle centred on the screen (`0x457220`). OpenSOW scales each frame to fit the whole window (nearest neighbour, black bars; `Intro::draw`), and drops frames when the machine is slow.
-`--no-intro` starts at the menu, `--lang EN|SK|CZ|CS|CT` (or `CHINNESSE`; PL/HU/RU fall back to
+`--no-intro` skips the boot screens and turns every movie off, `--lang EN|SK|CZ|CS|CT` (or `CHINNESSE`; PL/HU/RU fall back to
 English, docs/text.md) picks the language and with it the copy: the exe's path table (0x48e4bc, 0x48ff48...) maps language index 0..6 to `data\levels\` and
 `data\diffdata\{SK,CZ,PL,HU,RU,CHINNESSE}\levels\`. Headless: `--screenshot out.png --intro-frame N`.
 ### Briefings and outro

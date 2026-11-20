@@ -29,6 +29,7 @@ impl Game {
             quit: false,
             intro: None,
             boot: None,
+            seen_intros: edition::intros_seen(),
             then: Then::Menu,
             language: 0,
             movies: false,
@@ -143,7 +144,6 @@ impl Game {
         self.end_movie();
     }
 
-    /// The boot screens are over: the intro movie follows, then the menu.
     /// The exe restarts `uvod.wav` whenever a boot page starts.
     pub(super) fn boot_music(&mut self) {
         if self.boot.as_mut().is_some_and(|b| b.take_changed()) {
@@ -152,10 +152,10 @@ impl Game {
         }
     }
 
-    /// Leaves the boot pictures and goes on to the intro movie or the menu.
+    /// Leaves the boot pictures for the menu.
     pub(super) fn end_boot(&mut self) {
         self.boot = None;
-        self.play_movie("mI", Then::Menu);
+        self.play_music("Menu");
     }
 
     /// A movie ended or was skipped: goes on to what was to follow it.
@@ -165,6 +165,21 @@ impl Game {
             Then::Menu => self.play_music("Menu"),
             Then::Level(l) => self.start(&l),
             Then::Screen(s) => self.screen = Some(s),
+            Then::Lands(video) => self.open_lands(video),
+        }
+    }
+
+    /// Shows the selected campaign's map; the first time (ever) with movies on, that campaign's intro `mI` plays before it.
+    pub(super) fn campaign_map(&mut self, video: bool) {
+        let i = usize::from(self.assets.game.edition == opensow_formats::Edition::Warmonger);
+        if self.movies && !self.seen_intros[i] {
+            self.seen_intros[i] = true;
+            edition::remember_intro(self.assets.game.edition);
+            self.screen = None;
+            self.lands = None;
+            self.play_movie("mI", Then::Lands(video));
+        } else {
+            self.open_lands(video);
         }
     }
 
@@ -193,7 +208,7 @@ impl Game {
     /// Does what a menu button does.
     pub(super) fn act(&mut self, a: Action) {
         match a {
-            Action::NewGame => self.open_lands(true),
+            Action::NewGame => self.campaign_map(true),
             Action::Tutorial => {
                 // state 5: no briefing movie, the level (0) loads at once and the tutorial script starts at step 0
                 self.campaign = false;
