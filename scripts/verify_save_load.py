@@ -4,14 +4,15 @@ branch on the loaded objects, and require the stream to come back unchanged.
 
     /tmp/v/bin/python scripts/verify_save_load.py "<install>/State of War.exe" target/release/opensow [stream ...]
 
-The streams are the `M05.state` files that `OPENSOW_DUMP_STATES=dir cargo test -p opensow-game a_mission_round` writes (OpenSOW's
-`World::to_state`); the check is that **the exe accepts our streams**: every tag and header is verified by
+The streams are the `*.state` files OpenSOW's `World::to_state` writes with `OPENSOW_DUMP_STATES=dir`: every campaign level of both
+editions and four skirmish maps at the start and mid-game (`cargo test --release -p opensow-game -- --ignored
+streams_for_the_exe_load_check`), the five missions of `a_mission_round` and the synthetic worlds of `savestate`; the check is that **the exe accepts our streams**: every tag and header is verified by
 the exe's own code (a mismatch would reach its "savegame is corrupted" error, which is trapped), the objects are constructed by the
 exe's constructors and deserialised by its own `Serialize` methods, and storing them again gives the same bytes (the 317-byte campaign
 record is masked: the exe re-randomises its filler).
 
 Replaced by small emulations (they need files, MFC or the level): the level loader `0x4267d0`, operator new/delete, the MFC CString and
-CArray helpers, the string reader `0x404440`, the campaign file access `0x456770` / `0x456720` / `0x456e50`, the cloud trim `0x453060`.
+CDWordArray helpers (SetSize, SetAtGrow), the string reader `0x404440`, the campaign file access `0x456770` / `0x456720` / `0x456e50`, the cloud trim `0x453060`.
 """
 import os, struct, subprocess, sys
 
@@ -89,16 +90,14 @@ def array_set_size(uc):  # CArray::SetSize(n, grow): data +4, size +8
     ret_to(uc, 8)
 
 
-def array_add(uc):
+def array_set_at_grow(uc):  # CDWordArray::SetAtGrow(index, value); the loads append with index = size
     ecx = uc.reg_read(UC_X86_REG_ECX)
-    v = arg(uc, 0)
+    i, v = arg(uc, 0), arg(uc, 1)
     if not r32(ecx + 4):
         w32(ecx + 4, new_alloc(4 * 4096))
-    n = r32(ecx + 8)
-    w32(r32(ecx + 4) + 4 * n, v)
-    w32(ecx + 8, n + 1)
-    uc.reg_write(UC_X86_REG_EAX, n)
-    ret_to(uc, 4)
+    w32(r32(ecx + 4) + 4 * i, v)
+    w32(ecx + 8, max(r32(ecx + 8), i + 1))
+    ret_to(uc, 8)
 
 
 def level_loader(uc):  # 0x4267d0(level, CString, int): cdecl; it records the level number and succeeds
@@ -181,7 +180,7 @@ stub(0x47D315, op_new)
 stub(0x47D321, op_delete)
 stub(0x47D30F, op_delete)  # operator delete (the old cloud list is destroyed before a load)
 stub(0x47D387, array_set_size)
-stub(0x47D38D, array_add)
+stub(0x47D38D, array_set_at_grow)
 stub(0x4267D0, level_loader)
 stub(0x41C2B0, error_box)
 stub(0x453060, lambda uc: ret_to(uc, 0))

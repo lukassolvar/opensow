@@ -349,6 +349,136 @@ fn mission_trip(g: &mut Game, mission: &str) {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Streams for `scripts/verify_save_load.py` (the exe's load branch): every campaign mission of both editions and a few skirmish
+/// maps, each right after the start and mid-game (air strikes, Advancer beams, corpses, a Rogon blast, a set bookmark and Tab / H
+/// moved). Run with
+/// `OPENSOW_DUMP_STATES=dir cargo test --release -p opensow-game -- --ignored streams_for_the_exe_load_check`.
+#[test]
+#[ignore]
+fn streams_for_the_exe_load_check() {
+    use opensow_formats::{save::State, Edition};
+    let Some(dir) = std::env::var_os("OPENSOW_DUMP_STATES").map(std::path::PathBuf::from) else { return };
+    let Some(mut g) = game() else { return };
+    std::fs::create_dir_all(&dir).unwrap();
+    let dump = |g: &mut Game, name: &str| {
+        for ticks in [0, 1500] {
+            let p = g.play.as_mut().unwrap();
+            if ticks > 0 {
+                live_effects(&mut p.world, ticks);
+                // a bookmark of our own and both round robins moved: the input record carries them
+                p.look_at(600.0, 500.0);
+                p.bookmark(4, true);
+                p.select_next_unit();
+                p.select_next_unit();
+                p.select_next_advancer();
+            }
+            let (beams, nukes, corpses, air, bullets) =
+                (p.world.beams.len(), p.world.nukes.len(), p.world.corpses.len(), p.world.aircraft.len(), p.world.bullets.len());
+            let payload = p.snapshot();
+            let stream = saveui::unpack_payload(&payload).unwrap().0.to_vec();
+            assert_eq!(State::parse(&stream, 1).unwrap().to_bytes().unwrap(), stream, "{name}");
+            std::fs::write(dir.join(format!("{name}_t{ticks}.state")), &stream).unwrap();
+            println!("{name} t{ticks}: bullets {bullets} beams {beams} blasts {nukes} corpses {corpses} aircraft {air}");
+        }
+    };
+    let started = |g: &mut Game, level: &str| {
+        g.start(level);
+        g.play.as_ref().is_some_and(|p| p.level == level) // M23 has no level script (.edt) and does not start
+    };
+    for level in g.levels.clone() {
+        if started(&mut g, &level) {
+            dump(&mut g, &level);
+        }
+    }
+    for map in ["01-First", "03-Gold", "05-Nuclear", "08-Island"] {
+        g.headless_skirmish(map, 0, None, None, sim::Difficulty::Normal, None);
+        if g.play.is_some() {
+            dump(&mut g, &format!("skirmish_{map}"));
+        }
+    }
+    if g.assets.game.warmonger.is_some() {
+        g.set_edition(Edition::Warmonger);
+        for level in g.levels.clone() {
+            if started(&mut g, &level) {
+                dump(&mut g, &format!("WM_{level}"));
+            }
+        }
+        g.set_edition(Edition::Original);
+    }
+}
+
+/// Runs `ticks` steps with what a save mid-game should carry: two air strikes, an Advancer on its way to destroy a building,
+/// and in the last steps a pod's Rogon blast and a few dead units still lying in their slots.
+fn live_effects(w: &mut sim::World, ticks: usize) {
+    w.air_stock[0][0] = 1;
+    w.air_stock[0][3] = 1;
+    let (cx, cy) = (w.cells.0 * 16, w.cells.1 * 16);
+    w.launch_strike(0, opensow_formats::air::AirForce::Bomber, cx, cy);
+    w.launch_strike(0, opensow_formats::air::AirForce::Tripler, cx / 2, cy / 2);
+    for _ in 0..ticks - 40 {
+        w.step();
+    }
+    let advancer = w.player_units().find(|u| u.kind == kinds::ADVANCER).map(|u| u.id);
+    if let Some(a) = advancer {
+        if let Some(t) = (0..w.structures.len()).find(|&t| w.structures[t].owner != opensow_formats::level::Owner::Player) {
+            w.order_action(a, t);
+        }
+    }
+    let at = w.player_units().next().map(|u| (u.x as i32, u.y as i32)).unwrap_or((cx, cy));
+    if let Some(pod) = w.add_unit_near(kinds::POD, 1, at.0 + 96, at.1 + 96) {
+        w.units.iter_mut().find(|u| u.id == pod).unwrap().hp = 0;
+    }
+    for u in w.units.iter_mut().filter(|u| u.kind != kinds::ADVANCER && u.kind != kinds::POD).take(3) {
+        u.hp = 0;
+    }
+    for _ in 0..40 {
+        w.step();
+    }
+}
+
+/// The numpad bookmarks and the Tab / H round robins are the input record's `+0x2e4..`, `+0x2dc` and `+0x2e0` (`0x419100`): a mission
+/// starts with the exe's nine default bookmarks (`0x414e20`), and both a save of ours and a stream-only save (the original's file)
+/// bring back the bookmarks and continue Tab and H with the unit they would have picked next.
+#[test]
+fn bookmarks_and_the_tab_and_h_round_robins_survive_a_save() {
+    use opensow_formats::save::State;
+    let Some(mut g) = game() else { return };
+    g.start("M05");
+    let p = g.play.as_mut().unwrap();
+    assert_eq!(p.bookmarks[0], (0x1c0, 0x640), "numpad 1 starts at the exe's default");
+    assert_eq!(p.bookmarks[8], (0x6c0, 0x240));
+    p.look_at(700.0, 650.0);
+    p.bookmark(2, true);
+    let mark = p.bookmarks[2];
+    p.select_next_unit();
+    p.select_next_unit();
+    p.select_next_advancer();
+    let picked = |p: &mut play::Play, advancer: bool| {
+        if advancer {
+            p.select_next_advancer()
+        } else {
+            p.select_next_unit()
+        }
+        p.world.units.iter().find(|u| u.selected).map(|u| (u.kind, u.x as i32, u.y as i32))
+    };
+    let payload = p.snapshot();
+    let (stream, _) = saveui::unpack_payload(&payload).unwrap();
+    let stock = &State::parse(stream, 1).unwrap().stocks[0];
+    assert_eq!((stock.get(0x2e4 + 16), stock.get(0x2e8 + 16)), (Some(mark.0 as u32), Some(mark.1 as u32)), "bookmark 3 in the stream");
+    let stream_only = saveui::pack_payload(stream, &[]);
+    let next_tab = picked(p, false);
+    let next_h = picked(p, true);
+    assert!(next_tab.is_some() && next_h.is_some());
+    for save in [payload.clone(), stream_only] {
+        g.start("M05");
+        let p = g.play.as_mut().unwrap();
+        p.restore(&save).unwrap();
+        assert_eq!(p.bookmarks[2], mark);
+        assert_eq!(picked(p, false), next_tab, "Tab continues");
+        assert_eq!(picked(p, true), next_h, "H continues");
+    }
+}
+
 /// The original's stream has no tutorial script (its step `[0x70f2cc]` is outside the saved ranges), so a stream without our
 /// extension loads level 0 as a plain mission; with the extension the script continues.
 #[test]

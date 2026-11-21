@@ -18,12 +18,12 @@ The per-frame key handler of the running game is `0x415ba0` (continued up to `0x
 | P (0x19) | `+0x7d` | `0x415d05` | **pause**: `0x41f660`, state `0xf`, network pause packet. The pause screen waits for P again (`0x435330`, `0x435537` for state `0x10`) | done; the port used Space before, which was wrong (docs/pause.md had Space) |
 | Arrows (0xc8/0xd0/0xcb/0xcd) and W/S/A/D (0x11/0x1f/0x1e/0x20), held | `+0x12c/0x134/0x12f/0x131`, `+0x75/0x83/0x82/0x84` | `0x415ee4..0x415f98` | scroll the map by the scroll speed `[0x552494]` (options) | done |
 | Backspace (0x0e) | `+0x72` | `0x4161b9` | the view jumps (smooth scroll `0x4588c0`) to the player's headquarters (building kind 100; every HQ is visited, the last one wins); the selection stays | done (`Play::look_at_hq`, instant jump) |
-| Tab (0x0f) | `+0x73` | `0x41622d` | round robin `[pointer+0x2dc]` over the player's units in list order: the next one with `[unit+0x2c] == 0` and `hp > 0` is selected alone and the view centres on the selection (`0x418150`) | done (`select_next_unit`) |
+| Tab (0x0f) | `+0x73` | `0x41622d` | round robin `[pointer+0x2dc]` over the player's unit slots (`[0x5b62c0 + 4*(player*1000 + slot)]`, wrapping at `[0x575734 + 4*player]`): the next one with `[unit+0x2c] == 0` and `hp > 0` is selected alone and the view centres on the selection (`0x418150`) | done (`select_next_unit`) |
 | H (0x23), numpad + (0x4e) | `+0x87`, `+0xb2` | `0x415f98` | the same round robin (`[pointer+0x2e0]`) over the units of kind 40 (Advancers); selects it alone, **no** camera move | done (`select_next_advancer`) |
 | Numpad * (0x37) | `+0x9b` | `0x4162b1` | every own unit inside the view (strict, `[0x71ceb8/c]` + `[0x49a340/4]`) that is not an air unit (`[+0x4b]`, the Advancer) and not a turret gun (kinds 109..113) gets the selected flag, all others lose it | done (`select_visible`; whole viewport, the original excludes the HUD) |
 | Numpad / (0xb5), numpad - (0x4a) | `+0x119`, `+0xae` | `0x416369`, `0x416427` | the same, but only anti-air units (`[+0x4c] == 1`: kinds 1, 2, 3, 42) / only the others | done |
 | Numpad Enter (0x9c) | `+0x100` | `0x416167` | centre the view on the box round the selected units (`0x418150`) | done |
-| Numpad 1..9 (0x4f 0x50 0x51 0x4b 0x4c 0x4d 0x47 0x48 0x49) | `+0xb3..` | `0x416564..0x416674` | jump to bookmark k (`[pointer + 0x2e4 + 8*(k-1)]`, x/y), with **no** shift held (`+0x8e`/`+0x9a`) | done (`Play::bookmark`) |
+| Numpad 1..9 (0x4f 0x50 0x51 0x4b 0x4c 0x4d 0x47 0x48 0x49) | `+0xb3..` | `0x416564..0x416674` | jump to bookmark k (`[pointer + 0x2e4 + 8*(k-1)]`, x/y: the map pixel `0x4588c0` centres the view on), with **no** shift held (`+0x8e`/`+0x9a`); every mission starts with nine defaults (`0x414e20`: x `0x1c0 / 0x400 / 0x6c0` for numpad 1-3, 4-6, 7-9 at y `0x640 / 0x440 / 0x240`), so each key moves the view from the start | done (`Play::bookmark`; saved, docs/savegame.md) |
 | Shift + numpad 1..9 | | `0x4166ac..0x416763` | set bookmark k to the middle of the view | done |
 | Space (0x39), numpad 0 (0x52) | `+0x9d`, `+0xb6` | `0x416177` | if a message line is shown (`0x4037b0`: `[list+0x14] > 0`; a line lives 480 ticks), the view jumps (`0x4588c0`) to the **position of the last message event** (`[0x6bf6b0 + player*0x20 + 4/8]`, written by `0x402ec0(id, x, y, player)` unless x / y are -1, so it survives later position-less events) | done (`World::say_at`, `event_position`, `Play::look_at_event`) |
 | X (0x2d) | `+0x91` | `0x4167e1` -> `0x418dc0` | scatter (below) | done (`World::scatter_selected`, `formats::scatter`) |
@@ -43,6 +43,8 @@ The per-frame key handler of the running game is `0x415ba0` (continued up to `0x
 **Differs from the exe:** Backspace and Space / numpad 0 jump the view at once (`Play::look_at`); the exe scrolls there smoothly (`0x4588c0`).
 
 **Differs from the exe:** Tab skips only dead units (`Play::select_next_unit`); the exe's extra test `[unit+0x2c] == 0` is not modelled.
+
+**Differs from the exe:** Tab and H step through OpenSOW's unit list in its order, the exe through the unit slots; a save stores the slot of the unit each picked last and a load maps it back, so both continue from the same unit (docs/savegame.md, Stock).
 
 **Differs from the exe:** numpad `*` / `/` / `-` take the whole window as the view (`Play::select_visible`); the exe's view rectangle leaves out the HUD.
 

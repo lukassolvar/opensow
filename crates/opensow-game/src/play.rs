@@ -4,7 +4,7 @@ use crate::assets::Assets;
 use crate::hud::{self, Hit, Inputs, Layout};
 use crate::infobox::{self, InfoBox};
 use crate::menu::Settings;
-use crate::sim::{self, Outcome, Target, World, CELL};
+use crate::sim::{self, savestate::BOOKMARKS, Outcome, Target, World, CELL};
 use crate::ui;
 use opensow_formats::cursor::{scroll_pointer, Pointer};
 use opensow_formats::effects::{bullet_draw, extra_at, Blit, Frame as FrameRule};
@@ -89,7 +89,8 @@ pub struct Play {
     /// F1's key help overlay (`[0x5baa9b]`, cleared at mission start, `0x422b4b`).
     pub show_keys: bool,
     fps: (std::time::Instant, u32, u32),
-    /// Round-robin positions of Tab (`[pointer+0x2dc]`) and H / numpad + (`[pointer+0x2e0]`), docs/hotkeys.md.
+    /// Round-robin positions of Tab (`[pointer+0x2dc]`) and H / numpad + (`[pointer+0x2e0]`), docs/hotkeys.md: here the position
+    /// in the list of own units (Advancers), the exe's the unit's slot; a save maps one to the other (`input_to_record`).
     tab_next: usize,
     adv_next: usize,
     /// Round-robin position of Shift+H over the idle Advancers (not in the original).
@@ -109,8 +110,9 @@ pub struct Play {
     /// "speed 1.5x" lines of F3 / F4 (`0x402ec0` events 0x19 / 0x1a, string 144 + `"  %.1fx"`): (world tick, text). They
     /// share the message queue but have no speech.
     pub notes: Vec<(u64, String)>,
-    /// Camera bookmarks of numpad 1-9 (`[pointer+0x2e4..0x328]`): the map pixel in the middle of the view.
-    pub bookmarks: [Option<(f32, f32)>; 9],
+    /// Camera bookmarks of numpad 1-9 (`[pointer+0x2e4..0x328]`): the map pixel in the middle of the view, from the exe's
+    /// defaults at every mission start (`0x414e20`).
+    pub bookmarks: [(i32, i32); 9],
     fit: bool,
     /// The wheel's zoom on its way: the zoom aimed at and the window point that stays put (`update` eases towards it, like the
     /// map editor's camera).
@@ -281,7 +283,7 @@ impl Play {
             attack_key: false,
             zoom_on: settings.zoom,
             notes: Vec::new(),
-            bookmarks: [None; 9],
+            bookmarks: std::array::from_fn(|k| (BOOKMARKS[2 * k] as i32, BOOKMARKS[2 * k + 1] as i32)),
             fit: true,
             zoom_to: None,
             placing: None,
@@ -343,7 +345,8 @@ impl Play {
         }
         ours.extend(self.world.snapshot());
         let number = self.level.trim_start_matches(|c: char| !c.is_ascii_digit()).parse::<u32>().unwrap_or(0);
-        let state = self.world.to_state(number, &self.progress.clone(), (self.view.x.max(0.0) as i32, self.view.y.max(0.0) as i32));
+        let mut state = self.world.to_state(number, &self.progress.clone(), (self.view.x.max(0.0) as i32, self.view.y.max(0.0) as i32));
+        self.input_to_record(&mut state.stocks[0]);
         crate::saveui::pack_payload(&state.to_bytes().unwrap_or_default(), &ours)
     }
 
@@ -367,6 +370,12 @@ impl Play {
             let f = |i: usize| f32::from_le_bytes([cam[i], cam[i + 1], cam[i + 2], cam[i + 3]]);
             self.world.restore(world)?;
             self.view = View { x: f(0), y: f(4), zoom: f(8) };
+        }
+        // the bookmarks and the Tab / H positions are the stream's input record in both kinds of save
+        if let Ok(state) = opensow_formats::save::State::parse(stream, 1) {
+            if let Some(st) = state.stocks.first() {
+                self.input_from_record(st);
+            }
         }
         self.fit = false;
         self.heard = self.world.log.len();
@@ -581,7 +590,7 @@ impl Play {
 
     /// Tab (`0x41622d`): steps round the player's units to the next live one, selects it alone and centres the view on it (`0x418150`).
     pub fn select_next_unit(&mut self) {
-        let own: Vec<usize> = (0..self.world.units.len()).filter(|&i| self.world.units[i].player == 0).collect();
+        let own = self.own_units(false);
         for _ in 0..=own.len() {
             if own.is_empty() {
                 return;
@@ -598,7 +607,7 @@ impl Play {
 
     /// H and numpad + (`0x415f98`): the same round robin over the player's Advancers (kind 40); no camera move.
     pub fn select_next_advancer(&mut self) {
-        let own: Vec<usize> = (0..self.world.units.len()).filter(|&i| self.world.units[i].player == 0 && self.world.units[i].kind == kinds::ADVANCER).collect();
+        let own = self.own_units(true);
         if own.is_empty() {
             return;
         }
@@ -740,10 +749,41 @@ impl Play {
     pub fn bookmark(&mut self, n: usize, set: bool) {
         if set {
             let (w, h) = self.viewport;
-            self.bookmarks[n] = Some((self.view.x + w as f32 / self.view.zoom / 2.0, self.view.y + h as f32 / self.view.zoom / 2.0));
-        } else if let Some((x, y)) = self.bookmarks[n] {
-            self.look_at(x, y);
+            // integer pixels like the exe's `[0x71ceb8] + width / 2`
+            self.bookmarks[n] = ((self.view.x + w as f32 / self.view.zoom / 2.0) as i32, (self.view.y + h as f32 / self.view.zoom / 2.0) as i32);
+        } else {
+            let (x, y) = self.bookmarks[n];
+            self.look_at(x as f32, y as f32);
         }
+    }
+
+    /// The local player's input record (`Class::Stock`, docs/savegame.md): the nine bookmarks and, for Tab and H, the slot of the
+    /// unit each picked last (the exe counts slots, `0x41622d`, `0x415f98`).
+    fn input_to_record(&self, st: &mut opensow_formats::saveobj::Object) {
+        for (k, (x, y)) in self.bookmarks.iter().enumerate() {
+            st.set(0x2e4 + 8 * k as u32, *x as u32);
+            st.set(0x2e8 + 8 * k as u32, *y as u32);
+        }
+        let slot = |own: Vec<usize>, at: usize| own.get(at % own.len().max(1)).map(|&i| self.world.units[i].slot).filter(|&s| s != u32::MAX).unwrap_or(0);
+        st.set(0x2dc, slot(self.own_units(false), self.tab_next));
+        st.set(0x2e0, slot(self.own_units(true), self.adv_next));
+    }
+
+    fn input_from_record(&mut self, st: &opensow_formats::saveobj::Object) {
+        for k in 0..9 {
+            let w = |o: u32| st.get(o + 8 * k as u32).map(|v| v as i32);
+            if let (Some(x), Some(y)) = (w(0x2e4), w(0x2e8)) {
+                self.bookmarks[k] = (x, y);
+            }
+        }
+        let at = |own: Vec<usize>, slot: Option<u32>| own.iter().position(|&i| Some(self.world.units[i].slot) == slot).unwrap_or(0);
+        self.tab_next = at(self.own_units(false), st.get(0x2dc));
+        self.adv_next = at(self.own_units(true), st.get(0x2e0));
+    }
+
+    /// Indexes of the player's units (only the Advancers), in the order Tab and H step through them.
+    fn own_units(&self, advancers: bool) -> Vec<usize> {
+        (0..self.world.units.len()).filter(|&i| self.world.units[i].player == 0 && (!advancers || self.world.units[i].kind == kinds::ADVANCER)).collect()
     }
 
     /// The rally button or the R key (`0x416cf9`, `0x416769`): the selected own factory becomes the target of the next map click.
