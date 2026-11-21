@@ -266,6 +266,11 @@ impl World {
             let waiting = route.len() > 1 && route[k] != at;
             if waiting {
                 self.retarget_to_free_cell(i);
+                // 0x473255 drops the route's first cell after the search whether it found a step or not, so the next round's
+                // look-ahead cell lies one further on, past a unit standing on this one
+                if !self.units[i].path.is_empty() {
+                    self.units[i].path.remove(0);
+                }
             } else {
                 // nothing to avoid (the route's last cell is the unit's own): walk straight to the first cell
                 u.step = u.path.first().copied();
