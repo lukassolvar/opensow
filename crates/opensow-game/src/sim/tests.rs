@@ -3131,6 +3131,60 @@ fn a_custom_map_sets_unlock_points_headquarters_without_advancers_and_neutral_st
     assert_eq!(w.units.iter().filter(|u| u.kind == kinds::ADVANCER).count(), 2);
 }
 
+fn hq_level(markers: Vec<opensow_formats::level::Marker>) -> (opensow_formats::map::Map, opensow_formats::level::Level) {
+    use opensow_formats::custommap::{CustomMap, Terrain};
+    use opensow_formats::level::Object;
+    use opensow_formats::map::{Cell, Map};
+    let (mw, mh) = (40u32, 40u32);
+    let map = Map {
+        a: 0,
+        b: 0,
+        width: mw,
+        height: mh,
+        cells: (0..mw * mh).map(|i| Cell { x: (i % mw) as u8, y: (i / mw) as u8, blocked: false, border: false, no_build: false, no_marks: false }).collect(),
+    };
+    let hq = |x: i32, y: i32, owner: i32| {
+        let mut raw = [0i32; 19];
+        (raw[0], raw[1], raw[14], raw[16], raw[17], raw[18]) = (123, kinds::HEADQUARTERS, owner, x, y, 100);
+        Object { kind: kinds::HEADQUARTERS, cell_x: x, cell_y: y, raw }
+    };
+    let mut level = CustomMap::new("t", Terrain { warmonger: false, mission: 1 }).level;
+    level.objects = vec![hq(2, 2, 0), hq(30, 30, 1)];
+    level.markers = markers;
+    (map, level)
+}
+
+/// `0x41db60`: an Advancer marker is not spawned when the level header's no-Advancer word of its side (34 player, 35 enemy) is 1.
+#[test]
+fn an_advancer_marker_of_a_side_without_advancers_is_not_spawned() {
+    use opensow_formats::level::Marker;
+    let adv = |player: i32, x: i32| Marker { kind: kinds::ADVANCER, player, x: x * CELL, y: 3 * CELL };
+    let (map, mut level) = hq_level(vec![adv(0, 3), adv(1, 31)]);
+    level.header[34] = 1;
+    let w = World::from_level(&map, &level);
+    let sides: Vec<i32> = w.units.iter().filter(|u| u.kind == kinds::ADVANCER).map(|u| u.player).collect();
+    assert_eq!(sides, vec![1], "the blue marker is dropped, the green one kept");
+}
+
+/// `0x42e36c`: in mission 7 the player's headquarters builds no Advancer until the countdown has run out (`[0x5baa99]`, the
+/// Advancer the briefing promises with the reinforcements); the enemy's and other missions' headquarters are not held back.
+#[test]
+fn in_mission_7_the_player_gets_an_advancer_only_when_the_countdown_ends() {
+    let advancers = |w: &World, side: i32| w.units.iter().filter(|u| u.kind == kinds::ADVANCER && u.player == side).count();
+    let (map, level) = hq_level(Vec::new());
+    let mut w = World::from_level(&map, &level);
+    w.set_mission(Some(7));
+    w.step_hq();
+    assert_eq!((advancers(&w, 0), advancers(&w, 1)), (0, 1), "mission 7: no blue Advancer during the countdown");
+    w.timer_expired = true;
+    w.step_hq();
+    assert_eq!(advancers(&w, 0), 1, "the countdown is over: the HQ builds one");
+    let mut w = World::from_level(&map, &level);
+    w.set_mission(Some(10));
+    w.step_hq();
+    assert_eq!(advancers(&w, 0), 1, "other missions replace it at once");
+}
+
 /// Key X (`0x418dc0`, `formats::scatter`): each unit walks 6 half cells past its own spot, away from the middle of the box; a
 /// blocked cell makes it try 4, then 2.
 #[test]

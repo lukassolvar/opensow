@@ -4,15 +4,17 @@ use super::*;
 
 impl World {
     /// A headquarters whose Advancer is gone builds a new one on the cell diagonally next to it (`0x42e38d`), unless the level
-    /// header forbids it for that side (words 34 / 35).
+    /// header forbids it for that side (words 34 / 35). In mission 7 the player's waits for the end of the countdown
+    /// (`0x42e36c`, `[0x5baa99]`): its Advancer comes with the reinforcements.
     pub(super) fn step_hq(&mut self) {
+        let held_back = self.mission_no == Some(7) && !self.timer_expired;
         for k in 0..self.structures.len() {
             let s = &self.structures[k];
             if s.kind_id != kinds::HEADQUARTERS || !s.alive() {
                 continue;
             }
             let Some(side) = side_of(s.owner) else { continue };
-            if self.no_advancer_respawn[side] || self.hq_without_advancer.contains(&k) {
+            if self.no_advancer_respawn[side] || self.hq_without_advancer.contains(&k) || (side == 0 && held_back) {
                 continue;
             }
             let alive = s.advancer.is_some_and(|id| self.unit(id).is_some_and(|u| u.hp > 0));
