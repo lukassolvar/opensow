@@ -64,7 +64,7 @@ Laid out from the exe's widget positions, see docs/hud.md (counters top left, ra
 
   **Differs from the exe:** 2560x1440, 3840x2160 and NATIVE are not in the exe's resolution table, the exe's first run is 1024x768 (docs/options.md), and it has no scaling of a smaller frame into a larger window.
 
-- **Chat line and cheat codes** (original feature, docs/chat.md): Enter opens the line, Enter sends, Esc cancels, Tab recalls the last line; nine cheat phrases (`give me money`, `give me fighter`, ...) are the exe's own. Headless: `--chat TEXT [--chat-send]`.
+- **Chat line and cheat codes** (original feature, docs/chat.md): Enter opens the line, Enter sends, Esc cancels, Tab recalls the last line; nine cheat phrases (`give me money`, `give me fighter`, ...) are the exe's own; the Warmonger campaign takes its exe's ten (`bring me money`, ..., `rahman is son of a bitch`). Headless: `--chat TEXT [--chat-send]`.
 
 ## Dev tools (`devtools.rs`, not in the exe)
 `F12` or the backquote key shows / hides an overlay panel in the game's own look (dark green plate, small font, green frames); drag its title bar to move it. While hidden, a small badge at the bottom left lists the tools that are still on (click it to open the panel). Tools:

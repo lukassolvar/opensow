@@ -54,4 +54,4 @@ Warmonger has no language file: each English string is a literal in its exe. Eve
 - **Countdown:** "Remaining time " (`0x483cf0`) instead of "Remaining Time"; no visible difference, the countdown is drawn uppercase.
 - **Not in Warmonger's exe:** the game-speed readout "speed" (F3 / F4), the statistics and load/save labels and the menu strings (Warmonger's menu skin has them in its pictures). OpenSOW uses the base game's screens for both campaigns.
 - Tutorial lines are reworded (e.g. "basic functions" for "basic features"); OpenSOW plays the base game's tutorial `M00` for both campaigns, so they are not used.
-- Not in the base exe: a typed line "Yeah! Let's Finish him!" at `0x4261da` (a key-sequence cheat that adds credits; not traced further, not ported).
+- Cheats: Warmonger's exe has other phrases for the base game's cheats (`bring me money`, `speed up research`, ...) and one of its own, `rahman is son of a bitch` (+2222 credits and one of each air force; the chat line shows the reply "Yeah! Let's Finish him!", string `0x4837d8`). OpenSOW uses Warmonger's phrases while its campaign is played (docs/chat.md).

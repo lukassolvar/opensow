@@ -1301,16 +1301,25 @@ impl World {
                 _ => return false,
             },
             Cheat::DrawFps => return false,
-            force => {
-                // `0x453e80`: the force joins the stock and its "ready" message plays (position -1, -1); the exe also asks for
-                // sound 49, which the install lacks
-                let code = force.air_code().expect("the other cheats are handled above");
-                let Some(g) = AirForce::from_code(code).and_then(|f| HEADER_ORDER.iter().position(|&h| h == f)) else { return false };
-                self.air_stock[0][g] += 1;
-                if let Some(id) = msg::force_ready(code) {
-                    self.say(0, id);
+            Cheat::Rahman => {
+                // Warmonger `0x4261da`; the reply that replaces the typed line is shown by `Play::chat_send`
+                self.credits[0] += cheats::RAHMAN_MONEY;
+                for code in cheats::RAHMAN_FORCES {
+                    self.give_force(code);
                 }
             }
+            force => return self.give_force(force.air_code().expect("the other cheats are handled above")),
+        }
+        true
+    }
+
+    /// `0x453e80` (Warmonger `0x44e360`): one air force joins the local player's stock and its "ready" message plays (position
+    /// -1, -1); the exe also asks for sound 49, which the install lacks.
+    fn give_force(&mut self, code: i32) -> bool {
+        let Some(g) = AirForce::from_code(code).and_then(|f| HEADER_ORDER.iter().position(|&h| h == f)) else { return false };
+        self.air_stock[0][g] += 1;
+        if let Some(id) = msg::force_ready(code) {
+            self.say(0, id);
         }
         true
     }

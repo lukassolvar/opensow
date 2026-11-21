@@ -20,6 +20,19 @@ fn statistics_count_lost_units() {
     assert_eq!(w.stats[0][3], 0);
 }
 
+/// Warmonger's own chat cheat (`0x4261da`, docs/chat.md): +2222 credits and one of every air force with its "ready" message.
+#[test]
+fn the_warmonger_cheat_pays_and_arms() {
+    let mut w = open_world(20, 20);
+    w.credits[0] = 100;
+    assert!(w.apply_cheat(Cheat::Rahman));
+    assert_eq!((w.credits[0], w.credits[1]), (2322, 0));
+    assert_eq!((w.air_stock[0], w.air_stock[1]), ([1; 5], [0; 5]), "one of each force for the local player only");
+    let ready: Vec<u8> = cheats::RAHMAN_FORCES.iter().filter_map(|&c| msg::force_ready(c)).collect();
+    assert_eq!(ready.len(), 5);
+    assert_eq!(w.log.iter().map(|&(_, id)| id).collect::<Vec<_>>(), ready, "the ready messages in the exe's order");
+}
+
 /// Dev tools (`devtools.rs`): the cheats only touch what they promise.
 #[test]
 fn cheats_keep_units_alive_fill_the_purse_and_freeze_the_enemy() {

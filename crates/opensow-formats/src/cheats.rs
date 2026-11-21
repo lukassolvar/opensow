@@ -4,6 +4,9 @@
 //! text, character by character with a length test before each one, against nine phrases; a phrase matches when the text
 //! **starts with it** (nothing checks what follows) and the comparison is case sensitive (the typed text keeps the case the
 //! shift key gave). Each phrase has its own effect.
+//!
+//! Warmonger's exe (`0x425da0`) has the same effects under other phrases ([`WARMONGER_PHRASES`]) plus one of its own,
+//! [`Cheat::Rahman`].
 
 /// One of the exe's cheat phrases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,9 +29,12 @@ pub enum Cheat {
     OneMinute,
     /// `draw fps` (`0x428460`): shows the frame counter (`[0x5baad5]`, drawn by `0x4302e0` as "FPS: n" at the screen middle).
     DrawFps,
+    /// Warmonger only, `rahman is son of a bitch` (`0x425e50`): +2222 credits and one of each air force; the chat line's
+    /// text becomes [`RAHMAN_LINE`].
+    Rahman,
 }
 
-/// The phrases in the exe's order of comparison.
+/// The phrases in the exe's order of comparison (`State of War.exe`).
 pub const PHRASES: [(&str, Cheat); 9] = [
     ("give me money", Cheat::Money),
     ("speed up my research", Cheat::Research),
@@ -38,6 +44,20 @@ pub const PHRASES: [(&str, Cheat); 9] = [
     ("give me carryall", Cheat::Carryall),
     ("give me tripler", Cheat::Tripler),
     ("give me one minute", Cheat::OneMinute),
+    ("draw fps", Cheat::DrawFps),
+];
+
+/// Warmonger's phrases in its exe's order of comparison (`0x425da0`): its own cheat first, then the base game's effects.
+pub const WARMONGER_PHRASES: [(&str, Cheat); 10] = [
+    ("rahman is son of a bitch", Cheat::Rahman),
+    ("bring me money", Cheat::Money),
+    ("speed up research", Cheat::Research),
+    ("bring me fighter", Cheat::Fighter),
+    ("bring me bomber", Cheat::Bomber),
+    ("bring me meteor storm", Cheat::MeteorStorm),
+    ("bring me carryall", Cheat::Carryall),
+    ("bring me tripler", Cheat::Tripler),
+    ("bring me one minute", Cheat::OneMinute),
     ("draw fps", Cheat::DrawFps),
 ];
 
@@ -60,9 +80,20 @@ pub const MONEY: i32 = 1000;
 /// Research points the research cheat adds (`add [0x517b04 + 4*player], 0xc8`).
 pub const RESEARCH: i32 = 200;
 
-/// The cheat a typed line triggers: every phrase is tried in order, the first one the text starts with wins.
-pub fn parse(text: &str) -> Option<Cheat> {
-    PHRASES.iter().find(|(p, _)| text.starts_with(p)).map(|&(_, c)| c)
+/// Credits the Warmonger cheat adds (`add [0x608f70 + 4*player], 0x8ae`).
+pub const RAHMAN_MONEY: i32 = 2222;
+/// The air forces the Warmonger cheat hands out, in the exe's order (`0x44e360` with 0x21, 0x1f, 0x22, 0x1e, 0x20).
+pub const RAHMAN_FORCES: [i32; 5] = [33, 31, 34, 30, 32];
+/// The text the Warmonger cheat puts in place of the typed line (string `0x4837d8`); the line is then shown like any other.
+pub const RAHMAN_LINE: &str = "Yeah! Let's Finish him!";
+
+/// The cheat a typed line triggers in `edition`: every phrase is tried in order, the first one the text starts with wins.
+pub fn parse(text: &str, edition: crate::Edition) -> Option<Cheat> {
+    let phrases: &[(&str, Cheat)] = match edition {
+        crate::Edition::Original => &PHRASES,
+        crate::Edition::Warmonger => &WARMONGER_PHRASES,
+    };
+    phrases.iter().find(|(p, _)| text.starts_with(p)).map(|&(_, c)| c)
 }
 
 /// The chat line stops taking characters once its pixel width reaches this (`cmp [ebp-0x18], 0x18b` after the width query
@@ -72,21 +103,34 @@ pub const MAX_LINE_WIDTH: i32 = 0x18b;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Edition::{Original, Warmonger};
 
     #[test]
     fn every_phrase_is_found() {
         for &(p, c) in &PHRASES {
-            assert_eq!(parse(p), Some(c), "{p}");
+            assert_eq!(parse(p, Original), Some(c), "{p}");
+        }
+        for &(p, c) in &WARMONGER_PHRASES {
+            assert_eq!(parse(p, Warmonger), Some(c), "{p}");
         }
     }
 
     #[test]
     fn a_phrase_matches_by_prefix_and_case_sensitively() {
-        assert_eq!(parse("give me moneyyy"), Some(Cheat::Money));
-        assert_eq!(parse("give me mone"), None);
-        assert_eq!(parse("Give me money"), None);
-        assert_eq!(parse("hello"), None);
-        assert_eq!(parse(""), None);
+        assert_eq!(parse("give me moneyyy", Original), Some(Cheat::Money));
+        assert_eq!(parse("give me mone", Original), None);
+        assert_eq!(parse("Give me money", Original), None);
+        assert_eq!(parse("hello", Original), None);
+        assert_eq!(parse("", Original), None);
+        assert_eq!(parse("rahman is son of a bitch!", Warmonger), Some(Cheat::Rahman));
+        assert_eq!(parse("Rahman is son of a bitch", Warmonger), None);
+    }
+
+    #[test]
+    fn each_edition_takes_only_its_own_phrases() {
+        assert_eq!(parse("give me money", Warmonger), None);
+        assert_eq!(parse("bring me money", Original), None);
+        assert_eq!(parse("rahman is son of a bitch", Original), None);
     }
 
     #[test]
