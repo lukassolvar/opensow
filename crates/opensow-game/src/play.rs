@@ -156,6 +156,8 @@ pub struct Play {
     lang: Option<opensow_formats::lang::LangFile>,
     /// Warmonger's own English hint lines (read from its exe), for the Warmonger campaign in English.
     wm_hints: Option<opensow_formats::warmonger::Hints>,
+    /// The campaign being played: each exe has its own cheat phrases (`formats::cheats`).
+    edition: opensow_formats::Edition,
     /// GDI stand-in for the satellite-protection label (11 px Times New Roman bold).
     label_font: Option<crate::gdi::Gdi>,
     /// Unicode text for the HUD messages, countdown, hints and pause banner when the language is not English: the bitmap fonts only
@@ -309,6 +311,7 @@ impl Play {
                 .and_then(|p| std::fs::read(p).ok())
                 .and_then(|d| opensow_formats::lang::LangFile::parse(&d).ok())
                 .map(|f| f.with_supplement(assets.game.language())),
+            edition: assets.game.edition,
             wm_hints: (assets.game.edition == opensow_formats::Edition::Warmonger && assets.game.language() == opensow_formats::lang::Language::English)
                 .then(|| assets.game.warmonger_exe().and_then(|p| std::fs::read(p).ok()).and_then(|d| opensow_formats::warmonger::parse_hints(&d)))
                 .flatten(),
@@ -703,18 +706,22 @@ impl Play {
         self.chat = None;
     }
 
-    /// Enter on an open line: a cheat phrase takes effect (single player, `0x426d73`), any other text becomes a chat line of
-    /// the local player; the line closes either way.
+    /// Enter on an open line: a cheat phrase of the campaign's exe takes effect (single player, `0x426d73`; Warmonger
+    /// `0x425e2b`), then the line becomes a chat line of the local player (`0x416021`), cheat or not; Warmonger's own cheat
+    /// replaces the text first. The line closes either way.
     pub fn chat_send(&mut self) {
+        use opensow_formats::cheats::{self, Cheat};
         let Some(text) = self.chat.take().filter(|t| !t.is_empty()) else { return };
         self.last_chat = text.clone();
-        match opensow_formats::cheats::parse(&text) {
-            Some(opensow_formats::cheats::Cheat::DrawFps) => self.show_fps = true,
+        let cheat = cheats::parse(&text, self.edition);
+        match cheat {
+            Some(Cheat::DrawFps) => self.show_fps = true,
             Some(c) => {
                 self.world.apply_cheat(c);
             }
-            None => self.world.say_chat(&text),
+            None => {}
         }
+        self.world.say_chat(if cheat == Some(Cheat::Rahman) { cheats::RAHMAN_LINE } else { &text });
     }
 
     /// Space / numpad 0 (`0x416177`): jumps to where the last message event happened, while a message line is shown.

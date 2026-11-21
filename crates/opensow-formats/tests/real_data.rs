@@ -297,7 +297,11 @@ struct Exe {
 
 impl Exe {
     fn open(game: &GameDir) -> Option<Exe> {
-        let data = std::fs::read(game.root.join("State of War.exe")).ok()?;
+        Exe::read(&game.root.join("State of War.exe"))
+    }
+
+    fn read(path: &std::path::Path) -> Option<Exe> {
+        let data = std::fs::read(path).ok()?;
         let u32at = |o: usize| u32::from_le_bytes(data[o..o + 4].try_into().unwrap());
         let u16at = |o: usize| u16::from_le_bytes(data[o..o + 2].try_into().unwrap()) as usize;
         let pe = u32at(0x3c) as usize;
@@ -2431,6 +2435,64 @@ fn cheat_phrases_match_the_exes_key_function() {
     // the line stops growing once its width reaches 0x18b
     assert!(find(&[0x81, 0x7D, 0xE8, 0x8B, 0x01, 0x00, 0x00]).is_some(), "cmp [ebp-0x18], 0x18b");
     assert_eq!(MAX_LINE_WIDTH, 0x18b);
+}
+
+/// Warmonger's chat cheats (`0x425da0`): its phrases (its own first, then the base game's effects under other words) and
+/// what its own cheat hands out are the ones in `formats::cheats` (docs/chat.md).
+#[test]
+fn warmonger_cheat_phrases_match_its_exe() {
+    use opensow_formats::cheats::{MONEY, RAHMAN_FORCES, RAHMAN_LINE, RAHMAN_MONEY, RESEARCH, WARMONGER_PHRASES};
+    let Some(game) = GameDir::locate() else { return eprintln!("game not found, skipping") };
+    let Some(exe) = game.warmonger_exe().and_then(|p| Exe::read(&p)) else { return eprintln!("Warmonger not found, skipping") };
+    let (start, end) = (0x425da0u32, 0x427a10u32);
+    let code = exe.at(start, (end - start) as usize);
+    // `push index; lea ecx,[ecx+4]; call [0x47a458]; cmp al, imm8`; index 13 is `push edi` (edi holds the typed character, 13)
+    let call = [0x8D, 0x49, 0x04, 0xFF, 0x15, 0x58, 0xA4, 0x47, 0x00, 0x3C];
+    let mut phrases: Vec<String> = Vec::new();
+    for i in 2..code.len() - 11 {
+        if code[i..i + 10] != call {
+            continue;
+        }
+        let index = match (code[i - 2], code[i - 1]) {
+            (0x6A, n) => n as usize,
+            (_, 0x57) => 13,
+            _ => continue,
+        };
+        if index == 0 {
+            phrases.push(String::new());
+        }
+        let p = phrases.last_mut().expect("the first comparison is character 0");
+        assert_eq!(p.len(), index, "characters come in order");
+        p.push(code[i + 10] as char);
+    }
+    let ours: Vec<&str> = WARMONGER_PHRASES.iter().map(|&(p, _)| p).collect();
+    assert_eq!(phrases, ours);
+    let find = |pat: &[u8]| code.windows(pat.len()).position(|w| w == pat);
+    // its own cheat: the line becomes string 0x4837d8 (`push 0x4837d8; lea ecx,[ecx+4]; call [0x47a5c8]`), +0x8ae credits, then
+    // `push code; add ecx, 0x7027e0; call 0x44e360` per force
+    let text = find(&[0x68, 0xD8, 0x37, 0x48, 0x00, 0x8D, 0x49, 0x04, 0xFF, 0x15, 0xC8, 0xA5, 0x47, 0x00]).expect("line assignment");
+    assert_eq!(exe.at(0x4837d8, RAHMAN_LINE.len() + 1), [RAHMAN_LINE.as_bytes(), &[0]].concat());
+    assert!(find(&[0x81, 0x04, 0x85, 0x70, 0x8F, 0x60, 0x00, 0xAE, 0x08, 0x00, 0x00]).is_some_and(|m| m > text), "+2222 credits");
+    assert_eq!(RAHMAN_MONEY, 0x8ae);
+    let mut at = text;
+    for &c in &RAHMAN_FORCES {
+        let push = code[at..].windows(2).position(|w| w == [0x6A, c as u8]).expect("push code") + at;
+        let call = code[push..].windows(6).position(|w| w == [0x81, 0xC1, 0xE0, 0x27, 0x70, 0x00]).expect("add ecx, 0x7027e0") + push;
+        let rel = i32::from_le_bytes(code[call + 7..call + 11].try_into().unwrap());
+        assert_eq!(code[call + 6], 0xE8);
+        assert_eq!((start as i64 + call as i64 + 11 + rel as i64) as u32, 0x44e360, "{c}");
+        at = call + 11;
+    }
+    // the shared effects keep the base game's amounts and codes: money and research adds, then one force per phrase
+    let money = find(&[0x81, 0x04, 0x85, 0x70, 0x8F, 0x60, 0x00, 0xE8, 0x03, 0x00, 0x00]).expect("money add");
+    let research = find(&[0x81, 0x04, 0x85, 0x7C, 0x8F, 0x60, 0x00, 0xC8, 0x00, 0x00, 0x00]).expect("research add");
+    assert_eq!((MONEY, RESEARCH), (0x3e8, 0xc8));
+    assert!(at <= money && money < research);
+    let mut at = research;
+    for &(_, c) in WARMONGER_PHRASES.iter().filter(|(_, c)| c.air_code().is_some()) {
+        let pat = [0x6A, c.air_code().unwrap() as u8, 0x81, 0xC1, 0xE0, 0x27, 0x70, 0x00, 0xE8];
+        at += code[at..].windows(pat.len()).position(|w| w == pat).unwrap_or_else(|| panic!("{c:?}")) + 1;
+    }
 }
 
 /// Every installed `.srf` / `.srfa` survives to_jpeg -> from_jpeg unchanged.

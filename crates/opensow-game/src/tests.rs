@@ -1023,7 +1023,8 @@ fn enter_opens_the_chat_line_and_cheat_phrases_take_effect() {
     let wd = &g.play.as_ref().unwrap().world;
     assert_eq!((wd.credits[0] - before.0, wd.research[0] - before.1), (1000, 200));
     assert!((0..5).all(|i| wd.air_stock[0][i] == before.2[i] + 1), "one of every force");
-    assert!(wd.chat.is_empty(), "a cheat is not echoed");
+    assert_eq!(wd.chat.len(), 7, "every cheat is shown as a chat line too");
+    assert_eq!(wd.chat.last().map(|c| c.1.as_str()), Some("give me tripler"));
     // a wrong case is only a chat line; Tab brings the last line back
     say(&mut g, "Give me money");
     let wd = &g.play.as_ref().unwrap().world;
@@ -1042,6 +1043,48 @@ fn enter_opens_the_chat_line_and_cheat_phrases_take_effect() {
     assert_eq!(g.play.as_ref().unwrap().world.timer, Some((4, 10, 0)), "not after the countdown ended");
     say(&mut g, "draw fps");
     assert!(g.play.as_ref().unwrap().show_fps);
+}
+
+/// The Warmonger campaign takes its exe's phrases (docs/chat.md): its own cheat and "bring me ..." work, the base game's do not.
+#[test]
+fn the_warmonger_campaign_takes_its_own_cheat_phrases() {
+    use opensow_formats::Edition;
+    let Some(mut g) = game() else { return };
+    if g.assets.game.warmonger.is_none() {
+        return;
+    }
+    let (w, h) = (1024, 768);
+    g.set_edition(Edition::Warmonger);
+    g.start("M01");
+    g.update(0.0, w, h);
+    let say = |g: &mut Game, text: &str| {
+        g.key(&Key::Named(NamedKey::Enter), true, w, h);
+        for c in text.chars() {
+            match c {
+                ' ' => g.key(&Key::Named(NamedKey::Space), true, w, h),
+                _ => g.key(&Key::Character(SmolStr::new(c.to_string())), true, w, h),
+            };
+        }
+        g.key(&Key::Named(NamedKey::Enter), true, w, h);
+    };
+    let (credits, stock) = {
+        let wd = &g.play.as_ref().unwrap().world;
+        (wd.credits[0], wd.air_stock[0])
+    };
+    say(&mut g, "give me money");
+    let wd = &g.play.as_ref().unwrap().world;
+    assert_eq!(wd.credits[0], credits, "the base game's phrase is only a chat line here");
+    assert_eq!(wd.chat.last().map(|c| c.1.as_str()), Some("give me money"));
+    say(&mut g, "bring me money");
+    say(&mut g, "rahman is son of a bitch");
+    let wd = &g.play.as_ref().unwrap().world;
+    assert_eq!(wd.credits[0] - credits, 1000 + 2222);
+    assert!((0..5).all(|i| wd.air_stock[0][i] == stock[i] + 1));
+    assert_eq!(wd.chat.last().map(|c| c.1.as_str()), Some("Yeah! Let's Finish him!"), "the reply is shown, not the phrase");
+    // Tab (not in Warmonger's exe) brings back what was typed
+    g.key(&Key::Named(NamedKey::Enter), true, w, h);
+    g.key(&Key::Named(NamedKey::Tab), true, w, h);
+    assert_eq!(g.play.as_ref().unwrap().chat.as_deref(), Some("rahman is son of a bitch"));
 }
 
 #[test]
