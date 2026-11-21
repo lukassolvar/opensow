@@ -1639,6 +1639,22 @@ fn a_unit_standing_on_the_look_ahead_cell_holds_the_walker_back() {
     assert!(w.units[i].step.is_some());
 }
 
+/// 0x473255: the planner drops the route's first cell after every local search, also a failed one, so a unit standing on the
+/// look-ahead cell only holds the walker back for a round: the next look-ahead cell lies past it and the walker goes around.
+#[test]
+fn a_unit_standing_far_ahead_on_the_route_is_walked_around() {
+    for gap in [6, 7, 10] {
+        let mut w = open_world(40, 12);
+        let id = w.add_unit(7, 0, 2 * CELL + 16, 5 * CELL + 16);
+        w.add_unit(7, 0, (2 + gap) * CELL + 16, 5 * CELL + 16);
+        w.order_move(id, (30, 5), None);
+        for _ in 0..3000 {
+            w.step();
+        }
+        assert_eq!(w.unit(id).unwrap().cell(), (30, 5), "a unit standing {gap} cells ahead is walked around");
+    }
+}
+
 /// Runs the destruction animations to their end; returns the passes it took.
 fn settle(w: &mut World) -> usize {
     let mut passes = 0;
