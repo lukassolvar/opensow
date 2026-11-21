@@ -114,8 +114,8 @@ impl World {
                 self.research[side] = (self.research[side] + gain).min(RESEARCH_CAP);
             }
         }
-        // crossing a turret price (200..1000) or 500 research tells the player (0x42d88c, 0x42d8f5..0x42d98a)
-        if [200, 400, 600, 800, 1000].iter().any(|&p| before.0 < p && self.credits[0] >= p) {
+        // crossing the price (200..1000) of an available turret tier or 500 research tells the player (0x42d88c, 0x42d8f5..0x42d98a)
+        if (1..=5).any(|t| self.turret_flags[0][t - 1] && before.0 < 200 * t as i32 && self.credits[0] >= 200 * t as i32) {
             self.say(0, msg::NEW_TURRET);
         }
         if before.1 < 500 && self.research[0] >= 500 {

@@ -3308,3 +3308,24 @@ fn the_advancer_route_goes_around_another_advancer() {
     let route = w.find_path_on(true, (2, 5), (6, 5)).unwrap();
     assert_eq!(route.last(), Some(&centre((6, 5))));
 }
+
+#[test]
+fn new_turret_message_only_for_turret_tiers_the_level_allows() {
+    // `0x42d8f5..0x42d98a`: each price crossing speaks only when that tier's byte `[player+0x70baf5..f9]` is set
+    let crossings = |start: i32| {
+        let mut w = open_world(24, 24);
+        w.structures.clear();
+        let mut mine = factory(Owner::Player, 13536, 105);
+        mine.kind = ObjectKind::GoldMine;
+        mine.slots.clear();
+        w.add_structure(mine);
+        w.turret_flags[0] = [true, true, true, false, false];
+        w.credits[0] = start;
+        w.tick = 59;
+        w.step();
+        w.log.iter().filter(|&&(_, id)| id == msg::NEW_TURRET).count()
+    };
+    assert_eq!(crossings(399), 1, "tier 2 is available");
+    assert_eq!(crossings(799), 0, "tier 4 is not available");
+    assert_eq!(crossings(999), 0, "tier 5 is not available");
+}
