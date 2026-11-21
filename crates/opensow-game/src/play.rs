@@ -1689,13 +1689,15 @@ impl Play {
         let (mx, my) = self.to_map(self.cursor.0, self.cursor.1);
         let cell = (mx.div_euclid(CELL), my.div_euclid(CELL));
         let (fw, _) = opensow_formats::buildings::footprint(24 + tier as i32).map_or((1, 1), |(a, b, _)| (a, b));
-        // the gun's reach from that cell (not in the original): the turret searches its targets from its top-left cell over the
-        // range rings of its top (kind 108 + tier, `World::find_target`); the anti-air turret's reach is tinted blue. Options
-        // page 2 "Turret range" turns it off.
+        // the gun's reach (not in the original): the turret searches its targets from its gun's cell (the lower cell of the 1x2
+        // turrets 4 and 5) over the range rings of its top (kind 108 + tier, `World::find_target`); the anti-air turret's reach is
+        // tinted blue. Options page 2 "Turret range" turns it off.
         if let Some((min, max)) = sim::weapon_range(108 + tier as i32).filter(|_| self.turret_range) {
             let colour = if sim::is_anti_air(108 + tier as i32) { (90, 170, 255) } else { (255, 200, 60) };
+            let (gx, gy) = opensow_formats::buildings::turret_top_pos(24 + tier as i32, cell);
+            let gun = (gx.div_euclid(CELL), gy.div_euclid(CELL));
             for &(dx, dy) in self.rings.target_search(min as usize, (max as usize).min(63)) {
-                let (x, y) = (cell.0 + dx as i32, cell.1 + dy as i32);
+                let (x, y) = (gun.0 + dx as i32, gun.1 + dy as i32);
                 let (x0, y0) = self.view.to_screen((x * CELL) as f32, (y * CELL) as f32);
                 let (x1, y1) = self.view.to_screen(((x + 1) * CELL) as f32, ((y + 1) * CELL) as f32);
                 rect(buf, w, h, x0, y0, x1, y1, colour, 38);
