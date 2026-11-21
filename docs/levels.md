@@ -30,8 +30,8 @@ Word layout: `224, unit kind, player index, x px, y px`. The loader (`0x41da00`)
 - **Kind 40 = Advancer** (800 HP). Manual: "most important unit", repairs/destroys turrets, captures buildings; Cross of Fire has "two
   Headquarters and two Advancers" per side = 4 kind-40 markers. Median start distance to its own HQ is 2.1 cells over 50 levels.
   The loader skips it when a per-player flag (`[0x5179f0 + player*4]`, `0x41db60`) is 1. **Earlier notes calling it a "start position" were wrong.**
-  OpenSOW: every marker of a known kind becomes a unit (`World::add_unit` in `World::from_level`).
-- **Differs from the exe:** OpenSOW does not read the flag `[0x5179f0 + player*4]` (its source is not traced; `0x41d7d4` copies it to `[0x5baab8]`), so an Advancer marker is always spawned.
+  The flag is header word 34 (player) / 35 (enemy), the same word that forbids the HQ's replacement Advancer (the header block is read to `0x517970`; `0x41d7d4` copies it to `[0x5baab8]`, docs/ai.md). Warmonger: `0x41d12c`.
+  OpenSOW: every marker of a known kind becomes a unit (`World::add_unit` in `World::from_level`), except an Advancer of a side whose word is 1; test `an_advancer_marker_of_a_side_without_advancers_is_not_spawned`.
 - **Kinds 1-15 = ground units**, five weapon classes x three tiers: `class = (kind-1)/3`, `tier = (kind-1)%3+1`.
   Classes (from the weapon constructor's top-sprite table, `docs/art.md`): 0 anti-air `AA`, 1 artillery `A`, 2 cannon `C`, 3 flamer `F`, 4 special `S`.
   Max HP by kind: 180,400,550 | 180,360,450 | 180,360,500 | 240,430,600 | 210,400,550. Levels only ever place tier 1 and 2 (kinds 1,2,4,5,7,8,10,11,13,14).

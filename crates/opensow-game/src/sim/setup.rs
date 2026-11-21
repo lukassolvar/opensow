@@ -219,6 +219,10 @@ impl World {
             if let UnitKind::Unknown(_) | UnitKind::RuntimeOnly(_) = m.unit_kind() {
                 continue;
             }
+            // `0x41db60`: a side whose no-Advancer header word (34 + player) is 1 gets no Advancer from its markers either
+            if m.kind == kinds::ADVANCER && (0..2).contains(&m.player) && level.header[34 + m.player as usize] == 1 {
+                continue;
+            }
             world.add_unit(m.kind, m.player, m.x, m.y);
         }
         // each headquarters owns the first free Advancer of its side (0x41e030..0x41e0a7)
