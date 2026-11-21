@@ -1452,6 +1452,26 @@ fn pointer_types_match_the_exes_cursor_code() {
         let code = exe.at(va, 7);
         assert_eq!(code[3] as usize, p as usize, "scroll type at {va:#x}");
     }
+    // the modifier flag (`0x4179bf..0x4179e1`): four `cmp byte ptr [esi+d], 0` (80 BE d32 00) on the key-state bytes that start at
+    // `+0x64`, i.e. DirectInput codes 0x9d / 0x1d / 0xb8 / 0x38: right and left Ctrl, right and left Alt
+    let mut keys: Vec<u32> = [0x4179bf, 0x4179c8, 0x4179d1, 0x4179da]
+        .iter()
+        .map(|&va| {
+            let c = exe.at(va, 7);
+            assert_eq!((&c[..2], c[6]), (&[0x80, 0xBE][..], 0), "{va:#x}");
+            u32::from_le_bytes([c[2], c[3], c[4], c[5]]) - 0x64
+        })
+        .collect();
+    keys.sort();
+    assert_eq!(keys, [0x1d, 0x38, 0x9d, 0xb8]);
+    // over an enemy unit and over a building the type is `4 + flag` (`add eax, 4; mov [esi+0x50], eax`)
+    for va in [0x417abe, 0x417d1e] {
+        assert_eq!(exe.at(va, 6), [0x83, 0xC0, 0x04, 0x89, 0x46, 0x50], "{va:#x}");
+    }
+    assert_eq!(Pointer::Attack as u8 + 1, Pointer::AttackModifier as u8);
+    // the order's flag: always 1 on a unit (`push 1`, 0x417b2e), the modifier flag `[ebp-0xcc]` on a building (0x417d81)
+    assert_eq!(exe.at(0x417b2e, 2), [0x6A, 0x01]);
+    assert_eq!(exe.at(0x417d81, 6), [0xFF, 0xB5, 0x34, 0xFF, 0xFF, 0xFF]);
 }
 
 #[test]

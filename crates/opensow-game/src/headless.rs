@@ -126,6 +126,8 @@ fn mission_switches(game: &mut Game, args: &[String], w: usize, h: usize) {
             p.cursor = (px as i32, py as i32);
             p.edge_scroll = true;
         }
+        // headless: Ctrl or Alt held (the attack pointer type 5, and --attack on a building is a lasting chase)
+        p.attack_key = has("--attack-key");
         if let Some((cx, cy)) = get("--mouse-cell").and_then(pair) {
             // headless: the pointer sprite hovers this cell (its type follows the selection and the object there)
             let (sx, sy) = p.view.to_screen(cx * 32.0 + 16.0, cy * 32.0 + 16.0);
@@ -303,9 +305,9 @@ fn mission_switches(game: &mut Game, args: &[String], w: usize, h: usize) {
             p.world.order_move_selected(cx as i32 * 32 + 16, cy as i32 * 32 + 16);
         }
         if let Some((cx, cy)) = get("--attack").and_then(pair) {
-            // attack order of every selected unit on the building covering this cell
+            // attack order of every selected unit on the enemy at this cell, with the flag a click gives
             if let Some(t) = p.world.enemy_at(cx as i32 * 32 + 16, cy as i32 * 32 + 16) {
-                p.world.order_attack_selected(t);
+                p.world.order_attack_selected(t, matches!(t, sim::Target::Unit(_)) || p.attack_key);
             }
         }
         // --clouds D: the options' CLOUDS detail 0..=4 (the first-run default is 0 = none)

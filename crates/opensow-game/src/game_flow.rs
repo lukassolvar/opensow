@@ -41,6 +41,7 @@ impl Game {
             skirmish_menu: None,
             map_editor: None,
             ctrl: false,
+            attack_key: false,
             skirmish: None,
             stars: stars::Stars::load(),
             ingame: None,
@@ -458,6 +459,10 @@ impl Game {
 
     /// Advances everything by `dt` seconds: music, movies, the open screen, the mission.
     pub(super) fn update(&mut self, dt: f32, w: usize, h: usize) {
+        // a mission started while the key was already held sees it too
+        if let Some(p) = self.play.as_mut() {
+            p.attack_key = self.attack_key;
+        }
         crate::audio::tick();
         self.music.tick();
         if let Some(b) = self.boot.as_mut() {

@@ -54,6 +54,14 @@ impl World {
         }
     }
 
+    /// Whether the unit or building `t` still lives, whatever its side.
+    pub(super) fn target_alive(&self, t: Target) -> bool {
+        match t {
+            Target::Unit(id) => self.unit(id).is_some_and(|u| u.hp > 0),
+            Target::Structure(i) => self.structures.get(i).is_some_and(|s| s.alive()),
+        }
+    }
+
     /// The map pixel a weapon aims at for target `t`; `None` when the target is gone.
     pub(super) fn target_pos(&self, t: Target) -> Option<(i32, i32)> {
         match t {
@@ -80,7 +88,8 @@ impl World {
         for &(dx, dy) in self.rings.target_search(min as usize, (max as usize).min(63)) {
             let Some(list) = index.get(&(cell.0 + dx as i32, cell.1 + dy as i32)) else { continue };
             for &t in list {
-                if order == Some(t) && self.hostile(player, t) && !matches!(t, Target::Unit(id) if self.unit(id).is_some_and(|u| u.kind == kinds::ADVANCER)) {
+                // whatever its side: an own unit or building is an order target only through Ctrl or Alt (docs/cursor.md)
+                if order == Some(t) && !matches!(t, Target::Unit(id) if self.unit(id).is_some_and(|u| u.kind == kinds::ADVANCER)) {
                     return Some(t);
                 }
                 if !self.hostile(player, t) {

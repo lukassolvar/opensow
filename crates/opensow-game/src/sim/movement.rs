@@ -340,7 +340,8 @@ impl World {
         // stop the chassis (the exe updates top and chassis independently every tick); a unit stops where its route ends
         if let Some(t) = self.units[i].chase {
             match self.target_pos(t) {
-                Some((tx, ty)) if self.hostile(player, t) => {
+                // an own target too (Ctrl or Alt, docs/cursor.md); a captured building drops it in `finish_destruction`
+                Some((tx, ty)) if self.target_alive(t) => {
                     if self.units[i].path.is_empty() || self.tick % 7 == (i as u64 % 7) {
                         self.chase_step(i, t, (tx.div_euclid(CELL), ty.div_euclid(CELL)));
                     }

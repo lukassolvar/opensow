@@ -63,13 +63,25 @@ impl World {
         any
     }
 
-    /// Orders the selected units to attack `target`.
-    pub fn order_attack_selected(&mut self, target: Target) {
+    /// Orders the selected units to attack `target`: a lasting chase when `lasting` (a unit target, or a building with Ctrl or
+    /// Alt held), else one route towards it with no order target left (docs/controls.md).
+    pub fn order_attack_selected(&mut self, target: Target, lasting: bool) {
         // the pods of missions 3 and 8 take no attack orders (0x46a10b: they are driven by the script)
         let scripted = self.pods_scripted();
-        for u in self.units.iter_mut().filter(|u| u.selected && u.player == 0 && !(scripted && u.kind == kinds::POD)) {
-            u.chase = Some(target);
+        let tcell = self.target_pos(target).map(|(x, y)| (x.div_euclid(CELL), y.div_euclid(CELL)));
+        for i in 0..self.units.len() {
+            let u = &mut self.units[i];
+            // a unit ordered onto itself (Ctrl or Alt) is skipped (`0x417b29`)
+            if !(u.selected && u.player == 0) || (scripted && u.kind == kinds::POD) || target == Target::Unit(u.id) {
+                continue;
+            }
             u.queued = None;
+            // `0x469fe0(target, flag)` sets `[unit+0x7c]` and plans a route at once (`0x46eb40`); flag 0 then clears the target
+            // again (`0x46a141..0x46a14d`, a pod keeps it), so the unit walks that one route and its weapon picks by priority
+            u.chase = (lasting || u.kind == kinds::POD).then_some(target);
+            if let Some(tcell) = tcell {
+                self.chase_step(i, target, tcell);
+            }
         }
     }
 

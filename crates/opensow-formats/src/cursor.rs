@@ -24,8 +24,10 @@ pub enum Pointer {
     Own = 2,
     /// Over ground / own HQ with a selection: nothing special happens but a go-to (small purple arrows).
     Move = 3,
-    /// Red bracket: attack (enemy unit or building with a selection; type 5 is the variant with the modifier key).
+    /// Red brackets: attack (enemy unit or building with a selection).
     Attack = 4,
+    /// The attack brackets tilting side to side: [`Pointer::Attack`] with Ctrl or Alt held (`0x417ac1`, `0x417d21`: `4 + flag`).
+    AttackModifier = 5,
     /// The Advancer repairs this building (`0x417c4a`).
     Repair = 6,
     /// The Advancer attacks this building to capture it (`0x417cdd`).

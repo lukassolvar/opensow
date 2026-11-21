@@ -16,6 +16,14 @@ impl Game {
         }
     }
 
+    /// Ctrl or Alt held: the mission's attack modifier (docs/controls.md).
+    pub(super) fn set_attack_key(&mut self, held: bool) {
+        self.attack_key = held;
+        if let Some(p) = self.play.as_mut() {
+            p.attack_key = held;
+        }
+    }
+
     /// Typed text goes to the screen that has a text field open.
     pub(super) fn text_input(&mut self, text: &str) {
         if let Some(m) = self.map_editor.as_mut() {
