@@ -165,6 +165,8 @@ struct Game {
     map_editor: Option<mapeditor_ui::MapEditor>,
     /// Control or Command held (`WindowEvent::ModifiersChanged`).
     ctrl: bool,
+    /// Control or Alt held (`WindowEvent::ModifiersChanged`): the mission's attack modifier.
+    attack_key: bool,
     /// The running skirmish's choices (map, setup, the human's side), for RESTART (docs/skirmish.md).
     skirmish: Option<SkirmishRun>,
     /// The stars earned in skirmishes (`stars.rs`).

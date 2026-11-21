@@ -1172,7 +1172,7 @@ fn units_shoot_what_they_were_ordered_to_attack_when_it_is_in_range() {
     w.step();
     assert_eq!(w.unit(a).unwrap().target, Some(Target::Unit(enemy)));
     // ordered onto the building (in range, 4 cells away): it is shot at although the unit is closer
-    w.order_attack_selected(Target::Structure(0));
+    w.order_attack_selected(Target::Structure(0), true);
     for _ in 0..40 {
         w.step();
         assert_eq!(w.unit(a).map(|u| u.target), Some(Some(Target::Structure(0))), "tick {}", w.tick);
@@ -1324,7 +1324,7 @@ fn an_advancer_may_be_ordered_against_flyers_and_anti_air_only() {
     assert!(w.advancer_can_attack(Target::Unit(foe_aa)));
     assert!(!w.advancer_can_attack(Target::Unit(foe_gnd)));
     w.units.iter_mut().find(|u| u.id == me).unwrap().selected = true;
-    w.order_attack_selected(Target::Unit(foe_adv));
+    w.order_attack_selected(Target::Unit(foe_adv), true);
     assert!(w.unit(me).unwrap().chase.is_some());
 }
 
@@ -1356,7 +1356,7 @@ fn an_attack_order_chases_a_neutral_building() {
         dying: None,
     });
     w.units.iter_mut().find(|x| x.id == u).unwrap().selected = true;
-    w.order_attack_selected(Target::Structure(0));
+    w.order_attack_selected(Target::Structure(0), true);
     for _ in 0..3 {
         w.step();
     }
@@ -3293,7 +3293,7 @@ fn a_range_one_walker_stands_still_and_shoots_buildings_and_turrets_from_every_s
             });
             w.cheats.freeze_enemy = true;
             w.units.iter_mut().find(|u| u.id == a).unwrap().selected = true;
-            w.order_attack_selected(Target::Structure(0));
+            w.order_attack_selected(Target::Structure(0), true);
             for _ in 0..1800 {
                 w.step();
             }
@@ -3341,4 +3341,82 @@ fn new_turret_message_only_for_turret_tiers_the_level_allows() {
     assert_eq!(crossings(399), 1, "tier 2 is available");
     assert_eq!(crossings(799), 0, "tier 4 is not available");
     assert_eq!(crossings(999), 0, "tier 5 is not available");
+}
+
+/// `0x469fe0(target, flag)` from the player's click on a building: without Ctrl/Alt the flag is 0, so the unit gets one route
+/// and no order target (`0x46a141..0x46a14d` clear `[unit+0x7c]`); with the modifier it keeps a lasting chase, and a pod keeps
+/// its target either way (`0x46a147`). Catches the port treating every building attack as a lasting chase (Ctrl always held)
+/// or a one-shot order that never walks.
+#[test]
+fn a_building_attack_is_one_route_unless_ctrl_or_alt_makes_it_a_lasting_chase() {
+    for (kind, lasting, chase) in [(7, false, false), (7, true, true), (kinds::POD, false, true)] {
+        let mut w = open_world(48, 20);
+        w.structures.clear();
+        let mut lab = factory(Owner::Enemy, 6768, kinds::RESEARCH_LAB);
+        lab.kind = ObjectKind::ResearchLab;
+        lab.cell = (4, 8);
+        lab.slots.clear();
+        w.add_structure(lab);
+        let id = w.add_unit(kind, 0, 14 * CELL + 16, 9 * CELL + 16);
+        w.units.iter_mut().find(|u| u.id == id).unwrap().selected = true;
+        w.order_attack_selected(Target::Structure(0), lasting);
+        let u = w.unit(id).unwrap();
+        assert_eq!(u.chase.is_some(), chase, "kind {kind}, lasting {lasting}");
+        let end = *u.path.last().unwrap_or_else(|| panic!("kind {kind}, lasting {lasting}: no route"));
+        assert!(end.0 < (12 * CELL) as f32, "the route leads to the lab: {end:?}");
+    }
+}
+
+/// The weapon scan forces the order target's side to "enemy" (`0x47b232`), so a unit ordered onto an own unit with Ctrl or Alt
+/// shoots it; without the order it never picks an own unit. Catches the port filtering order targets by side.
+#[test]
+fn an_own_unit_as_order_target_is_shot_like_an_enemy() {
+    let mut w = open_world(30, 30);
+    let mate = w.add_unit(7, 0, 8 * CELL + 16, 10 * CELL + 16);
+    let index = w.index();
+    assert_eq!(w.find_target(&index, 0, (5, 10), 0, 8, Some(Target::Unit(mate))), Some(Target::Unit(mate)));
+    assert_eq!(w.find_target(&index, 0, (5, 10), 0, 8, None), None);
+}
+
+/// A lasting chase on an own building (Ctrl or Alt) keeps the unit on it; the target goes only when the building is rebuilt
+/// for a new owner, which gives it a new handle in the exe (`0x43ab40`). Catches the chase being dropped at once because the
+/// target is not hostile, and a chase that outlives the capture.
+#[test]
+fn a_lasting_chase_on_an_own_building_holds_until_the_building_changes_hands() {
+    let mut w = open_world(30, 20);
+    w.add_structure(factory(Owner::Player, 13000, 101));
+    w.add_unit(7, 1, 28 * CELL, 18 * CELL); // keeps the mission from ending
+    let id = w.add_unit(7, 0, 9 * CELL + 16, 6 * CELL + 16);
+    w.units.iter_mut().find(|u| u.id == id).unwrap().selected = true;
+    w.order_attack_selected(Target::Structure(0), true);
+    for _ in 0..120 {
+        w.step();
+    }
+    let u = w.unit(id).unwrap();
+    assert_eq!((u.chase, u.target), (Some(Target::Structure(0)), Some(Target::Structure(0))));
+    assert!(w.structures[0].hp < 13000, "the unit shoots its own building");
+    w.finish_destruction(0);
+    assert_eq!(w.structures[0].owner, Owner::Enemy, "nobody else damaged it: it goes to player 1");
+    assert_eq!(w.unit(id).unwrap().chase, None);
+}
+
+/// Ctrl or Alt with an Advancer selected show destroy over an own building (`0x417ba6` -> `0x417cdd`), and the destroy beam has
+/// no owner test (`0x46f3a6`, landing `0x4102cc`): it takes the building's hit points. The order ends when the building is
+/// rebuilt for its new owner. Catches the port refusing the own target, or the Advancer going on to destroy a building after
+/// it changed hands.
+#[test]
+fn an_advancer_ordered_to_destroy_an_own_building_damages_it_until_it_changes_hands() {
+    let mut w = open_world(16, 12);
+    w.add_structure(factory(Owner::Player, 13000, 101));
+    w.add_unit(7, 1, 15 * CELL, 11 * CELL);
+    let id = w.add_unit(kinds::ADVANCER, 0, 3 * CELL, 5 * CELL + 16);
+    assert!(w.order_action_with(id, 0, Action::Destroy));
+    for _ in 0..500 {
+        w.step();
+    }
+    assert!(w.structures[0].hp < 13000, "the beam damages the own building");
+    assert_eq!(w.unit(id).unwrap().action.map(|a| a.0), Some(Action::Destroy));
+    w.finish_destruction(0);
+    assert_eq!(w.unit(id).unwrap().action, None, "the rebuilt building is a new object");
+    assert!(w.beams.iter().all(|b| b.target != 0), "beams in flight miss the new object");
 }

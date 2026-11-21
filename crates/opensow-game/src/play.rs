@@ -67,6 +67,9 @@ pub struct Play {
     drag: Option<(i32, i32)>,
     /// The pointer's position in the window.
     pub cursor: (i32, i32),
+    /// Ctrl or Alt held (the exe's key bytes `+0x81`, `+0x101`, `+0x9c`, `+0x11c`, `0x4179bf`): the attack pointer becomes type 5
+    /// and a building attack a lasting chase.
+    pub attack_key: bool,
     /// Scroll when the pointer touches a window edge (only once a real pointer position is known).
     pub edge_scroll: bool,
     /// The system's cursor shows the pointer (`pointer_cursor`), so the frame does not draw it.
@@ -275,6 +278,7 @@ impl Play {
             autosave_at: 0,
             turret_range: settings.turret_range,
             orders_on_right: settings.swap_buttons,
+            attack_key: false,
             zoom_on: settings.zoom,
             notes: Vec::new(),
             bookmarks: [None; 9],
@@ -860,7 +864,8 @@ impl Play {
                         if clicked.is_some() {
                             self.ui_sounds.push(BUILDING_CLICK_SOUND); // any building, own or not (not in the exe)
                         }
-                        self.sel_building = clicked.filter(|&t| self.world.structures[t].owner == Owner::Player);
+                        // Ctrl or Alt skip the selection (`0x417ba6` jumps past `0x417bd7`)
+                        self.sel_building = clicked.filter(|&t| self.world.structures[t].owner == Owner::Player && !self.attack_key);
                     }
                 }
             }
@@ -871,7 +876,7 @@ impl Play {
     fn order_pointer(&self) -> bool {
         let selected = self.world.units.iter().any(|u| u.selected && u.player == 0);
         match self.pointer() {
-            Pointer::Destroy | Pointer::Repair | Pointer::Upgrade | Pointer::Attack => true,
+            Pointer::Destroy | Pointer::Repair | Pointer::Upgrade | Pointer::Attack | Pointer::AttackModifier => true,
             Pointer::Move => selected,
             _ => false,
         }
@@ -883,13 +888,14 @@ impl Play {
             return false;
         }
         match self.pointer() {
-            Pointer::Destroy | Pointer::Repair | Pointer::Upgrade => {
-                // the Advancer's order (`0x46b8b0` / `0x46b9f0` / `0x46bb30`)
+            pointer @ (Pointer::Destroy | Pointer::Repair | Pointer::Upgrade) => {
+                // the Advancer's order (`0x46b8b0` / `0x46b9f0` / `0x46bb30`), the one the pointer shows
+                let action = opensow_formats::advancer::action_for_pointer(pointer).expect("an Advancer pointer");
                 if let Some(t) = self.world.structure_at(p.0, p.1) {
                     let advancers: Vec<u32> = self.world.player_units().filter(|u| u.selected && u.kind == kinds::ADVANCER).map(|u| u.id).collect();
                     let mut ordered = false;
                     for id in advancers {
-                        ordered |= self.world.order_action(id, t);
+                        ordered |= self.world.order_action_with(id, t, action);
                     }
                     if ordered {
                         self.ui_sounds.push(55); // tt-dest
@@ -897,12 +903,13 @@ impl Play {
                     }
                 }
             }
-            Pointer::Attack => {
-                if let Some(t) = self.world.enemy_at(p.0, p.1) {
+            Pointer::Attack | Pointer::AttackModifier => {
+                if let Some(t) = self.attack_target(p) {
                     if let Target::Structure(k) = t {
                         self.world.blink(k);
                     }
-                    self.world.order_attack_selected(t);
+                    // the order's flag: always 1 on a unit (`0x417b2e`), the modifier on a building (`0x417d81`)
+                    self.world.order_attack_selected(t, matches!(t, Target::Unit(_)) || self.attack_key);
                     self.ui_sounds.push(59); // unit-attack
                 }
             }
@@ -1048,39 +1055,77 @@ impl Play {
         }
         let advancer = self.world.player_units().any(|u| u.selected && u.kind == kinds::ADVANCER);
         let selected = self.world.units.iter().any(|u| u.selected && u.player == 0);
-        // an own unit under the pointer
-        if self.world.units.iter().any(|u| u.hp > 0 && u.player == 0 && (u.x - mx as f32).hypot(u.sprite_y() - my as f32) < 22.0) {
-            return Pointer::Own;
+        // an own unit under the pointer; Ctrl or Alt send it down the attack path (`0x417a1d`), which needs a selection
+        if let Some(t) = self.own_unit_at(mx, my) {
+            if !self.attack_key {
+                return Pointer::Own;
+            }
+            if !selected {
+                return self.ground_pointer(mx, my, false, false);
+            }
+            return if advancer && !self.world.advancer_can_attack(t) { Pointer::Move } else { Pointer::AttackModifier };
         }
         if let Some(t @ Target::Unit(_)) = self.world.enemy_at(mx, my).filter(|t| matches!(t, Target::Unit(_))) {
             // `0x417a8c`: the Advancer only gets the attack pointer over flyers (enemy Advancers) and anti-air units
             return if advancer && !self.world.advancer_can_attack(t) {
                 Pointer::Move
             } else if selected {
-                Pointer::Attack
+                self.attack_pointer()
             } else {
                 Pointer::Arrow
             };
         }
         if let Some(t) = self.world.structure_at(mx, my) {
+            let own = self.world.structures[t].owner == Owner::Player;
+            // Ctrl or Alt over an own building: destroy with an Advancer (`0x417cdd`), else attack (`0x417ba6` -> `0x417cba`)
             if advancer {
-                return self.world.advancer_pointer(0, t);
+                return if own && self.attack_key { Pointer::Destroy } else { self.world.advancer_pointer(0, t) };
             }
-            return if self.world.structures[t].owner == Owner::Player {
+            return if own && !self.attack_key {
                 Pointer::Own
             } else if selected {
-                Pointer::Attack
+                self.attack_pointer()
             } else {
                 Pointer::Arrow
             };
         }
-        // open ground: blocked cells only matter for walkers (the Advancer flies, `0x6d7a4c` instead of `0x6c7a4c`)
+        self.ground_pointer(mx, my, advancer, selected)
+    }
+
+    /// The pointer over open ground: blocked cells only matter for walkers (the Advancer flies, `0x6d7a4c` instead of `0x6c7a4c`).
+    fn ground_pointer(&self, mx: i32, my: i32, advancer: bool, selected: bool) -> Pointer {
         if !advancer && self.world.is_blocked(mx.div_euclid(CELL), my.div_euclid(CELL)) {
             Pointer::Blocked
         } else if selected {
             Pointer::Move
         } else {
             Pointer::Arrow
+        }
+    }
+
+    /// The living own unit under map point `(mx, my)`, if any.
+    fn own_unit_at(&self, mx: i32, my: i32) -> Option<Target> {
+        let u = self.world.units.iter().find(|u| u.hp > 0 && u.player == 0 && (u.x - mx as f32).hypot(u.sprite_y() - my as f32) < 22.0);
+        u.map(|u| Target::Unit(u.id))
+    }
+
+    /// What the attack pointer at map point `p` points at: with Ctrl or Alt an own unit or building too, in the order the
+    /// pointer tests them (own unit, enemy unit, building).
+    fn attack_target(&self, p: (i32, i32)) -> Option<Target> {
+        if !self.attack_key {
+            return self.world.enemy_at(p.0, p.1);
+        }
+        self.own_unit_at(p.0, p.1)
+            .or_else(|| self.world.enemy_at(p.0, p.1).filter(|t| matches!(t, Target::Unit(_))))
+            .or_else(|| self.world.structure_at(p.0, p.1).map(Target::Structure))
+    }
+
+    /// The attack pointer over an enemy with a selection: type `4 + flag` (`0x417abb`, `0x417d17`), 5 with Ctrl or Alt held.
+    fn attack_pointer(&self) -> Pointer {
+        if self.attack_key {
+            Pointer::AttackModifier
+        } else {
+            Pointer::Attack
         }
     }
 

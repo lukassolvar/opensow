@@ -22,7 +22,8 @@ impl World {
         let me = if unit.player == 0 { Owner::Player } else { Owner::Enemy };
         s.alive()
             && match action {
-                Action::Destroy => s.owner != me,
+                // no owner test (`0x46f3a6`): Ctrl or Alt order it onto an own building; a capture ends it (`finish_destruction`)
+                Action::Destroy => true,
                 Action::Repair => s.owner == me && s.hp < s.max_hp,
                 Action::Upgrade => s.owner == me && s.active < s.slots.len(),
             }
@@ -30,11 +31,16 @@ impl World {
 
     /// Orders the Advancer `id` onto structure `target`: it flies to the building's cell and shoots its beam there.
     pub fn order_action(&mut self, id: u32, target: usize) -> bool {
-        let Some(u) = self.unit(id) else { return false };
-        if u.kind != kinds::ADVANCER {
+        let Some(action) = self.unit(id).and_then(|u| self.action_for(u, target)) else { return false };
+        self.order_action_with(id, target, action)
+    }
+
+    /// Orders the Advancer `id` to do `action` on structure `target` (the pointer's action: destroy on an own building with
+    /// Ctrl or Alt held, `0x417cdd`).
+    pub fn order_action_with(&mut self, id: u32, target: usize, action: Action) -> bool {
+        if self.unit(id).is_none_or(|u| u.kind != kinds::ADVANCER) || self.structures.get(target).is_none_or(|s| !s.alive()) {
             return false;
         }
-        let Some(action) = self.action_for(u, target) else { return false };
         let cell = self.structures[target].action_cell();
         // `0x46b8b0` calls `0x4706a0` with order type 1 (a normal go-to, `0x46b9c6`), not the straight type 2 of the factory
         // exits (`0x408890`): the wave route and the local avoidance apply, so an Advancer already hovering over the cell blocks
@@ -208,7 +214,7 @@ impl World {
         let t = b.target;
         // the target is looked up by its id (`[bullet+0x2688]`): a building that changed hands meanwhile is a new object
         let me = if b.side == 0 { Owner::Player } else { Owner::Enemy };
-        let valid = self.structures.get(t).is_some_and(|s| s.alive() && (s.owner != me) == (b.action == Action::Destroy));
+        let valid = self.structures.get(t).is_some_and(|s| s.alive() && (b.action == Action::Destroy || s.owner == me));
         if !valid {
             return;
         }

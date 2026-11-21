@@ -130,6 +130,17 @@ impl World {
                 s.attacked = false;
                 s.sat_cd = 0;
                 s.slots.iter_mut().for_each(|sl| sl.progress = 0);
+                // the rebuilt building is a new object with a new handle: chases, Advancer orders and beams that hold the old one
+                // find nothing (`0x46eb40`, `0x46f394`, `0x4102b6`)
+                for u in self.units.iter_mut() {
+                    if u.chase == Some(Target::Structure(i)) {
+                        u.chase = None;
+                    }
+                    if u.action.is_some_and(|(_, k)| k == i) {
+                        u.action = None;
+                    }
+                }
+                self.beams.retain(|b| b.target != i);
             }
             None => {
                 for c in self.structures[i].blocked_cells() {

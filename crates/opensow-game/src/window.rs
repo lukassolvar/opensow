@@ -304,6 +304,7 @@ impl ApplicationHandler for App {
             WindowEvent::ModifiersChanged(mods) => {
                 let st = mods.state();
                 self.game.set_ctrl(st.control_key() || st.super_key());
+                self.game.set_attack_key(st.control_key() || st.alt_key());
             }
             WindowEvent::CursorLeft { .. } => {
                 // macOS: the pointer crossed the window's edge (onto another display): back to where it left
@@ -332,6 +333,7 @@ impl ApplicationHandler for App {
                 self.focused = false;
                 self.confine_cursor();
                 self.game.set_ctrl(false);
+                self.game.set_attack_key(false);
                 if let Some(m) = self.game.map_editor.as_mut() {
                     m.release_keys();
                 }

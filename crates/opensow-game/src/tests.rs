@@ -1992,3 +1992,109 @@ fn the_first_switch_to_warmonger_plays_its_intro_once() {
     g.lands_event(lands::Event::Edition(Edition::Warmonger));
     assert!(g.intro.is_none() && g.lands.is_some(), "only the first switch plays it");
 }
+
+/// Ctrl or Alt (`0x4179bf`) turn the attack pointer into type 5 (`0x417d21`) and make a building attack a lasting chase
+/// (`0x417d81`: the flag goes to `0x469fe0`); without them a building click is one route. Catches the port showing type 4
+/// with the key held, or always (never) keeping the building as a chase target.
+#[test]
+fn ctrl_or_alt_turns_the_building_attack_into_a_lasting_chase() {
+    use opensow_formats::cursor::Pointer;
+    let Some(mut g) = game() else { return };
+    let (w, h) = (1024, 768);
+    g.start("M01");
+    g.update(0.0, w, h);
+    let (id, b) = {
+        let p = g.play.as_mut().unwrap();
+        let b = (0..p.world.structures.len())
+            .find(|&k| p.world.structures[k].alive() && p.world.structures[k].owner != opensow_formats::level::Owner::Player)
+            .expect("an enemy building");
+        let (bx, by) = p.world.structures[b].center();
+        // the building at a third of the screen's width, clear of the HUD
+        p.view.x = bx as f32 - w as f32 / p.view.zoom / 3.0;
+        p.view.y = by as f32 - h as f32 / p.view.zoom / 2.0;
+        p.world.clear_selection();
+        let id = p.world.add_unit_near(7, 0, bx, by + 200).unwrap();
+        p.world.units.iter_mut().find(|u| u.id == id).unwrap().selected = true;
+        (id, b)
+    };
+    let (bx, by) = g.play.as_ref().unwrap().world.structures[b].center();
+    let (sx, sy) = g.play.as_ref().unwrap().view.to_screen(bx as f32, by as f32);
+    for (held, pointer, lasting) in [(false, Pointer::Attack, false), (true, Pointer::AttackModifier, true)] {
+        g.set_attack_key(held);
+        g.mouse_moved(sx, sy, w, h);
+        assert_eq!(g.play.as_ref().unwrap().pointer(), pointer, "key held: {held}");
+        g.mouse_button(MouseButton::Left, true, sx, sy, w, h);
+        g.mouse_button(MouseButton::Left, false, sx, sy, w, h);
+        assert_eq!(g.play.as_ref().unwrap().world.unit(id).unwrap().chase.is_some(), lasting, "key held: {held}");
+    }
+}
+
+/// With Ctrl or Alt held the exe takes the attack path over own objects too (`0x417a1d`, `0x417ba6`): type 5 and a lasting
+/// attack over an own building or unit with a selection, destroy (7) over an own building with an Advancer, and no selection
+/// of an own building without one. Catches the port still selecting or showing the select pointer there.
+#[test]
+fn ctrl_or_alt_attack_own_units_and_buildings() {
+    use opensow_formats::cursor::Pointer;
+    let Some(mut g) = game() else { return };
+    let (w, h) = (1024, 768);
+    g.start("M01");
+    g.update(0.0, w, h);
+    let (b, shooter, mate, adv) = {
+        let p = g.play.as_mut().unwrap();
+        let b = (0..p.world.structures.len())
+            .find(|&k| p.world.structures[k].alive() && p.world.structures[k].owner == opensow_formats::level::Owner::Player)
+            .expect("an own building");
+        let (bx, by) = p.world.structures[b].center();
+        p.view.x = bx as f32 - w as f32 / p.view.zoom / 3.0;
+        p.view.y = by as f32 - h as f32 / p.view.zoom / 2.0;
+        p.world.clear_selection();
+        let shooter = p.world.add_unit_near(7, 0, bx, by + 150).unwrap();
+        let mate = p.world.add_unit_near(7, 0, bx + 150, by).unwrap();
+        let adv = p.world.player_units().find(|u| u.kind == kinds::ADVANCER).unwrap().id;
+        (b, shooter, mate, adv)
+    };
+    let screen = |g: &Game, x: f32, y: f32| g.play.as_ref().unwrap().view.to_screen(x, y);
+    let (bx, by) = g.play.as_ref().unwrap().world.structures[b].center();
+    let (sx, sy) = screen(&g, bx as f32, by as f32);
+    let click = |g: &mut Game, x: i32, y: i32| {
+        g.mouse_moved(x, y, w, h);
+        g.mouse_button(MouseButton::Left, true, x, y, w, h);
+        g.mouse_button(MouseButton::Left, false, x, y, w, h);
+    };
+    let pointer = |g: &Game| g.play.as_ref().unwrap().pointer();
+    g.set_attack_key(true);
+    // nothing selected: the arrow, and the click selects nothing
+    g.mouse_moved(sx, sy, w, h);
+    assert_eq!(pointer(&g), Pointer::Arrow);
+    click(&mut g, sx, sy);
+    assert_eq!(g.play.as_ref().unwrap().sel_building, None);
+    // a unit selected: type 5 over the own building, the click is a lasting attack on it
+    g.play.as_mut().unwrap().world.units.iter_mut().find(|u| u.id == shooter).unwrap().selected = true;
+    g.mouse_moved(sx, sy, w, h);
+    assert_eq!(pointer(&g), Pointer::AttackModifier);
+    click(&mut g, sx, sy);
+    assert_eq!(g.play.as_ref().unwrap().world.unit(shooter).unwrap().chase, Some(sim::Target::Structure(b)));
+    // and over an own unit
+    let (mx, my) = g.play.as_ref().unwrap().world.unit(mate).map(|u| (u.x, u.sprite_y())).unwrap();
+    let (ux, uy) = screen(&g, mx, my);
+    g.mouse_moved(ux, uy, w, h);
+    assert_eq!(pointer(&g), Pointer::AttackModifier);
+    click(&mut g, ux, uy);
+    assert_eq!(g.play.as_ref().unwrap().world.unit(shooter).unwrap().chase, Some(sim::Target::Unit(mate)));
+    assert!(!g.play.as_ref().unwrap().world.unit(mate).unwrap().selected, "the click does not select");
+    // the Advancer selected: destroy over the own building
+    {
+        let p = g.play.as_mut().unwrap();
+        p.world.clear_selection();
+        p.world.units.iter_mut().find(|u| u.id == adv).unwrap().selected = true;
+    }
+    g.mouse_moved(sx, sy, w, h);
+    assert_eq!(pointer(&g), Pointer::Destroy);
+    click(&mut g, sx, sy);
+    let a = g.play.as_ref().unwrap().world.unit(adv).unwrap().action;
+    assert_eq!(a.map(|a| a.1), Some(b));
+    // released: the own building is the select pointer again
+    g.set_attack_key(false);
+    g.mouse_moved(sx, sy, w, h);
+    assert_ne!(pointer(&g), Pointer::Destroy);
+}
