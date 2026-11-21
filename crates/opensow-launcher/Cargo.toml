@@ -1,6 +1,6 @@
 [package]
 name = "opensow-launcher"
-version = "0.4.0"
+version = "0.4.1"
 description = "OpenSOW launcher: choose the language and the install folder of each game"
 edition.workspace = true
 license.workspace = true
