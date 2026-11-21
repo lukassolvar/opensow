@@ -764,9 +764,7 @@ impl Play {
             st.set(0x2e4 + 8 * k as u32, *x as u32);
             st.set(0x2e8 + 8 * k as u32, *y as u32);
         }
-        let slot = |own: Vec<usize>, at: usize| {
-            own.get(at % own.len().max(1)).map(|&i| self.world.units[i].slot).filter(|&s| s != u32::MAX).unwrap_or(0)
-        };
+        let slot = |own: Vec<usize>, at: usize| own.get(at % own.len().max(1)).map(|&i| self.world.units[i].slot).filter(|&s| s != u32::MAX).unwrap_or(0);
         st.set(0x2dc, slot(self.own_units(false), self.tab_next));
         st.set(0x2e0, slot(self.own_units(true), self.adv_next));
     }

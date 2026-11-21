@@ -454,7 +454,11 @@ fn bookmarks_and_the_tab_and_h_round_robins_survive_a_save() {
     p.select_next_unit();
     p.select_next_advancer();
     let picked = |p: &mut play::Play, advancer: bool| {
-        if advancer { p.select_next_advancer() } else { p.select_next_unit() }
+        if advancer {
+            p.select_next_advancer()
+        } else {
+            p.select_next_unit()
+        }
         p.world.units.iter().find(|u| u.selected).map(|u| (u.kind, u.x as i32, u.y as i32))
     };
     let payload = p.snapshot();
