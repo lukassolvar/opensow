@@ -1,6 +1,6 @@
 [package]
 name = "opensow-viewer"
-version = "0.4.1"
+version = "0.4.2"
 description = "Level viewer for State of War maps"
 edition.workspace = true
 license.workspace = true
