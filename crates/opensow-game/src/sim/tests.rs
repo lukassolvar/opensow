@@ -2168,6 +2168,34 @@ fn a_shot_at_an_advancer_meets_its_hovering_sprite() {
     assert_eq!(aim, (u.px().0, u.px().1 + h / 2));
 }
 
+/// `0x40e03e`/`0x40e029`: the 1x2 turrets 4 and 5 get their gun unit on the footprint's lower cell (`[bld+8] + 1`, `0x40e04b`),
+/// and the ground search `0x47b140` runs from the gun. Warmonger M07's turret 4 at (4,55) reaches the windtrap at ring 8 from
+/// its top cell but ring 9 from the gun, so the original leaves it alone.
+#[test]
+fn a_tall_turret_searches_from_its_gun_on_the_lower_cell() {
+    let shoot = |target: (i32, i32)| {
+        let mut w = open_world(30, 30);
+        let mut t = factory(Owner::Enemy, 1, 0);
+        t.kind = ObjectKind::Turret(4);
+        t.kind_id = 28;
+        t.cell = (10, 10);
+        t.weapon = 112;
+        t.aim = TopAim::new(112, 0);
+        t.max_hp = 2100;
+        t.hp = 2100;
+        t.slots.clear();
+        w.structures.clear();
+        w.add_structure(t);
+        w.add_unit(kinds::POD, 0, target.0 * CELL + 16, target.1 * CELL + 16);
+        (0..120).any(|_| {
+            w.step();
+            w.structures[0].target.is_some()
+        })
+    };
+    assert!(!shoot((14, 3)), "(4,-7) from the top cell is (4,-8) from the gun: ring 9, out of range");
+    assert!(shoot((14, 18)), "(4,7) from the gun is ring 8, in range");
+}
+
 #[test]
 fn a_turret_shell_starts_at_the_muzzle_point_of_the_table() {
     // a synthetic `.po1` table: every facing's stored point is (0, 30), so the muzzle is 30 px above the top's anchor

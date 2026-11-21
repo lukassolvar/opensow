@@ -151,7 +151,11 @@ impl World {
             let p = &self.structures[i].aim.as_ref().unwrap().params;
             (p.min_range, p.max_range, p.steps)
         };
-        let cell = self.structures[i].cell;
+        // both searches run from the gun unit's cell, the lower one for the 1x2 turrets 4 and 5 (`0x40e04b`)
+        let cell = {
+            let (x, y) = opensow_formats::buildings::turret_top_pos(self.structures[i].kind_id, self.structures[i].cell);
+            (x.div_euclid(CELL), y.div_euclid(CELL))
+        };
         if self.structures[i].weapon == 110 {
             // the anti-air turret shoots aircraft, then an enemy Advancer (air-grid search)
             let (sx, sy) = self.structures[i].center();
