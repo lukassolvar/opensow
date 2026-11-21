@@ -1,6 +1,6 @@
 [package]
 name = "opensow-tools"
-version = "0.4.0"
+version = "0.4.1"
 description = "Command-line asset inspection and extraction for State of War"
 edition.workspace = true
 license.workspace = true
