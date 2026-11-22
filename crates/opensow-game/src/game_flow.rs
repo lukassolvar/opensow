@@ -192,6 +192,7 @@ impl Game {
     /// Starts campaign level `level`.
     pub(super) fn start(&mut self, level: &str) {
         self.skirmish = None;
+        self.assets.art.set_team(TeamColour::DEFAULT);
         match Play::new(&mut self.assets, level, &self.settings, self.carry_counter) {
             Ok(p) => {
                 self.play_music(&format!("Level{:02}", 1 + music::pick(4)));

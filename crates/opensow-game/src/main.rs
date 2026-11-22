@@ -67,6 +67,7 @@ use menu::{Action, Screen, Settings, SPEEDS};
 use opensow_formats::kinds;
 use opensow_formats::GameDir;
 use opensow_viewer::screenshot::write_png;
+use opensow_viewer::team::TeamColour;
 use play::Play;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -201,6 +202,13 @@ struct SkirmishRun {
     default_setup: bool,
     /// A custom map's file (`map` is then its stars key `custom/<stem>`), docs/map-editor-ingame.md.
     custom: Option<std::path::PathBuf>,
+    /// The human's and the computer's colours (saves made before the picker have none: blue and green).
+    #[serde(default = "default_team")]
+    colours: [TeamColour; 2],
+}
+
+fn default_team() -> [TeamColour; 2] {
+    TeamColour::DEFAULT
 }
 
 struct App {

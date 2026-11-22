@@ -191,7 +191,7 @@ impl Play {
         custom: Option<(opensow_formats::custommap::Ground, Vec<opensow_formats::custommap::ObjectExt>)>,
     ) -> Result<Play, String> {
         let start = level.clone();
-        let (scene, ext) = match custom {
+        let (mut scene, ext) = match custom {
             // a custom map: its base mission, or its generated layout (docs/generated-maps.md)
             Some((ground, ext)) => (crate::custom_maps::load_scene(&assets.game, &ground, 0, None, Some(level))?, ext),
             None => {
@@ -199,6 +199,8 @@ impl Play {
                 (Scene::load_with(&game, &terrain, 0, None, Some(level))?, Vec::new())
             }
         };
+        // the scene's own sprites are the exe's blue and green; the skirmish's colours come from `assets.art`
+        scene.place_with(&mut assets.art);
         let mut play = Play::with_scene(assets, map, scene, settings, 0)?;
         play.world.difficulty = difficulty;
         play.world.skirmish = true;

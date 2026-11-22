@@ -1,5 +1,6 @@
 //! Resolves level objects to sprite frames from the game's `sprites.data` archive.
 
+use crate::team::{self, TeamColour};
 use opensow_formats::anim::{phase_after, walk_params, WalkParams};
 use opensow_formats::buildings::BuildingAnim;
 use opensow_formats::fire::FireTables;
@@ -158,6 +159,8 @@ pub struct Art {
     /// The language pack's own `sprites.data` (`Data\DiffData\<pack>`): its files (HUD frame, pause menu, money, shortcuts ...) replace the base ones.
     local: Option<MegaFile>,
     cache: HashMap<String, Option<Rc<Vec<Frame>>>>,
+    /// The colours players 0 and 1 are drawn in (docs/skirmish.md; not in the exe): team sheets of another colour are recoloured.
+    team: [TeamColour; 2],
 }
 
 fn building_stem(kind: ObjectKind) -> Option<&'static str> {
@@ -183,7 +186,20 @@ impl Art {
             let (i, b) = (game.resolve(&format!("Data\\DiffData\\{d}\\sprites.info"))?, game.resolve(&format!("Data\\DiffData\\{d}\\sprites.data"))?);
             MegaFile::open(&i, &b).ok()
         });
-        Some(Art { mega, local, cache: HashMap::new() })
+        Some(Art { mega, local, cache: HashMap::new(), team: TeamColour::DEFAULT })
+    }
+
+    /// The colours players 0 and 1 are drawn in.
+    pub fn team(&self) -> [TeamColour; 2] {
+        self.team
+    }
+
+    /// Draws players 0 and 1 in these colours from now on (team sheets loaded before are dropped from the cache).
+    pub fn set_team(&mut self, team: [TeamColour; 2]) {
+        if team != self.team {
+            self.team = team;
+            self.cache.retain(|name, _| team::sheet(name).is_none());
+        }
     }
 
     /// Sprite file `name` (e.g. `units\\chA_blue.ps6`) from `sprites.data`, cached.
@@ -197,6 +213,10 @@ impl Art {
             .or_else(|| self.mega.find(name).and_then(|e| self.mega.read(e).ok()))
             .and_then(|d| sprite::parse(&d, kind).ok())
             .filter(|f| !f.is_empty())
+            .map(|frames| match team::sheet(name) {
+                Some((player, paint)) if self.team[player] != paint.colour() => frames.iter().map(|f| team::recolour(f, paint, self.team[player])).collect(),
+                _ => frames,
+            })
             .map(Rc::new);
         self.cache.insert(name.to_owned(), parsed.clone());
         parsed

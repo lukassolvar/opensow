@@ -9,4 +9,5 @@ pub mod record;
 pub mod render;
 pub mod scene;
 pub mod screenshot;
+pub mod team;
 pub mod upscale;

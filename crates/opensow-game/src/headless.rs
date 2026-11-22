@@ -466,6 +466,9 @@ fn screen_switches(game: &mut Game, args: &[String], w: usize, h: usize) {
                 if has("--guest") {
                     m.press(skirmish_ui::Hit::Swap);
                 }
+                if let Some(c) = colours_arg(&get) {
+                    m.colours = c;
+                }
                 if has("--changed") {
                     m.press(skirmish_ui::Hit::Step(0, 11));
                 }
@@ -744,8 +747,16 @@ fn dev_switches(game: &mut Game, args: &[String]) {
     }
 }
 
+/// `--colours YOU,COMPUTER` (e.g. `red,teal`): the players' colours of the skirmish setup screen.
+fn colours_arg(get: &dyn Fn(&str) -> Option<String>) -> Option<[TeamColour; 2]> {
+    let v = get("--colours")?;
+    let named = |n: &str| TeamColour::ALL.into_iter().find(|c| format!("{c:?}").eq_ignore_ascii_case(n.trim()));
+    let (a, b) = v.split_once(',')?;
+    Some([named(a)?, named(b)?]).filter(|[a, b]| a != b)
+}
+
 /// `--skirmish MAP [--side green] [--difficulty easy|normal|hard|brutal] [--credits BLUE,GREEN] [--research BLUE,GREEN]
-/// [--spectate [--blue-difficulty D]]`: the lobby's choices from the command line (docs/skirmish.md), headless or windowed.
+/// [--colours YOU,COMPUTER] [--spectate [--blue-difficulty D]]`: the lobby's choices from the command line (docs/skirmish.md), headless or windowed.
 pub(super) fn start_skirmish_from_args(game: &mut Game, map: &str, get: &dyn Fn(&str) -> Option<String>, has: &dyn Fn(&str) -> bool) {
     let pair = |k: &str| get(k).and_then(|s| s.split_once(',').and_then(|(a, b)| Some((a.parse::<i32>().ok()?, b.parse::<i32>().ok()?))));
     let level = |k: &str| sim::Difficulty::ALL.into_iter().find(|d| get(k).is_some_and(|v| v.eq_ignore_ascii_case(d.name())));
@@ -758,6 +769,7 @@ pub(super) fn start_skirmish_from_args(game: &mut Game, map: &str, get: &dyn Fn(
         pair("--research"),
         difficulty,
         spectate,
+        colours_arg(get),
     );
 }
 

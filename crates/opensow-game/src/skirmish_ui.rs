@@ -8,14 +8,14 @@
 use crate::assets::{load_backdrop, Assets};
 use crate::multiplayer::{display_names, Setup};
 use crate::page::{
-    arrow, capitalised, hud_icon, mark, outline, rect, ring, star_shape, stepper_arrows, turret_picture, Ink, Picture, ACCENT, BLUE, GOLD, GREEN, MUTED, SIDE,
-    T, TEXT, WARN,
+    arrow, capitalised, hud_icon, mark, outline, rect, ring, star_shape, stepper_arrows, turret_picture, Ink, Picture, ACCENT, GOLD, MUTED, T, TEXT, WARN,
 };
 use crate::sim::Difficulty;
 use crate::tr::Tr;
 use crate::ui::{self, Image, Rect};
 use opensow_formats::lang::LangFile;
 use opensow_formats::level::{Level, ObjectKind};
+use opensow_viewer::team::TeamColour;
 
 /// The in-game sprites of the air-force rows in `multiplayer::AIR_ROWS` order (fighter, bomber, tripler, carryall, asteroid; first
 /// frame, the bomber flying right, docs/air.md); the cards carry no names, the pictures say it.
@@ -38,6 +38,8 @@ pub enum Hit {
     Swap,
     LevelDown,
     LevelUp,
+    /// A player's colour stepper (0 the human, 1 the computer): the previous (`false`) or next (`true`) free colour.
+    Colour(usize, bool),
     /// One of the 14 arrows of a side (`Setup::arrow` numbering within the side: 2 per row, "-" then "+"; rows 0-4 air forces,
     /// 5 credits, 6 research).
     Step(usize, usize),
@@ -231,6 +233,14 @@ impl Geo {
         rect(row.x + row.w * at / 100, row.y + 4, row.w * wide / 100, row.h - 8)
     }
 
+    /// Player `i`'s colour stepper: from the end of its name to the swap button / the level stepper of its row.
+    fn colour_stepper(&self, i: usize) -> Rect {
+        let row = self.player_rows()[i];
+        let x = row.x + if self.list.is_some() { 28 + 170 } else { 28 + 128 } - 12;
+        let end = if i == 0 { self.swap_button().x } else { self.level_stepper().x } - 12;
+        rect(x, row.y + 4, (end - x).min(230), row.h - 8)
+    }
+
     fn swap_button(&self) -> Rect {
         let row = self.player_rows()[0];
         let w = row.w * 28 / 100;
@@ -307,6 +317,8 @@ pub struct SkirmishMenu {
     defaults: Setup,
     /// The human's side: 0 blue, 1 green.
     pub local: usize,
+    /// The human's and the computer's colours (not in the exe).
+    pub colours: [TeamColour; 2],
     /// The computer's strength.
     pub difficulty: Difficulty,
     stars: crate::stars::Stars,
@@ -377,6 +389,7 @@ impl SkirmishMenu {
             setup: Setup::default(),
             defaults: Setup::default(),
             local: 0,
+            colours: TeamColour::DEFAULT,
             difficulty: Difficulty::Normal,
             stars: stars.clone(),
             preview: None,
@@ -496,6 +509,11 @@ impl SkirmishMenu {
         }
     }
 
+    /// The colour of whoever starts on map side `side` (0 blue, 1 green).
+    fn side_colour(&self, side: usize) -> TeamColour {
+        self.colours[usize::from(side != self.local)]
+    }
+
     fn string(&self, i: usize) -> String {
         self.strings.as_ref().and_then(|s| s.get(i)).map(|s| s.trim().to_owned()).unwrap_or_default()
     }
@@ -542,6 +560,11 @@ impl SkirmishMenu {
         let (down, up) = Geo::stepper(g.level_stepper());
         out.push((t.r(down), Hit::LevelDown));
         out.push((t.r(up), Hit::LevelUp));
+        for i in 0..2 {
+            let (prev, next) = Geo::stepper(g.colour_stepper(i));
+            out.push((t.r(prev), Hit::Colour(i, false)));
+            out.push((t.r(next), Hit::Colour(i, true)));
+        }
         for (r, row) in [(0, 5), (1, 6)] {
             for side in 0..2 {
                 let (minus, plus) = Geo::stepper(g.resource_stepper(r, side));
@@ -615,6 +638,10 @@ impl SkirmishMenu {
             Hit::Swap => {
                 self.local ^= 1;
                 self.sounds.push(39);
+            }
+            Hit::Colour(i, forward) => {
+                self.colours[i] = self.colours[i].step(forward, self.colours[i ^ 1]);
+                self.sounds.push(33);
             }
             Hit::LevelDown | Hit::LevelUp => {
                 self.difficulty = if hit == Hit::LevelUp { self.difficulty.next() } else { self.difficulty.prev() };
@@ -869,14 +896,14 @@ impl SkirmishMenu {
             let side = if i == 0 { self.local } else { self.local ^ 1 };
             let r = t.r(row);
             ui::fill(c, w, h, r, (10, 30, 16), 230);
-            ui::fill(c, w, h, Rect { x: r.x, y: r.y, w: t.len(10).max(3), h: r.h }, SIDE[side], 255);
+            let colour = self.side_colour(side);
+            ui::fill(c, w, h, Rect { x: r.x, y: r.y, w: t.len(10).max(3), h: r.h }, colour.rgb(), 255);
             let bp = px(g.body_px);
             let ty = r.y + (r.h - bp) / 2 - 2;
             let sx = r.x + t.len(if g.list.is_some() { 28 + 170 } else { 28 + 128 });
             self.ink.fit(c, w, h, if i == 0 { tr.you() } else { tr.computer() }, r.x + t.len(28), ty, bp, TEXT, sx - r.x - t.len(28 + 10));
-            // the side's name ends before the swap button / the level stepper of its row
-            let end = if i == 0 { t.r(g.swap_button()).x } else { t.r(g.level_stepper()).x };
-            self.ink.fit(c, w, h, tr.side(side == 1), sx, ty + t.len(2), px(g.body_px - 3), SIDE[side], (end - sx - t.len(10)).min(t.len(170)));
+            let cs = t.r(g.colour_stepper(i));
+            self.stepper(c, w, h, cs, tr.colour(colour), px(g.body_px - 3), colour.rgb(), self.hover, Hit::Colour(i, false), Hit::Colour(i, true));
         }
         if self.tab == Tab::Original {
             let sw = t.r(g.swap_button());
@@ -908,9 +935,19 @@ impl SkirmishMenu {
         // resources
         self.panel(c, w, h, &g, &t, g.resources, tr.resources());
         for side in 0..2 {
-            let head = tr.side_short(side == 1);
+            let colour = self.side_colour(side);
+            let head = tr.colour(colour).to_uppercase();
             let hp = px(g.small_px);
-            self.ink.text(c, w, h, head, t.x(g.side_col(side)) - self.ink.width(head, hp) / 2, t.y(g.resources.y + (g.hh - g.small_px) / 2), hp, SIDE[side]);
+            self.ink.text(
+                c,
+                w,
+                h,
+                &head,
+                t.x(g.side_col(side)) - self.ink.width(&head, hp) / 2,
+                t.y(g.resources.y + (g.hh - g.small_px) / 2),
+                hp,
+                colour.rgb(),
+            );
         }
         for (r, row) in g.resource_rows().into_iter().enumerate() {
             let rr = t.r(row);
@@ -941,7 +978,7 @@ impl SkirmishMenu {
                     t.r(g.resource_stepper(r, side)),
                     &v.to_string(),
                     px(g.body_px + 2),
-                    SIDE[side],
+                    self.side_colour(side).rgb(),
                     self.hover,
                     Hit::Step(side, k),
                     Hit::Step(side, k + 1),
@@ -972,13 +1009,24 @@ impl SkirmishMenu {
                     if turret {
                         let on = self.setup.sides[side].turrets[i as usize];
                         let hot = self.hover == Some(Hit::Turret(side, i as usize));
-                        ui::fill(c, w, h, r, if on { SIDE[side] } else { (34, 38, 36) }, 255);
-                        outline(c, w, h, r, if hot { (255, 255, 255) } else { SIDE[side] }, 1);
+                        ui::fill(c, w, h, r, if on { self.side_colour(side).rgb() } else { (34, 38, 36) }, 255);
+                        outline(c, w, h, r, if hot { (255, 255, 255) } else { self.side_colour(side).rgb() }, 1);
                         mark(c, w, h, r, on);
                     } else {
                         let v = self.setup.sides[side].air[i as usize];
                         let k = i as usize * 2;
-                        self.stepper(c, w, h, r, &v.to_string(), px(g.small_px), SIDE[side], self.hover, Hit::Step(side, k), Hit::Step(side, k + 1));
+                        self.stepper(
+                            c,
+                            w,
+                            h,
+                            r,
+                            &v.to_string(),
+                            px(g.small_px),
+                            self.side_colour(side).rgb(),
+                            self.hover,
+                            Hit::Step(side, k),
+                            Hit::Step(side, k + 1),
+                        );
                     }
                 }
             }
@@ -1032,8 +1080,7 @@ impl SkirmishMenu {
         // one cell of the full picture in window pixels
         let k = dw as f32 / th.full_w as f32 * 32.0;
         let colour = |side: i32| match side {
-            0 => BLUE,
-            1 => GREEN,
+            0 | 1 => self.side_colour(side as usize).rgb(),
             _ => (215, 215, 215),
         };
         let dot = |c: &mut [u32], x: f32, y: f32, n: i32, col: (u8, u8, u8)| {
@@ -1094,6 +1141,8 @@ mod tests {
             let (minus, plus) = Geo::stepper(g.resource_stepper(0, 1));
             assert!(minus.x + minus.w <= plus.x);
             assert!(g.resource_stepper(0, 0).x + g.resource_stepper(0, 0).w <= g.resource_stepper(0, 1).x, "the two columns do not overlap");
+            let (you, computer) = (g.colour_stepper(0), g.colour_stepper(1));
+            assert!(you.x + you.w <= g.swap_button().x && computer.x + computer.w <= g.level_stepper().x, "the colour steppers end before their row's button");
         }
         assert!(Geo::wide().visible_rows() >= 14, "the base game's maps fit without scrolling");
         assert!(Geo::for_window(640, 480).list.is_none() && Geo::for_window(1920, 1080).list.is_some());
@@ -1159,6 +1208,23 @@ mod tests {
         assert_eq!(m.map, 1);
         assert_eq!(m.press(Hit::Start), Event::Start);
         assert_eq!(m.escape(), Event::Leave);
+    }
+
+    #[test]
+    fn the_players_never_share_a_colour_and_keep_theirs_when_swapping_sides() {
+        let Some((mut m, _)) = menu() else { return };
+        assert_eq!(m.colours, TeamColour::DEFAULT);
+        m.press(Hit::Colour(0, true));
+        assert_eq!(m.colours[0], TeamColour::Red, "blue's next is green, the computer's: skipped");
+        for _ in 0..TeamColour::ALL.len() * 2 {
+            m.press(Hit::Colour(1, false));
+            assert_ne!(m.colours[0], m.colours[1]);
+        }
+        m.colours = [TeamColour::Teal, TeamColour::Purple];
+        assert_eq!([m.side_colour(0), m.side_colour(1)], [TeamColour::Teal, TeamColour::Purple]);
+        m.press(Hit::Swap);
+        assert_eq!([m.side_colour(0), m.side_colour(1)], [TeamColour::Purple, TeamColour::Teal], "the human's colour moves to the green side");
+        assert!(m.is_default(), "colours do not cost the star");
     }
 
     #[test]

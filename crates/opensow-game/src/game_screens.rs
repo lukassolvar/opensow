@@ -165,8 +165,12 @@ impl Game {
         research: Option<(i32, i32)>,
         difficulty: sim::Difficulty,
         spectate: Option<sim::Difficulty>,
+        colours: Option<[TeamColour; 2]>,
     ) {
         let mut menu = skirmish_ui::SkirmishMenu::new(&mut self.assets, &self.stars);
+        if let Some(c) = colours {
+            menu.colours = c;
+        }
         // `custom/<file stem>`: a map of the maps folder (docs/map-editor-ingame.md)
         if map.to_lowercase().starts_with("custom/") {
             menu.set_tab(skirmish_ui::Tab::Custom);
@@ -194,6 +198,7 @@ impl Game {
                 spectate,
                 default_setup: menu.is_default(),
                 custom: menu.custom_path(),
+                colours: menu.colours,
             };
             self.start_skirmish(run, script);
         }
@@ -240,6 +245,7 @@ impl Game {
                     spectate: None,
                     default_setup: false,
                     custom,
+                    colours: TeamColour::DEFAULT,
                 }
             }
         };
@@ -266,6 +272,7 @@ impl Game {
         let human = if mission.is_some() { 0 } else { run.human };
         let (map, level) = (run.map.clone(), skirmish::prepare(&script, &run.setup, human));
         let custom = loaded.map(|m| (m.ground(), m.ext));
+        self.assets.art.set_team(run.colours);
         match Play::new_skirmish(&mut self.assets, &map, level, &self.settings, run.difficulty, custom) {
             Ok(mut p) => {
                 if let Some(m) = mission {
@@ -339,6 +346,7 @@ impl Game {
                             spectate: None,
                             default_setup: m.is_default(),
                             custom: m.custom_path(),
+                            colours: m.colours,
                         },
                         script,
                     ),
