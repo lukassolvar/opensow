@@ -331,8 +331,8 @@ pub fn draw(l: &Layout, st: &State, assets: &mut Assets, buf: &mut [u32], w: usi
         }
         let px = (s.ceil() as i32).max(1);
         let at = |cx: i32, cy: i32| (l.radar.x + (cx as f32 * s) as i32, l.radar.y + (cy as f32 * s) as i32);
-        let blue = (99, 150, 255);
-        let green = (0, 255, 0);
+        // the exe's blue and green, or the skirmish's colours (docs/skirmish.md)
+        let [blue, green] = assets.art.team().map(|c| c.radar());
         // units: a plus of five cells (`0x45481b`)
         for un in st.world.units.iter().filter(|un| un.hp > 0) {
             let c = if un.player == 0 { blue } else { green };

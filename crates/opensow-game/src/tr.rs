@@ -124,9 +124,18 @@ impl Tr {
         })
     }
 
-    /// The short column heads over the two sides' values.
-    pub fn side_short(self, green: bool) -> &'static str {
-        self.pick(if green { ["GREEN", "ZELENÁ", "ZELENÁ", "绿队", "綠隊"] } else { ["BLUE", "MODRÁ", "MODRÁ", "蓝队", "藍隊"] })
+    /// A player colour's name (skirmish setup).
+    pub fn colour(self, c: opensow_viewer::team::TeamColour) -> &'static str {
+        use opensow_viewer::team::TeamColour::*;
+        self.pick(match c {
+            Blue => ["Blue", "Modrá", "Modrá", "蓝色", "藍色"],
+            Green => ["Green", "Zelená", "Zelená", "绿色", "綠色"],
+            Red => ["Red", "Červená", "Červená", "红色", "紅色"],
+            Yellow => ["Yellow", "Žltá", "Žlutá", "黄色", "黃色"],
+            Teal => ["Teal", "Tyrkysová", "Tyrkysová", "青色", "青色"],
+            Purple => ["Purple", "Fialová", "Fialová", "紫色", "紫色"],
+            Pink => ["Pink", "Ružová", "Růžová", "粉色", "粉色"],
+        })
     }
 
     pub fn swap(self) -> &'static str {

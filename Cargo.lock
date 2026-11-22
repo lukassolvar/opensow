@@ -1653,6 +1653,7 @@ dependencies = [
  "jpeg-decoder",
  "opensow-formats",
  "png",
+ "serde",
  "softbuffer",
  "winit",
 ]

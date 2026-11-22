@@ -30,6 +30,7 @@ Sprite arrays (loader `0x424800..0x4255..`, `0x45dab0(name, array, count)`): rad
 - Units: five-pixel plus per unit at its cell; list 0 colour 0x325f / 0x64bf (blue), list 1 0x3e0 / 0x7e0 (green) - the second
   of each pair is the RGB565 one (`[0x517aec] == 2`). Buildings: footprint rectangles `[b+4..b+0xc) x [b+8..b+0x10)` cells,
   colour by owner `[b+0x8c]` 0 blue, 1 green, 2 white (0xffff / 0x7fff), drawn only while `(t mod 60) < 45` (blink).
+  **Differs from the exe:** in a skirmish with other player colours the unit and building dots take those colours (docs/skirmish.md "Player colours").
   Camera rectangle: white outline at camera/32, ceil(W/32) x ceil(H/32) cells. OpenSOW: same (`hud::draw`).
 
   **Differs from the exe:** while the view sits in the map's top-right corner, clicks on the radar go through to the map (`Play::radar_passes_through`), so objects under it stay reachable.

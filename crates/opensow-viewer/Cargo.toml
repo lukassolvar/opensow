@@ -19,6 +19,7 @@ path = "src/main.rs"
 opensow-formats.workspace = true
 jpeg-decoder = "0.3"
 png = "0.17"
+serde = { version = "1.0.229", features = ["derive"] }
 softbuffer = "0.4"
 winit = "0.30"
 

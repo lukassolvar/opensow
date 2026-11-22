@@ -159,6 +159,11 @@ impl Scene {
         self.placed = build_placed(game, self.level.as_ref(), self.facing, self.aim);
     }
 
+    /// Re-places the sprites from `art` (the skirmish's team colours, `Art::set_team`).
+    pub fn place_with(&mut self, art: &mut Art) {
+        self.placed = place_all(art, self.level.as_ref(), self.facing, self.aim);
+    }
+
     /// Re-places every unit with a new facing (sprites only; the terrain is kept).
     pub fn set_facing(&mut self, game: &GameDir, facing: usize) {
         self.facing = facing % 32;
@@ -205,8 +210,12 @@ pub fn load_ground(game: &GameDir, name: &str) -> Result<Ground, String> {
 }
 
 fn build_placed(game: &GameDir, level: Option<&Level>, facing: usize, aim: Option<usize>) -> Vec<Placed> {
+    Art::open(game).map_or_else(Vec::new, |mut art| place_all(&mut art, level, facing, aim))
+}
+
+fn place_all(art: &mut Art, level: Option<&Level>, facing: usize, aim: Option<usize>) -> Vec<Placed> {
     let mut placed = Vec::new();
-    if let (Some(level), Some(mut art)) = (level, Art::open(game)) {
+    if let Some(level) = level {
         placed.extend(level.objects.iter().enumerate().flat_map(|(i, o)| art.place(i, o)));
         placed.extend(level.markers.iter().enumerate().flat_map(|(i, m)| art.place_marker(i, m, facing, aim)));
         placed.sort_by_key(|p| (p.sort_y, p.layer));

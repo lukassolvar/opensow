@@ -31,7 +31,7 @@ fn fingerprint(g: &Game) -> Fingerprint {
 #[test]
 fn a_skirmish_save_on_a_shipped_map_loads_back() {
     let Some(mut g) = game() else { return };
-    g.headless_skirmish("03-Gold", 0, Some((7777, 5000)), None, sim::Difficulty::Hard, None);
+    g.headless_skirmish("03-Gold", 0, Some((7777, 5000)), None, sim::Difficulty::Hard, None, None);
     assert!(g.skirmish.is_some(), "the skirmish started");
     for _ in 0..400 {
         g.play.as_mut().unwrap().world.step();
@@ -68,6 +68,7 @@ fn a_skirmish_save_on_a_custom_map_loads_back_also_one_without_the_stored_run() 
         spectate: None,
         default_setup: true,
         custom: Some(path.clone()),
+        colours: TeamColour::DEFAULT,
     };
     g.start_skirmish(run, script);
     for _ in 0..400 {
@@ -114,6 +115,7 @@ fn a_skirmish_save_on_a_generated_map_loads_back() {
         spectate: None,
         default_setup: true,
         custom: Some(path.clone()),
+        colours: TeamColour::DEFAULT,
     };
     g.start_skirmish(run, m.level.clone());
     let ground = g.play.as_ref().unwrap().scene.bg.clone();
@@ -391,7 +393,7 @@ fn streams_for_the_exe_load_check() {
         }
     }
     for map in ["01-First", "03-Gold", "05-Nuclear", "08-Island"] {
-        g.headless_skirmish(map, 0, None, None, sim::Difficulty::Normal, None);
+        g.headless_skirmish(map, 0, None, None, sim::Difficulty::Normal, None, None);
         if g.play.is_some() {
             dump(&mut g, &format!("skirmish_{map}"));
         }
@@ -1603,23 +1605,23 @@ fn a_win_with_the_default_setup_earns_the_levels_star_and_a_changed_setup_does_n
     };
     assert_eq!(g.stars.get("01-First Spark"), None);
     // a loss earns nothing
-    g.headless_skirmish("01-First", 0, None, None, sim::Difficulty::Normal, None);
+    g.headless_skirmish("01-First", 0, None, None, sim::Difficulty::Normal, None, None);
     g.play.as_mut().unwrap().world.outcome = Some(sim::Outcome::Defeat);
     g.update(0.0, w, h);
     assert_eq!(g.stars.get("01-First Spark"), None);
     // a win with the map's own setup: silver for Normal
-    g.headless_skirmish("01-First", 0, None, None, sim::Difficulty::Normal, None);
+    g.headless_skirmish("01-First", 0, None, None, sim::Difficulty::Normal, None, None);
     win(&mut g);
     assert_eq!(g.stars.get("01-First Spark"), Some(sim::Difficulty::Normal));
     // changed credits (or research, air, turrets): no star, even on Brutal
-    g.headless_skirmish("01-First", 0, Some((801, 800)), None, sim::Difficulty::Brutal, None);
+    g.headless_skirmish("01-First", 0, Some((801, 800)), None, sim::Difficulty::Brutal, None, None);
     win(&mut g);
     assert_eq!(g.stars.get("01-First Spark"), Some(sim::Difficulty::Normal));
     // an easier win with the default setup never lowers it; the side is not part of the setup
-    g.headless_skirmish("01-First", 1, None, None, sim::Difficulty::Easy, None);
+    g.headless_skirmish("01-First", 1, None, None, sim::Difficulty::Easy, None, None);
     win(&mut g);
     assert_eq!(g.stars.get("01-First Spark"), Some(sim::Difficulty::Normal));
-    g.headless_skirmish("01-First", 1, None, None, sim::Difficulty::Hard, None);
+    g.headless_skirmish("01-First", 1, None, None, sim::Difficulty::Hard, None, None);
     win(&mut g);
     assert_eq!(g.stars.get("01-First Spark"), Some(sim::Difficulty::Hard));
     // the lobby shows it
@@ -1646,7 +1648,7 @@ fn a_skirmish_starts_with_the_lobbys_choices_for_either_side_and_restarts() {
     let Some(mut g) = game() else { return };
     g.mute = true;
     // blue: the human keeps the map's player 0 side
-    g.headless_skirmish("01-First", 0, Some((1234, 77)), Some((300, 0)), sim::Difficulty::Hard, None);
+    g.headless_skirmish("01-First", 0, Some((1234, 77)), Some((300, 0)), sim::Difficulty::Hard, None, None);
     let p = g.play.as_ref().expect("the match started");
     assert_eq!((p.world.credits[0], p.world.credits[1]), (1234, 77));
     assert_eq!(p.world.research[0], 300);
@@ -1656,7 +1658,7 @@ fn a_skirmish_starts_with_the_lobbys_choices_for_either_side_and_restarts() {
         p.world.structures.iter().find(|s| s.kind_id == kinds::HEADQUARTERS && s.owner == opensow_formats::level::Owner::Player).map(|s| s.cell).unwrap();
     assert_eq!(blue_hq, (16, 3), "First Spark's blue HQ");
     // green: the sides are exchanged, so the human (player 0) sits at the green HQ and has green's resources
-    g.headless_skirmish("01-First", 1, Some((1234, 77)), None, sim::Difficulty::Normal, None);
+    g.headless_skirmish("01-First", 1, Some((1234, 77)), None, sim::Difficulty::Normal, None, None);
     let p = g.play.as_ref().unwrap();
     assert_eq!((p.world.credits[0], p.world.credits[1]), (77, 1234));
     let hq = p.world.structures.iter().find(|s| s.kind_id == kinds::HEADQUARTERS && s.owner == opensow_formats::level::Owner::Player).map(|s| s.cell).unwrap();
@@ -2227,4 +2229,42 @@ fn ctrl_or_alt_attack_own_units_and_buildings() {
     g.set_attack_key(false);
     g.mouse_moved(sx, sy, w, h);
     assert_ne!(pointer(&g), Pointer::Destroy);
+}
+
+#[test]
+fn a_skirmish_save_keeps_its_colours_and_one_from_before_the_picker_plays_blue_against_green() {
+    let run = SkirmishRun {
+        map: "m".into(),
+        setup: Default::default(),
+        human: 0,
+        difficulty: Default::default(),
+        spectate: None,
+        default_setup: true,
+        custom: None,
+        colours: [TeamColour::Pink, TeamColour::Teal],
+    };
+    let mut json = serde_json::to_value(&run).unwrap();
+    assert_eq!(serde_json::from_value::<SkirmishRun>(json.clone()).unwrap().colours, [TeamColour::Pink, TeamColour::Teal]);
+    json.as_object_mut().unwrap().remove("colours");
+    assert_eq!(serde_json::from_value::<SkirmishRun>(json).unwrap().colours, TeamColour::DEFAULT);
+}
+
+#[test]
+fn skirmish_colours_do_not_follow_into_the_campaign() {
+    let Some(mut g) = game() else { return };
+    let script = skirmish::load_map(&g.assets.game, "01-First Spark").expect("First Spark");
+    let run = SkirmishRun {
+        map: "01-First Spark".into(),
+        setup: multiplayer::Setup::skirmish_default(&script),
+        human: 0,
+        difficulty: sim::Difficulty::Easy,
+        spectate: None,
+        default_setup: true,
+        custom: None,
+        colours: [TeamColour::Red, TeamColour::Yellow],
+    };
+    g.start_skirmish(run, script);
+    assert_eq!(g.assets.art.team(), [TeamColour::Red, TeamColour::Yellow]);
+    g.start("M01");
+    assert_eq!(g.assets.art.team(), TeamColour::DEFAULT);
 }
